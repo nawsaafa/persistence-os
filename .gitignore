@@ -1,0 +1,53 @@
+# Vertical adapters contain client IP — never published
+verticals/**/schema.edn
+verticals/**/policy.edn
+verticals/**/handlers/
+verticals/**/secrets/
+!verticals/README.md
+!verticals/_template/
+
+# Datom logs — operator-controlled, never checked in
+**/datom_log/
+**/*.datom-segment
+**/*.datom-segment.zst
+
+# Private keys — ed25519 signing keys stay local
+**/keys/
+**/*.pem
+**/*.key
+
+# Paper working files
+paper/*.aux
+paper/*.log
+paper/*.out
+paper/*.bbl
+paper/*.blg
+paper/.texpadtmp/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+
+# Benchmark caches
+bench/cache/
+bench/.datasets/
+
+# OpenTelemetry local collector data
+.otel-local/

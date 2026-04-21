@@ -61,6 +61,43 @@ class AuditEntry:
     run_id: str | None = None
     parent: str | None = None
 
+    def __post_init__(self) -> None:
+        """Format invariants on :attr:`op` (ARIS Round 3 P-op-invariants).
+
+        ``op`` must be a well-formed EDN keyword:
+
+        - leading ``:``,
+        - at most one forward slash (``/``) — a bare keyword like
+          ``:decide`` is valid, and so is ``:llm/call``; but
+          ``:llm/call/extra`` breaks the audit datom's ``/ → .``
+          encoding,
+        - no literal ``.`` anywhere — a literal dot collides with the
+          same encoding, so ``datom_to_audit_entry ∘ audit_entry_to_datom``
+          would cease to be identity.
+        """
+        op = self.op
+        if not isinstance(op, str):
+            raise ValueError(
+                f"AuditEntry.op must be a string, got {type(op).__name__}"
+            )
+        if not op:
+            raise ValueError("AuditEntry.op must not be empty")
+        if not op.startswith(":"):
+            raise ValueError(
+                f"AuditEntry.op {op!r} must have a leading colon "
+                "(EDN keyword form, e.g. ':llm/call')"
+            )
+        if op.count("/") > 1:
+            raise ValueError(
+                f"AuditEntry.op {op!r} has multiple forward slashes — "
+                "the audit datom encoding requires at most one '/'"
+            )
+        if "." in op:
+            raise ValueError(
+                f"AuditEntry.op {op!r} contains a literal dot — collides "
+                "with the audit datom's '/' → '.' encoding"
+            )
+
     # ---- helpers ----
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,6 +105,58 @@ class AuditEntry:
 
     def with_fields(self, **changes: Any) -> AuditEntry:
         return dataclasses.replace(self, **changes)
+
+    def to_edn(self) -> dict[str, Any]:
+        """Return the EDN wire form that conforms to
+        ``:persistence.effect/audit-entry`` (ARIS Round 3 P-audit-conform).
+
+        The spec is aligned with this dataclass's field set, so this is
+        the *single producer* of the :audit-entry boundary. Verdicts are
+        keyworded via :func:`persistence.effect.verdicts.as_edn`, so a
+        Python ``"ok"`` becomes ``":ok"``. The principal dict goes
+        through :func:`_principal_to_keyword_map` so bare-string keys
+        become EDN keywords. Keys whose value is ``None`` and whose spec
+        slot is optional are omitted to keep the wire form tight.
+        """
+        edn: dict[str, Any] = {
+            ":audit/id": self.id,
+            ":audit/op": self.op,
+            ":audit/args-hash": self.args_hash,
+            ":audit/verdict": _verdict_as_edn(self.verdict),
+            ":audit/latency-ms": self.latency_ms,
+            ":audit/recorded-at": _recorded_at_to_inst(self.recorded_at),
+            ":audit/handler-chain": list(self.handler_chain),
+            ":audit/principal": _principal_to_keyword_map(self.principal),
+        }
+        # Optional fields: include only when meaningful. ``None`` is a
+        # valid (maybe) value for :prev-hash, :result-hash, :error etc.;
+        # emit it explicitly so downstream readers see the intended slot.
+        if self.prev_hash is not None:
+            edn[":audit/prev-hash"] = self.prev_hash
+        if self.result_hash is not None:
+            edn[":audit/result-hash"] = self.result_hash
+        if self.error is not None:
+            edn[":audit/error"] = self.error
+        if self.policy_id is not None:
+            edn[":audit/policy-id"] = self.policy_id
+        if self.run_id is not None:
+            # run_id comes in as a plain UUID string; conform expects uuid_().
+            import uuid as _uuid
+            try:
+                edn[":audit/run-id"] = _uuid.UUID(self.run_id) if isinstance(self.run_id, str) else self.run_id
+            except (ValueError, AttributeError):
+                edn[":audit/run-id"] = self.run_id
+        if self.parent is not None:
+            edn[":audit/parent"] = self.parent
+        # Self-conform at output — a malformed AuditEntry fails loudly
+        # here instead of polluting the audit log.
+        from persistence.spec import conform as _conform
+        result = _conform(":persistence.effect/audit-entry", edn)
+        if not result.is_ok:
+            raise ValueError(
+                f"AuditEntry.to_edn produced a non-conformant value: {result}"
+            )
+        return edn
 
 
 # ---------------------------------------------------------------------------
@@ -326,7 +415,7 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
         "latency_ms": entry.latency_ms,
         "error": entry.error,
     }
-    return {
+    datom = {
         ":datom/e": entry.run_id or entry.id,
         ":datom/a": a_keyword,
         ":datom/v": value,
@@ -338,6 +427,17 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
         ":datom/provenance": provenance,
         ":datom/invalidated-by": None,
     }
+    # Self-conform at the wire boundary (ARIS Round 3 P-audit-conform).
+    # Symmetric with ``fact/wire.py::datom_to_wire`` which has done this
+    # since Round 2. A malformed datom fails loudly here instead of
+    # travelling quietly into the fact store.
+    from persistence.spec import conform as _conform
+    result = _conform(":persistence.fact/datom", datom)
+    if not result.is_ok:
+        raise ValueError(
+            f"audit_entry_to_datom produced a non-conformant datom: {result}"
+        )
+    return datom
 
 
 def datom_to_audit_entry(datom: dict[str, Any]) -> AuditEntry:

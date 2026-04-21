@@ -38,11 +38,12 @@ def test_audit_api_importable_from_package():
         verify_chain,
     )
     # Construct a minimal AuditEntry to sanity-check the re-export.
+    # ARIS R3 P-op-invariants: op must be a leading-colon EDN keyword.
     e = AuditEntry(
-        id="sha256:abc", prev_hash=None, op="llm/call", args_hash="sha256:d",
+        id="sha256:abc", prev_hash=None, op=":llm/call", args_hash="sha256:d",
         verdict="ok", latency_ms=1, recorded_at=1_712_000_000.0,
     )
-    assert e.op == "llm/call"
+    assert e.op == ":llm/call"
 
 
 def test_handler_factories_importable_from_package():

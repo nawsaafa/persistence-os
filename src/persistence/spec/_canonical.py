@@ -310,30 +310,36 @@ _cost = keys(
     optional={":category": _keyword_spec},
 )
 
-# ARIS R1 F6 — ``make_audit_handler(policy_id=None)`` is the default;
-# requiring a keyword here means every in-module test fails conform on
-# its own entries. Move :audit/policy-id to optional. When present, it
-# must still be a namespaced keyword.
+# ARIS Round 3 P-audit-conform: the spec is now aligned with the actual
+# :class:`persistence.effect.handlers.audit.AuditEntry` dataclass shape
+# so ``AuditEntry.to_edn()`` can self-conform at output. Before, the
+# spec listed 14 keys with zero overlap with the dataclass — an orphan
+# that no producer could satisfy (R1 N1 + R3 N3).
+#
+# Required keys reflect every non-nullable dataclass field. Optional
+# keys reflect ``Optional[...]`` annotated fields (``result_hash``,
+# ``error``, ``policy_id``, ``run_id``, ``parent``, ``prev_hash``).
+# The map is open (extra keys tolerated), so demo-level extras like
+# ``:audit/args`` or ``:audit/cost`` that were in the old spec can
+# still be carried without breaking conform.
 _audit_entry = keys(
     required={
-        ":audit/id": uuid_(),
-        ":audit/run-id": uuid_(),
-        ":audit/parent": maybe(uuid_()),
+        ":audit/id": _sha256_spec,
         ":audit/op": ref(":persistence.effect/op"),
-        ":audit/args": map_of(str_(), _any_value),
-        ":audit/args-hash": str_(),
+        ":audit/args-hash": _sha256_spec,
         ":audit/verdict": _verdict,
-        ":audit/result": _any_value,
         ":audit/latency-ms": int_(),
-        ":audit/cost": _cost,
-        ":audit/valid-from": inst(),
         ":audit/recorded-at": inst(),
         ":audit/handler-chain": seq_of(_keyword_spec),
         ":audit/principal": map_of(_keyword_spec, _any_value),
-        ":audit/prev-hash": maybe(str_()),
     },
     optional={
-        ":audit/policy-id": _keyword_spec,
+        ":audit/prev-hash": maybe(_sha256_spec),
+        ":audit/result-hash": maybe(_sha256_spec),
+        ":audit/error": maybe(str_()),
+        ":audit/policy-id": maybe(_keyword_spec),
+        ":audit/run-id": maybe(uuid_()),
+        ":audit/parent": maybe(or_(uuid_(), _sha256_spec)),
     },
 )
 register(":persistence.effect/audit-entry", _audit_entry)
@@ -346,10 +352,14 @@ register(":persistence.effect/audit-entry", _audit_entry)
 PLAN_NODE_KINDS = (
     # control operators
     ":seq", ":par", ":choice", ":loop", ":race", ":let", ":branch",
+    # choice arms (per agent2 §1 ``[:case pred branch]``)
+    ":case",
     # leaves
     ":tool-call", ":llm-call", ":code", ":checkpoint",
     # cognitive operators
     ":reflect", ":verify", ":call-skill",
+    # binding / dataflow
+    ":ref",
 )
 
 _plan_kind = enum(*PLAN_NODE_KINDS)
@@ -384,18 +394,157 @@ class _VersionSpec(Spec):
 _version_spec = _VersionSpec()
 
 
-_plan_node = keys(
-    required={
-        ":node/id": _sha256_spec,
-        ":node/kind": _plan_kind,
-    },
-    optional={
-        ":node/children": seq_of(_any_value),  # recursive; we don't enforce shape here
-        ":node/args": map_of(_keyword_spec, _any_value),
-        ":node/docstring": str_(),
-        ":node/meta": map_of(_keyword_spec, _any_value),
-    },
-)
+class _PlanNodeVector(Spec):
+    """Vector-shaped plan AST node per docs/agent2-plan-spec.md §1 + §8.
+
+    Shape: ``[:node-type {attrs} & children]`` — an EDN vector whose
+    first element is a keyword tag in :data:`PLAN_NODE_KINDS`, whose
+    second element is a keyword-keyed attribute map (required key:
+    ``:id`` — a content-addressed sha256 string), and whose remaining
+    elements are recursive child nodes (each itself conforming to
+    ``:persistence.plan/node``).
+
+    Paper §4.7 elevates spec-first plan-node as a methodology contribution
+    (parse-don't-validate at the AST level), so the shape matches the
+    human-readable AST example in §8 rather than the map-form it used
+    to be registered as. See ARIS Round 3 P-plan-node.
+    """
+
+    spec_name: str = ":persistence.plan/node"
+
+    def _conform(self, value):
+        # Must be a vector (list/tuple). Strings and dicts get clear hints.
+        if isinstance(value, (str, bytes, bytearray)):
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=f"expected list/tuple, got {type(value).__name__}",
+                hint="plan nodes are vectors: [:tag {attrs} & children]",
+            )
+        if isinstance(value, dict):
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason="expected list/tuple (vector form), got dict (map form)",
+                hint=(
+                    "ARIS Round 3: plan nodes are now vectors "
+                    "[:tag {attrs} & children], not {:node/id ... :node/kind ...}"
+                ),
+            )
+        if not isinstance(value, (list, tuple)):
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=f"expected list/tuple, got {type(value).__name__}",
+                hint="plan nodes are vectors: [:tag {attrs} & children]",
+            )
+        if len(value) < 2:
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=f"vector length {len(value)} < 2",
+                hint=(
+                    "plan nodes need at least a tag and an attrs map: "
+                    "[:tag {:id ...} & children]"
+                ),
+            )
+
+        tag, attrs, *children = value
+
+        # Index 0: a keyword tag from PLAN_NODE_KINDS (or :case inside :choice)
+        tag_result = _plan_kind.conform(tag)
+        if not tag_result.is_ok:
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=f"tag {tag!r} is not a recognised plan node kind",
+                path=(0,),
+                sub_errors=(tag_result,),  # type: ignore[arg-type]
+                hint=(
+                    f"use one of: {list(PLAN_NODE_KINDS)}"
+                ),
+            )
+
+        # Index 1: attrs map with :id required
+        if not isinstance(attrs, dict):
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=f"attrs (index 1) must be a dict, got {type(attrs).__name__}",
+                path=(1,),
+                hint="second element is an attribute map like {:id 'sha256:...'}",
+            )
+        if ":id" not in attrs:
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason="attrs missing required ':id' key",
+                path=(1,),
+                hint="every plan node must carry a content-addressed :id",
+            )
+        id_result = _sha256_spec.conform(attrs[":id"])
+        if not id_result.is_ok:
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=":id must be a sha256 string",
+                path=(1, ":id"),
+                sub_errors=(id_result,),  # type: ignore[arg-type]
+                hint="generate via (sha256 (pr-str node-without-meta))",
+            )
+        # All attr keys must be keywords.
+        for k in attrs.keys():
+            kr = _keyword_spec.conform(k)
+            if not kr.is_ok:
+                return ConformError(
+                    spec_key=self.spec_name,
+                    value=value,
+                    reason=f"attrs key {k!r} is not a keyword",
+                    path=(1, k),
+                    sub_errors=(kr,),  # type: ignore[arg-type]
+                    hint="attr keys must be EDN keywords like ':tool', ':join'",
+                )
+
+        # Children: each must itself conform recursively. Deferred through
+        # the registry ref so circular resolution works during module load.
+        errors: list[ConformError] = []
+        for i, child in enumerate(children):
+            # A plain :ref indirection (per doc §1 "binding / dataflow")
+            # takes the form [:ref :symbol] — a 2-vector whose second
+            # element is a bare keyword, not a nested node. We accept it
+            # as a valid child by detecting the head tag.
+            if (
+                isinstance(child, (list, tuple))
+                and len(child) == 2
+                and child[0] == ":ref"
+                and isinstance(child[1], str)
+                and _keyword_spec.conform(child[1]).is_ok
+            ):
+                continue
+            sub = self.conform(child)
+            if not sub.is_ok:
+                errors.append(sub.with_path(2 + i))  # type: ignore[union-attr]
+
+        if errors:
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=f"{len(errors)} child/children failed",
+                sub_errors=tuple(errors),
+            )
+
+        # Normalise to a tuple so the conformed value is hashable-ish and
+        # deterministic; children left as-is (they may be tuples already).
+        return Conformed(value=tuple(value), spec_key=self.spec_name)
+
+    def _generate(self):
+        """Minimal leaf generator — produces ``[:seq {:id sha256:xx}]``."""
+        import secrets
+        node_id = "sha256:" + secrets.token_hex(4)
+        return [":seq", {":id": node_id}]
+
+
+_plan_node = _PlanNodeVector()
 register(":persistence.plan/node", _plan_node)
 
 

@@ -111,6 +111,26 @@ def _is_banned_call(node: ast.Call, source_lines: list[str]) -> str | None:
     return None
 
 
+def _scan_source_for_violations(src: str) -> list[str]:
+    """Run the lint's AST walker on a string and return a list of
+    ``"<desc>"`` violation strings. Factored out so the plant-and-catch
+    self-test below can exercise the detector on a planted violation
+    without polluting the real tree (ARIS Round 3 P-rigor-polish G1).
+    """
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return []
+    source_lines = src.splitlines()
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            desc = _is_banned_call(node, source_lines)
+            if desc:
+                out.append(f"line {node.lineno}: {desc}")
+    return out
+
+
 def test_no_wall_clock_calls_in_production_code():
     offences: list[str] = []
     for path in _iter_source_files():
@@ -118,11 +138,11 @@ def test_no_wall_clock_calls_in_production_code():
             src = path.read_text()
         except OSError:
             continue
+        source_lines = src.splitlines()
         try:
             tree = ast.parse(src)
         except SyntaxError:
             continue
-        source_lines = src.splitlines()
         for node in ast.walk(tree):
             if isinstance(node, ast.Call):
                 desc = _is_banned_call(node, source_lines)
@@ -140,3 +160,74 @@ def test_no_wall_clock_calls_in_production_code():
             "line. Violations:\n  " + "\n  ".join(sorted(offences))
         )
         raise AssertionError(msg)
+
+
+# ---------------------------------------------------------------------------
+# Plant-and-catch self-test for the lint itself (ARIS Round 3 G1).
+#
+# Before this, the lint passed as long as production code was clean —
+# but a regression that silently broke the detector (e.g. refactoring
+# _is_banned_call to always return None) would make every future
+# violation pass unnoticed. This self-test plants each banned call
+# pattern and confirms the detector flags it.
+# ---------------------------------------------------------------------------
+
+
+def test_lint_detects_planted_datetime_now():
+    planted = "import datetime\n" "datetime.now()\n"
+    violations = _scan_source_for_violations(planted)
+    assert violations, (
+        "lint failed to flag a planted datetime.now() — detector regression"
+    )
+    assert any("datetime.now" in v for v in violations), violations
+
+
+def test_lint_detects_planted_time_time():
+    planted = "import time\n" "time.time()\n"
+    violations = _scan_source_for_violations(planted)
+    assert any("time.time" in v for v in violations), violations
+
+
+def test_lint_detects_planted_random_random():
+    planted = "import random\n" "random.random()\n"
+    violations = _scan_source_for_violations(planted)
+    assert any("random.random" in v for v in violations), violations
+
+
+def test_lint_detects_planted_uuid_uuid4():
+    planted = "import uuid\n" "uuid.uuid4()\n"
+    violations = _scan_source_for_violations(planted)
+    assert any("uuid.uuid4" in v for v in violations), violations
+
+
+def test_lint_detects_planted_chained_dt_datetime_now():
+    """``dt.datetime.now()`` via the a.b.c chain."""
+    planted = "import datetime as dt\n" "dt.datetime.now()\n"
+    violations = _scan_source_for_violations(planted)
+    assert any("datetime.now" in v for v in violations), violations
+
+
+def test_lint_does_not_flag_noqa_annotated_call():
+    planted = (
+        "import datetime\n"
+        "datetime.now()  # noqa: wall-clock -- deliberate for docstring\n"
+    )
+    violations = _scan_source_for_violations(planted)
+    assert not violations, f"noqa annotation ignored: {violations}"
+
+
+def test_lint_plant_in_tempfile_gets_flagged(tmp_path):
+    """End-to-end plant: write a real .py file with a planted
+    ``datetime.now()`` and assert the shared detector would flag it.
+    """
+    planted_file = tmp_path / "planted.py"
+    planted_file.write_text(
+        "import datetime\n"
+        "def stamp():\n"
+        "    return datetime.now()\n"
+    )
+    src = planted_file.read_text()
+    violations = _scan_source_for_violations(src)
+    assert violations, (
+        f"planted file {planted_file} produced no violations — detector broken"
+    )

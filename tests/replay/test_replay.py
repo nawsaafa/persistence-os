@@ -173,6 +173,11 @@ def test_multi_step_simultaneous_interventions_produce_consistent_hash(
     replay must be deterministic (same hash across two identical invocations).
 
     toy_obs_stream has 4 steps; intervene on step 1 (action) and step 3 (obs).
+
+    ARIS Round 3 P-rigor-polish G4: the assertions now pin the exact
+    shape of ``cf.branch_point`` and ``cf.intervention`` — not just the
+    effect on the facts list. Before, the test passed even if replay
+    mis-populated the lineage fields.
     """
     factual = record(toy_obs_stream, toy_seeds, toy_agent, toy_apply, toy_initial_state)
     assert len(factual.facts) == 4
@@ -194,6 +199,38 @@ def test_multi_step_simultaneous_interventions_produce_consistent_hash(
     # Step 0 is before every intervention — byte-identical to factual.
     assert cf_a.facts[0].random_draws == factual.facts[0].random_draws
     assert cf_a.facts[0].action == factual.facts[0].action
+
+    # G4: branch_point pins to min(step) across the intervention list.
+    # The counterfactual's lineage reports the *earliest* intervention
+    # as the branch point, since everything at or after that step is
+    # suffix — prior steps are verbatim prefix.
+    expected_branch = min(i["step"] for i in interventions)
+    assert cf_a.branch_point == expected_branch, (
+        f"cf.branch_point expected {expected_branch} (min of intervention "
+        f"steps {[i['step'] for i in interventions]}), got {cf_a.branch_point}"
+    )
+    assert cf_b.branch_point == expected_branch
+
+    # G4: intervention shape assertions. The current Phase-1 engine
+    # stores only the first intervention on ``Trajectory.intervention``
+    # (see ``src/persistence/replay/engine.py:164`` and the
+    # ``Optional[dict]`` type on ``Trajectory.intervention``). We pin
+    # that shape exactly so a regression (e.g. storing the wrong one,
+    # or None when interventions were supplied) fails loudly, and we
+    # pin the submitted input list length separately.
+    assert len(interventions) == 2, "submitted list shape precondition"
+    assert isinstance(cf_a.intervention, dict), (
+        "Phase 1 stores only the first intervention; multi-intervention "
+        "list storage on Trajectory is a Phase 2 upgrade tracked as "
+        "a surfaced-bug item in ARIS Round 3 WORKER-SUMMARY"
+    )
+    first = interventions[0]
+    assert cf_a.intervention["step"] == first["step"]
+    assert cf_a.intervention["field"] == first["field"]
+    assert cf_a.intervention["new_value"] == first["new_value"]
+    assert cf_a.intervention == cf_b.intervention, (
+        "intervention record diverged across two deterministic replays"
+    )
 
 
 def test_replay_with_step_greater_than_trajectory_length_raises(

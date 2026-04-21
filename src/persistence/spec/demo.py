@@ -48,35 +48,31 @@ def _effect_op_bad():
 
 
 def _audit_entry_bad():
+    # ARIS Round 3 P-audit-conform: spec aligned with AuditEntry dataclass.
+    # :audit/verdict bad (":maybe" not in enum) — the rest matches the new shape.
     return {
-        ":audit/id": uuid.uuid4(),
-        ":audit/run-id": uuid.uuid4(),
-        ":audit/parent": None,
+        ":audit/id": "sha256:deadbeef",
         ":audit/op": ":llm/call",
-        ":audit/args": {},
         ":audit/args-hash": "sha256:aa",
         ":audit/verdict": ":maybe",  # bad
-        ":audit/policy-id": ":p",
-        ":audit/result": None,
         ":audit/latency-ms": 10,
-        ":audit/cost": {":units": 0.01, ":currency": ":usd"},
-        ":audit/valid-from": dt.datetime.now(dt.timezone.utc),
         ":audit/recorded-at": dt.datetime.now(dt.timezone.utc),
         ":audit/handler-chain": [":audit"],
         ":audit/principal": {},
-        ":audit/prev-hash": None,
     }
 
 
 def _plan_node_bad():
-    return {":node/id": "not-a-hash", ":node/kind": ":mutate"}  # both bad
+    # Vector form — bad tag (":mutate" isn't a PLAN_NODE_KIND) and bad :id
+    # (not a sha256 hex). Both fail the spec (ARIS Round 3 P-plan-node).
+    return [":mutate", {":id": "not-a-hash"}]
 
 
 def _plan_skill_bad():
     return {
         ":skill/name": ":regime",
         ":skill/version": "3",  # bad: must be 'v3'
-        ":skill/ast": {":node/id": "sha256:aa", ":node/kind": ":seq"},
+        ":skill/ast": [":seq", {":id": "sha256:aa"}],
         ":skill/stats": {":uses": 1, ":success": 0.5, ":cost": 0.01},
     }
 

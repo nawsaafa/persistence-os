@@ -164,6 +164,19 @@ def test_record_then_replay_byte_identical_trajectory():
     assert rep_b == rec_b
     assert rep_c == rec_c
 
+    # ARIS Round 3 P-rigor-polish G2: the byte-identity check below used
+    # to hash a Trajectory whose ``.facts`` was still [] — structurally
+    # vacuous. Guard against that explicitly before the content-hash
+    # comparison, and also assert value-level equality of the cache and
+    # call_log (the *real* load-bearing state for replay determinism).
+    assert len(traj.cache) > 0, (
+        "recorded trajectory has empty cache — byte-identity check would be "
+        "vacuous (no effect was ever replayed)"
+    )
+    assert len(traj.call_log) > 0, (
+        "recorded trajectory has empty call_log — replay parity is vacuous"
+    )
+
     # Trajectory hash equality: reconstruct a matching Trajectory from the
     # replay pass and check byte-identity via the same content hash the
     # replay engine uses (ignoring id/lineage per _HASH_IGNORE_FIELDS).
@@ -176,6 +189,18 @@ def test_record_then_replay_byte_identical_trajectory():
     )
     replayed.outcome = {"replies": [rep_a, rep_b, rep_c]}
     replayed.hash = trajectory_hash(replayed)
+
+    # Value-level equality (G2): the actual state carriers (cache,
+    # call_log, outcome) must match, not just the canonical hash.
+    assert replayed.cache == traj.cache, (
+        "replay cache diverged from record cache — value-level state drift"
+    )
+    assert replayed.call_log == traj.call_log, (
+        "replay call_log diverged — arg/value/order drift"
+    )
+    assert replayed.outcome == traj.outcome, "outcome diverged"
+
+    # Byte-identity on the canonical hash — the headline §4.5 Corollary.
     assert trajectory_hash(replayed) == trajectory_hash(traj)
 
 

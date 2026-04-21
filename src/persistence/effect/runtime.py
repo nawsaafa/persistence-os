@@ -97,16 +97,34 @@ class Handler:
 # ---------------------------------------------------------------------------
 
 
-@dataclass
 class Runtime:
     """A handler stack. ``handlers[0]`` is the innermost (raw); the last
     element is the outermost. This matches the prototype in spec §8, where
     ``reversed(_stack)`` walks outermost→innermost.
+
+    Each Runtime instance carries its OWN ``ContextVar`` holding the current
+    mask stack. ContextVars are ``asyncio.Task``-local and ``contextvars.copy_context()``-aware,
+    so two concurrent tasks (or threads, if explicitly given a copied context)
+    sharing the same Runtime see independent mask states. This was previously
+    a plain ``list[set[str]]`` attribute — shared mutable state across every
+    caller — and a single task's mask leaked into every other concurrent
+    task's dispatch (ARIS Round 1 R2 F4).
     """
 
-    handlers: list[Handler] = field(default_factory=list)
-    # Stack of masked handler names (set-of-sets, nested masks push a frame).
-    _masks: list[set[str]] = field(default_factory=list)
+    def __init__(
+        self,
+        handlers: list[Handler] | None = None,
+    ) -> None:
+        self.handlers: list[Handler] = list(handlers or [])
+        # Per-Runtime ContextVar. Default is the empty tuple (no masks).
+        # Storing tuples (not lists) makes each push an immutable snapshot,
+        # which is what ``ContextVar.set`` / ``reset`` expect.
+        self._mask_var: contextvars.ContextVar[tuple[frozenset[str], ...]] = (
+            contextvars.ContextVar(
+                f"persistence_effect_runtime_masks_{id(self):x}",
+                default=(),
+            )
+        )
 
     # ---------- introspection ----------
 
@@ -127,12 +145,22 @@ class Runtime:
     # ---------- dispatch ----------
 
     def _masked_names(self) -> set[str]:
-        if not self._masks:
+        frames = self._mask_var.get()
+        if not frames:
             return set()
         out: set[str] = set()
-        for frame in self._masks:
+        for frame in frames:
             out |= frame
         return out
+
+    # ---------- mask push/pop (used by the module-level `mask()` CM) --------
+
+    def _push_mask(self, names: frozenset[str]) -> contextvars.Token:
+        current = self._mask_var.get()
+        return self._mask_var.set(current + (names,))
+
+    def _pop_mask(self, token: contextvars.Token) -> None:
+        self._mask_var.reset(token)
 
     def perform(self, op: str, args: dict[str, Any]) -> Any:
         """Dispatch ``op`` through the stack, outermost first."""
@@ -253,14 +281,15 @@ def mask(*names: str) -> Iterator[None]:
     """Within the block, hide the named handlers from dispatch.
 
     Masking is cumulative: ``with mask("a"): with mask("b"):`` hides both.
-    Masks are scoped to the current runtime; exiting the block restores the
-    previous state exactly.
+    Masks are scoped to the current runtime *and* to the current
+    ``ContextVar`` context — each ``asyncio.Task`` sees its own mask stack,
+    so two concurrent tasks sharing one Runtime do not leak mask state into
+    each other (ARIS Round 1 R2 F4).
     """
     rt = _current()
-    frame = set(names)
-    rt._masks.append(frame)
+    frame = frozenset(names)
+    token = rt._push_mask(frame)
     try:
         yield
     finally:
-        popped = rt._masks.pop()
-        assert popped is frame, "mask stack corrupted"
+        rt._pop_mask(token)

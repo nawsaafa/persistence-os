@@ -134,6 +134,27 @@ def replay(
     if not interventions:
         raise ValueError("replay requires at least one intervention")
 
+    # R2 F3: fail fast on empty trajectories — otherwise any intervention
+    # silently succeeds with no facts to intervene on.
+    if not traj.facts:
+        raise ValueError(
+            "cannot replay an empty trajectory (traj.facts is empty); "
+            "nothing to branch off"
+        )
+
+    # R2 F3: fail fast on step indices outside [0, len(facts)). A typo'd
+    # step=99 against a 4-step trajectory would otherwise emit a
+    # counterfactual byte-identical to the factual with no intervention
+    # applied — a silent pass that wastes hours of downstream debugging.
+    max_step = len(traj.facts) - 1
+    for iv in interventions:
+        s = iv["step"]
+        if s < 0 or s > max_step:
+            raise ValueError(
+                f"intervention step {s} out of range for trajectory with "
+                f"{len(traj.facts)} facts (valid steps: 0..{max_step})"
+            )
+
     branch_point = min(i["step"] for i in interventions)
     interventions_by_step = {i["step"]: i for i in interventions}
 

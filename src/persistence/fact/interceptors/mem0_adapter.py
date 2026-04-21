@@ -26,10 +26,15 @@ so raised ``TypeError`` on the real client (ARIS Round 1 R3 F5).
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any, Mapping, Optional
+from datetime import datetime
+from typing import Any, Callable, Mapping, Optional
 
-from persistence.fact.db import DB
+from persistence.fact.db import DB, _system_clock
+
+
+# ClockFn alias mirrors the one in persistence.fact.db. Keeping it local
+# avoids a hard re-export dependency while still documenting the shape.
+ClockFn = Callable[[], datetime]
 
 
 class InterceptorError(RuntimeError):
@@ -108,6 +113,12 @@ class Mem0Interceptor:
         principal:  optional dict stamped into provenance (tenant, agent,
                     user). Per agent3-effect-spec §6, this is what the
                     audit pipeline expects to find on every datom.
+        clock:      optional :data:`ClockFn` returning a tz-aware datetime
+                    used as the default ``valid_from`` when the caller
+                    omits one. Defaults to the DB's clock if available,
+                    otherwise the system clock. Replay callers pass a
+                    fixed clock so ``valid_from`` is reproducible
+                    (ARIS R2 F5).
     """
 
     def __init__(
@@ -115,10 +126,15 @@ class Mem0Interceptor:
         db: DB,
         mem0: Any,
         principal: Optional[Mapping[str, Any]] = None,
+        *,
+        clock: Optional[ClockFn] = None,
     ) -> None:
         self.db = db
         self.mem0 = mem0
         self.principal = dict(principal or {})
+        # Prefer the explicit arg, then the DB's clock (shared replay seam),
+        # then the system clock as the last resort.
+        self._clock: ClockFn = clock or getattr(db, "_clock", None) or _system_clock
 
     # ---- Public API ------------------------------------------------------
     def add(
@@ -142,7 +158,7 @@ class Mem0Interceptor:
         ``TypeError`` from mem0 — surface the error rather than silently
         dropping data.
         """
-        vf = valid_from or datetime.now(timezone.utc)
+        vf = valid_from or self._clock()
         try:
             self._emit_datom(
                 e=e,
@@ -199,7 +215,7 @@ class Mem0Interceptor:
         metadata=None)``. The interceptor derives ``data`` from ``v`` if
         the caller did not pass it explicitly.
         """
-        vf = valid_from or datetime.now(timezone.utc)
+        vf = valid_from or self._clock()
         try:
             self._emit_datom(
                 e=e,

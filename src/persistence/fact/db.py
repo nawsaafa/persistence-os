@@ -22,7 +22,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from persistence.fact.datom import Datom
 from persistence.fact.store import InMemoryStore, Store
@@ -33,8 +33,33 @@ from persistence.fact.store import InMemoryStore, Store
 # resumes at ``max(tx) + 1`` instead of stomping on row 1 (ARIS R3 F10).
 
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+# Clock seam — paper §4.2 / ARIS R2 F5. Production code goes through the
+# Effect runtime's ``:sys/now`` handler (once W-integration lands the
+# leading-colon namespace). Until then, callers that need a deterministic
+# tx_time may pass ``DB(store, clock=...)`` to inject a frozen clock.
+ClockFn = Callable[[], datetime]
+
+
+def _system_clock() -> datetime:
+    """The single authorised ``datetime.now`` call in the fact module.
+
+    This is the only place in ``persistence.fact`` that samples the wall
+    clock; everywhere else takes a :data:`ClockFn` argument or calls
+    ``self._clock()`` on a DB instance so replay can substitute a handler.
+    """
+    return datetime.now(timezone.utc)  # noqa: wall-clock -- authorised clock source
+
+
+class RetroactiveCorrectionError(ValueError):
+    """Raised when a ``transact`` asserts a ``valid_from`` strictly earlier
+    than the prior open assert's ``valid_from`` without opting in via
+    ``force_retroactive=True``.
+
+    Motivating case (agent1-fact-spec §0): "the true value was lower from
+    earlier than we thought". This is a legitimate operation but silently
+    emitting a companion retract with ``valid_to < valid_from`` corrupts
+    the bitemporal rectangle; callers must opt in explicitly.
+    """
 
 
 def _hash_fact(fact: dict) -> str:
@@ -58,15 +83,25 @@ class DB:
     store: Store
 
     # ---- Construction ----------------------------------------------------
-    def __init__(self, store: Optional[Store] = None) -> None:
+    def __init__(
+        self,
+        store: Optional[Store] = None,
+        *,
+        clock: Optional[ClockFn] = None,
+    ) -> None:
         # Default to in-memory so ``DB()`` is usable from a notebook.
         self.store = store if store is not None else InMemoryStore()
+        # ARIS R2 F5: tx_time comes from an injectable clock so replay mode
+        # can pin timestamps deterministically. Defaults to the system clock.
+        self._clock: ClockFn = clock or _system_clock
 
     # ---- Writes ----------------------------------------------------------
     def transact(
         self,
         facts: list[dict],
         provenance: Optional[dict] = None,
+        *,
+        force_retroactive: bool = False,
     ) -> "DB":
         """Append a transaction. Cardinality-one auto-retraction built in.
 
@@ -77,13 +112,22 @@ class DB:
 
         Returns a NEW DB bound to the same store, so callers can pipe
         ``db = db.transact(...)`` the way the spec prototype does.
+
+        Retroactive corrections (ARIS Round 1 R1 F3): if a new assert's
+        ``valid_from`` is strictly earlier than the prior open assert's
+        ``valid_from``, the naive companion retract would have
+        ``valid_to < valid_from`` — a negative interval. We REFUSE such a
+        transact unless the caller passes ``force_retroactive=True``, in
+        which case the companion retract's ``valid_to`` is clamped to
+        ``new.valid_from`` (the retract closes the prior from the new
+        effective date onward; agent1-fact-spec §0 motivates this).
         """
         if not facts:
             return self
 
         prov_base: dict = provenance or {}
         tx = self.store.next_tx()
-        now = _now_utc()
+        now = self._clock()
         new_datoms: list[Datom] = []
         invalidations: list[tuple[int, int]] = []  # (old_tx, new_tx=tx)
 
@@ -102,17 +146,43 @@ class DB:
                     current_log + new_datoms, fact["e"], fact["a"]
                 )
                 if prior is not None:
-                    # Emit a companion :retract whose valid_from is the prior
-                    # datom's valid_from and valid_to is the NEW valid_from —
-                    # this closes the open interval.
+                    # ARIS R1 F3: guard against retroactive correction that
+                    # would produce a negative interval on the companion
+                    # retract. vf < prior.valid_from is the retroactive case.
+                    if vf < prior.valid_from:
+                        if not force_retroactive:
+                            raise RetroactiveCorrectionError(
+                                f"retroactive correction for ({fact['e']!r}, "
+                                f"{fact['a']!r}): new valid_from={vf.isoformat()} "
+                                f"is earlier than prior valid_from="
+                                f"{prior.valid_from.isoformat()}. "
+                                f"Pass force_retroactive=True to opt in; the "
+                                f"companion retract's valid_to will be clamped "
+                                f"to the new valid_from."
+                            )
+                        # Opt-in path: clamp valid_to so the retract spans
+                        # [new.valid_from, prior.valid_from] (no negative
+                        # interval). This invalidates the prior from the new
+                        # effective date onward, which is what retroactive
+                        # corrections like "the WACC was lower than we thought"
+                        # semantically require.
+                        retract_valid_to = prior.valid_from
+                        retract_valid_from = vf
+                    else:
+                        # Normal case (vf >= prior.valid_from): retract the
+                        # prior's open interval from its own valid_from to
+                        # the new valid_from.
+                        retract_valid_from = prior.valid_from
+                        retract_valid_to = vf
+
                     companion = Datom(
                         e=prior.e,
                         a=prior.a,
                         v=prior.v,
                         tx=tx,
                         tx_time=now,
-                        valid_from=prior.valid_from,
-                        valid_to=vf,
+                        valid_from=retract_valid_from,
+                        valid_to=retract_valid_to,
                         op="retract",
                         provenance={**prior.provenance, "superseded_by_tx": tx},
                         invalidated_by=None,
@@ -142,7 +212,7 @@ class DB:
         for old_tx, new_tx in invalidations:
             self.store.mark_invalidated(old_tx, new_tx)
 
-        return DB(self.store)
+        return DB(self.store, clock=self._clock)
 
     # ---- Reads -----------------------------------------------------------
     def log(self) -> Iterator[Datom]:
@@ -210,7 +280,7 @@ class DB:
             ]
         )
 
-        db = DB(branched_store)
+        db = DB(branched_store, clock=self._clock)
         if assertions:
             db = db.transact(
                 assertions,
@@ -319,4 +389,4 @@ def _find_prior_assert(
     return None
 
 
-__all__ = ["DB", "DBView"]
+__all__ = ["DB", "DBView", "RetroactiveCorrectionError"]

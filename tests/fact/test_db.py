@@ -96,6 +96,93 @@ class TestTransact:
         orig = next(d for d in log if d.op == "assert" and d.v == 0.087)
         assert orig.invalidated_by is not None
 
+    # ------------------------------------------------------------------
+    # Retroactive corrections (ARIS Round 1 R1 F3)
+    # ------------------------------------------------------------------
+    def test_retroactive_correction_without_opt_in_raises(self, store):
+        """Asserting a new value with ``valid_from`` earlier than the prior
+        assert's ``valid_from`` would otherwise emit a companion retract with
+        ``valid_to < valid_from`` — a negative interval. Must fail fast unless
+        the caller opts in via ``force_retroactive=True``.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.091, "valid_from": _dt(2026, 4, 19)}],
+            provenance={},
+        )
+        from persistence.fact.db import RetroactiveCorrectionError
+        with pytest.raises(RetroactiveCorrectionError):
+            db.transact(
+                [{"e": "p", "a": "w", "v": 0.089, "valid_from": _dt(2026, 4, 10)}],
+                provenance={},
+            )
+
+    def test_retroactive_correction_with_opt_in_produces_bounded_valid_to(self, store):
+        """With ``force_retroactive=True`` the companion retract is emitted
+        with ``valid_to = new.valid_from`` (a bounded interval that invalidates
+        the prior from the new effective date onward), NOT with
+        ``valid_to < valid_from``.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.091, "valid_from": _dt(2026, 4, 19)}],
+            provenance={},
+        )
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.089, "valid_from": _dt(2026, 4, 10)}],
+            provenance={},
+            force_retroactive=True,
+        )
+        # The companion retract must have valid_from <= valid_to (no negative
+        # interval). See agent1-fact-spec §0: retroactive corrections are
+        # legitimate but MUST produce consistent intervals.
+        retracts = [d for d in db.log() if d.op == "retract"]
+        assert len(retracts) == 1
+        r = retracts[0]
+        assert r.valid_from <= r.valid_to, (
+            f"retroactive correction produced negative interval: "
+            f"valid_from={r.valid_from} valid_to={r.valid_to}"
+        )
+
+    def test_normal_future_correction_still_works(self, store):
+        """Regression — the non-retroactive common case (new valid_from >= prior)
+        must still produce a companion retract with valid_to = new.valid_from.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.087, "valid_from": _dt(2026, 4, 14)}],
+            provenance={},
+        )
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.091, "valid_from": _dt(2026, 4, 19)}],
+            provenance={},
+        )
+        retracts = [d for d in db.log() if d.op == "retract"]
+        assert len(retracts) == 1
+        r = retracts[0]
+        assert r.valid_from == _dt(2026, 4, 14)
+        assert r.valid_to == _dt(2026, 4, 19)
+        assert r.valid_from < r.valid_to
+
+    def test_retroactive_correction_at_same_valid_from_is_allowed(self, store):
+        """Edge case: new.valid_from == prior.valid_from is not retroactive
+        (they cover the same interval; retract closes it to an empty interval,
+        which is a no-op but not negative). Must not raise.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.087, "valid_from": _dt(2026, 4, 14)}],
+            provenance={},
+        )
+        # Same valid_from — equal is not retroactive.
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.088, "valid_from": _dt(2026, 4, 14)}],
+            provenance={},
+        )
+        retracts = [d for d in db.log() if d.op == "retract"]
+        assert len(retracts) == 1
+        assert retracts[0].valid_from == retracts[0].valid_to
+
 
 # ---------------------------------------------------------------------------
 # as_of / as_of_valid — three-point-in-time correctness
@@ -310,6 +397,50 @@ class TestEntityProjection:
         )
         e = db.as_of(datetime.now(timezone.utc)).entity("p-042")
         assert "project/wacc" not in e
+
+
+# ---------------------------------------------------------------------------
+# Clock injection (ARIS R2 F5) — a DB constructed with a frozen clock must
+# stamp every tx_time from that clock, not from the wall clock. This is the
+# seam replay uses to reproduce tx_time deterministically.
+# ---------------------------------------------------------------------------
+class TestClockInjection:
+    def test_injected_clock_is_used_for_tx_time(self, store):
+        fixed = _dt(2026, 4, 21, 12, 0)
+        db = DB(store, clock=lambda: fixed)
+        db = db.transact(
+            [{"e": "p-042", "a": "project/wacc", "v": 0.087,
+              "valid_from": _dt(2026, 4, 14)}],
+            provenance={"source": "dfi-agent"},
+        )
+        log = list(db.log())
+        assert len(log) == 1
+        assert log[0].tx_time == fixed
+
+    def test_injected_clock_survives_transact_return(self, store):
+        """DB.transact returns a new DB bound to the same clock so chained
+        transacts all use the injected clock."""
+        fixed = _dt(2026, 4, 21, 12, 0)
+        db = DB(store, clock=lambda: fixed)
+        db = db.transact(
+            [{"e": "a", "a": "x", "v": 1, "valid_from": fixed}], provenance={}
+        )
+        db = db.transact(
+            [{"e": "b", "a": "x", "v": 2, "valid_from": fixed}], provenance={}
+        )
+        for d in db.log():
+            assert d.tx_time == fixed
+
+    def test_injected_clock_survives_branch(self, store):
+        """A counterfactual branch inherits the parent DB's clock."""
+        fixed = _dt(2026, 4, 21, 12, 0)
+        db = DB(store, clock=lambda: fixed)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.1, "valid_from": fixed}], provenance={}
+        )
+        cf = db.branch(fixed, [{"e": "p", "a": "w", "v": 0.2, "valid_from": fixed}])
+        for d in cf.log():
+            assert d.tx_time == fixed
 
 
 # ---------------------------------------------------------------------------

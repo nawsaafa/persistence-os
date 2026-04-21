@@ -1,118 +1,152 @@
-# W-integration — ARIS Round 1 fix pass
+# W-rigor — ARIS Round 1 Fix Pass
 
-**Branch:** `W-integration`
-**Worktree:** `/Users/nawfalsaadi/Projects/persistence-os/.claude/worktrees/W-integration`
-**Base:** `main` @ `5f97882`
+**Branch:** `W-rigor`
+**Worktree:** `/Users/nawfalsaadi/Projects/persistence-os/.claude/worktrees/W-rigor`
+**Scope:** R2 F2, R2 F3, R2 F4, R2 F5, R1 F3 (test-rigor + invariant gaps).
+**Out of scope (owned by siblings):**
+- R2 F1 (HAMT / Prop 1) — deferred to W-paper (paper softening) / Phase 2.
+- Datom/audit/trajectory/plan-node shape unification — W-boundary.
+- replay ↔ effect wiring, `Mem0Interceptor.add` kwargs, `_tx_counter` global — W-integration.
+- Paper corrections — W-paper.
 
-## Findings addressed (all in scope)
+## Test count
 
-| Finding | Title | Fix commit |
+| Phase | Count |
+|---|---:|
+| Baseline (main) | **356 passed** |
+| After W-rigor | **380 passed** |
+| Delta | **+24 tests** |
+
+Final pytest output:
+
+```
+380 passed in 1.21s
+```
+
+## Commits (one per finding)
+
+```
+007a603 fix(fact): guard DB.transact against retroactive negative intervals (R1 F3)
+dbc4e70 fix(src): eliminate wall-clock/rng calls; add lint + injection seams (R2 F5)
+c09588e fix(effect): scope Runtime._masks via per-instance ContextVar (R2 F4)
+6eebcde fix(replay): fail fast on out-of-range step + empty trajectory (R2 F3)
+b3a1b2a test(effect/audit): cover deletion/reorder/truncation of Merkle chain (R2 F2)
+```
+
+## Findings addressed
+
+### R2 F2 — Audit chain tamper tests (MAJOR, INVARIANT)
+**Commit:** `b3a1b2a` — test-only (`verify_chain` already correct; added adversarial coverage).
+
+Tests added in `tests/effect/test_audit.py`:
+- `test_deleting_an_audit_entry_breaks_the_chain`
+- `test_reordering_audit_entries_breaks_the_chain`
+- `test_truncating_audit_entries_from_tail_preserves_chain` (design pin — a truncated-but-intact prefix still verifies; length checks live above this layer)
+
+### R2 F3 — Replay multi-step / out-of-range / empty-trajectory (MAJOR, EDGE)
+**Commit:** `6eebcde` — prod fix + tests.
+
+Production: `src/persistence/replay/engine.py::replay()` now:
+- Raises `ValueError("empty trajectory")` when `traj.facts == []`.
+- Raises `ValueError("... out of range ...")` when any intervention's `step` is `< 0` or `> max_step`.
+
+Tests added in `tests/replay/test_replay.py`:
+- `test_multi_step_simultaneous_interventions_produce_consistent_hash` — two interventions at different steps both land AND hash is deterministic across two calls.
+- `test_replay_with_step_greater_than_trajectory_length_raises`
+- `test_replay_with_negative_step_raises`
+- `test_empty_trajectory_replay_raises`
+
+### R2 F4 — ContextVar isolation on shared Runtime (MAJOR, CONCURRENCY — REAL BUG)
+**Commit:** `c09588e` — prod fix + tests.
+
+Production: `src/persistence/effect/runtime.py::Runtime`:
+- Converted from `@dataclass` to explicit `__init__` so each instance owns a unique `ContextVar[tuple[frozenset[str], ...]]` (key `persistence_effect_runtime_masks_<id>`).
+- `_masks: list[set[str]]` attribute removed; replaced by `_mask_var.get()` on read and `_push_mask`/`_pop_mask` (ContextVar `set`/`reset` token dance).
+- `mask()` context manager now uses the push/pop API, making it Task-local under asyncio.
+
+Tests added in new file `tests/effect/test_runtime_concurrency.py`:
+- `test_contextvar_isolates_runtime_state_across_asyncio_tasks` — 10 concurrent tasks sharing one Runtime (5 masked + 5 unmasked); both asserts the unmasked group all hit audit exactly once AND no masked task triggers audit. **RED before fix, GREEN after.**
+- `test_mask_scope_does_not_bleed_after_task_completes` — a task that awaits mid-mask does not perturb a second task's dispatch.
+
+### R2 F5 — Wall-clock / rng ban: fixes + lint (MAJOR, INVARIANT)
+**Commit:** `dbc4e70` — prod fix + lint test + injection tests.
+
+Per the task brief, W-integration is aligning op namespaces to leading-colon (`:sys/now`, `:sys/random`). Until that wiring lands, the modules that need a clock/rng accept an injectable parameter with a sensible default. Violations fixed:
+
+| Before | After | Seam |
 |---|---|---|
-| R1 F7 / R3 F2 | `replay.EffectHandler` not wired into `effect.Runtime`; NON_REPLAYABLE_OPS silently missed on op-prefix mismatch | `52611dc` + `1f1e778` |
-| R3 F5 | `Mem0Interceptor.add/update` passed unknown kwargs to `mem0.Memory`, would TypeError on live VPS | `ef920c2` |
-| R3 F10 | `_tx_counter` module-level global broke multi-process Postgres and restored-from-disk SQLiteStore | `e4753da` |
+| `src/persistence/fact/db.py:38` — `_now_utc()` used `datetime.now` | Removed; `DB(store, clock=ClockFn)` injected. Sole authorised wall-clock call is `_system_clock()` annotated `# noqa: wall-clock`. `branch` / `transact` return inherit the parent's clock. | ClockFn callable |
+| `src/persistence/fact/interceptors/mem0_adapter.py:65,97` — `datetime.now` default for `valid_from` | `Mem0Interceptor(..., clock=ClockFn)` with precedence `arg > db._clock > _system_clock` | ClockFn callable |
+| `src/persistence/spec/_canonical.py` (11 lines of `random.{random,randint,choice,choices}`) | Module-local `_rng = random.Random()`; new `set_generator_seed(int \| None)` helper. | Seedable rng |
+| `src/persistence/replay/trajectory.py:58,113` — `uuid.uuid4()` on `Trajectory.id` | `# noqa: wall-clock` with justification: trajectory id is a fresh primary key, excluded from `trajectory_hash` by `_HASH_IGNORE_FIELDS`, never required to be replayable. | N/A |
 
-## Commits
+Lint added: `tests/test_wall_clock_ban.py` — AST scan across `src/persistence/` for `time.time`, `datetime.now/utcnow`, `random.*`, `uuid.uuid4`. Allows only `effect/handlers/{clock,raw,retry}.py` + `demo.py` files. Recognises `# noqa: wall-clock`. Fails with a sorted violation list so new drift is loud.
 
-```
-52611dc effect: align op namespace to leading-colon (":llm/call" etc)
-1f1e778 replay: bridge EffectHandler into effect.Runtime (R1 F7, R3 F2)
-ef920c2 fact: Mem0Interceptor uses real mem0.Memory signature (R3 F5)
-e4753da fact: tx allocation lives on Store, not a module global (R3 F10)
-```
+Tests added in `tests/fact/test_db.py`:
+- `TestClockInjection::test_injected_clock_is_used_for_tx_time` (memory + sqlite)
+- `TestClockInjection::test_injected_clock_survives_transact_return`
+- `TestClockInjection::test_injected_clock_survives_branch`
 
-## Files changed
+### R1 F3 — DB.transact retroactive valid-to guard (MAJOR)
+**Commit:** `007a603` — prod fix + tests.
 
-### `52611dc` — op namespace alignment (23 files, +299/-299)
-- `src/persistence/effect/catalog.py` — 15 catalog keys + `OpSpec.name`
-- `src/persistence/effect/demo.py` — `perform()` / `Handler` / EDN policy literals
-- `src/persistence/effect/handlers/{audit,cache,clock,dry_run,pii_redact,policy,rate_limit,raw,retry}.py` — every `wraps=` / `clauses=` entry
-- `tests/effect/test_{audit,cache,canonical,catalog,composition,dry_run,pii_redact,policy_eval,policy_handler,rate_limit,retry,runtime}.py` — every `perform()` literal
+Production: `src/persistence/fact/db.py`:
+- New `RetroactiveCorrectionError(ValueError)` exported from `persistence.fact.db`.
+- `transact(...)` now accepts `force_retroactive: bool = False` (kw-only).
+- When `new.valid_from < prior.valid_from`:
+  - Without opt-in: raises `RetroactiveCorrectionError` with a descriptive message (shows both dates + mentions opt-in).
+  - With `force_retroactive=True`: the companion retract uses `valid_from=new.valid_from, valid_to=prior.valid_from` so the interval is non-negative and semantically invalidates the prior from the corrected effective date onward (agent1-fact-spec §0).
+- Equal `valid_from` is explicitly allowed (zero-length interval is not negative).
 
-### `1f1e778` — replay/effect bridge (4 files, +518/-76)
-- `src/persistence/replay/effect_handler.py` — new `_serve_or_miss` core, new `RefusedInReplay`, new `make_replay_handler(mode, wraps, cache, calls) -> effect.Handler`
-- `src/persistence/replay/__init__.py` — export `make_replay_handler`, `RefusedInReplay`, `NON_REPLAYABLE_OPS`, `PROMPT_HASH_OPS`
-- `tests/integration/__init__.py` — new package
-- `tests/integration/test_effect_replay_bridge.py` — new file, 6 e2e tests including the load-bearing record → replay → hash-equality test
+Tests added in `tests/fact/test_db.py::TestTransact`:
+- `test_retroactive_correction_without_opt_in_raises` (memory + sqlite)
+- `test_retroactive_correction_with_opt_in_produces_bounded_valid_to`
+- `test_normal_future_correction_still_works` (regression pin)
+- `test_retroactive_correction_at_same_valid_from_is_allowed`
 
-### `ef920c2` — Mem0Interceptor real-mem0 signature (4 files, +452/-18)
-- `src/persistence/fact/interceptors/mem0_adapter.py` — rewrote `add` / `update` to target real `mem0.Memory.add(messages, *, user_id=..., metadata=...)` and `Memory.update(memory_id, data, metadata=None)`; datom fields carried on `metadata=` dict
-- `tests/fact/test_interceptor.py` — `FakeMem0` made strict (mirrors real mem0 signatures), old `**kw` accept-all fake retired
-- `tests/integration/test_mem0_signature.py` — new file, 6 tests including `@pytest.mark.integration` signature-superset check against the installed `mem0ai` package
-- `pytest.ini` — registered `integration` marker
+## Files touched
 
-### `e4753da` — `_tx_counter` per-Store (4 files, +224/-17)
-- `src/persistence/fact/store.py` — added `Store.next_tx()` protocol method, `InMemoryStore.next_tx()` (max+1 from in-memory log), `SQLiteStore.next_tx()` (`SELECT COALESCE(MAX(tx), 0) + 1 FROM datom_log`)
-- `src/persistence/fact/db.py` — removed module-level `_tx_counter = itertools.count(1)`, `DB.transact` calls `self.store.next_tx()`
-- `tests/fact/conftest.py` — removed `_reset_tx_counter` autouse fixture (fresh Store per test ⇒ fresh counter)
-- `tests/fact/test_tx_allocation.py` — new file, 8 tests including multi-store-same-file, close-reopen round-trip, module-global absence
+Production (src):
+- `src/persistence/effect/runtime.py` — ContextVar-scoped mask stack.
+- `src/persistence/fact/db.py` — injectable clock, `RetroactiveCorrectionError`, retroactive guard.
+- `src/persistence/fact/interceptors/mem0_adapter.py` — injectable clock.
+- `src/persistence/replay/engine.py` — empty-trajectory + out-of-range step guards.
+- `src/persistence/replay/trajectory.py` — `# noqa: wall-clock` annotations on uuid calls.
+- `src/persistence/spec/_canonical.py` — module-local `_rng`, `set_generator_seed`.
 
-## Test results
+Tests:
+- `tests/effect/test_audit.py` (+3 tests)
+- `tests/effect/test_runtime_concurrency.py` (NEW, +2 tests)
+- `tests/replay/test_replay.py` (+4 tests)
+- `tests/fact/test_db.py` (+7 tests: 3 clock-injection x 2 backends + 4 retroactive x 2 backends, 2 pure + 2 regression)
+- `tests/test_wall_clock_ban.py` (NEW, +1 lint test)
 
-- **Before:** 356 passed
-- **After:** 376 passed (+20 new, 0 regressions)
-- Full run time: 1.96s
+## Coordination notes for merge
 
-```
-============================= 376 passed in 1.96s ==============================
-```
+1. **W-integration** will rename effect ops to leading-colon (`:clock/now`, `:sys/random`, …). Once that lands, the `ClockFn` seam in `DB` and `Mem0Interceptor` is the intended substitution point for a `:sys/now`-driven clock handler — the plumbing is already in place.
+2. **W-boundary** will align `audit_entry_to_datom`'s emission (currently `tx-time` is a float from `recorded_at`). The Merkle tamper tests added in this pass do not depend on that shape; they exercise `verify_chain` directly against in-memory `AuditEntry`s.
+3. **W-paper** will soften Prop 1's HAMT claim. R2 F1 is explicitly deferred per the task brief — no work done here.
+4. The new `RetroactiveCorrectionError` is a subclass of `ValueError`, so existing `except ValueError` call sites continue to work. The `force_retroactive` kwarg is kw-only and default `False`, so all existing callers retain their behavior.
 
-New test files:
-- `tests/integration/test_effect_replay_bridge.py` — 6 tests
-- `tests/integration/test_mem0_signature.py` — 6 tests (2 marked `@pytest.mark.integration`, both pass with `mem0ai` installed in `.venv`)
-- `tests/fact/test_tx_allocation.py` — 8 tests
+## Deferred items
 
-Key load-bearing invariants still green:
-- `tests/replay/test_determinism.py::test_noop_intervention_produces_byte_identical_trajectory` — passes
-- `tests/integration/test_effect_replay_bridge.py::test_record_then_replay_byte_identical_trajectory` — new, passes; `trajectory_hash(replayed) == trajectory_hash(recorded)` under the real `effect.Runtime`
-- `tests/effect/test_audit.py::test_tampering_an_entry_breaks_the_chain` — passes (Merkle chain intact)
-- Effect demo (`python -m persistence.effect.demo`) and replay demo (`python -m persistence.replay.demo`) both run end-to-end
+- **R2 F1 (CRITICAL — HAMT / Prop 1 untestable).** Owned by W-paper (paper softening) per the dispatch table. Not touched.
+- **R2 F6–F16, R1 F4–F13 and so on** — not in this worker's scope.
 
-## Integration points for W-boundary / W-rigor / W-paper
-
-- **Op namespace is now leading-colon everywhere** in `persistence.effect` + `persistence.replay`. W-boundary can align the spec registry's `:audit/verdict` enum, `:persistence.fact/datom` keys, and `audit_entry_to_datom`'s `:datom/a = ":audit/<op>"` shape to match without colliding with this worker's scope.
-- **Audit datom shape is still the old string-prefix form** (`datom/e`, `datom/a = "audit/:llm/call"`). W-boundary owns fixing both the key prefixes (`:datom/e`) and the audit attr form (`:audit/<op>` vs concatenated `audit/:llm/call`). Not touched here.
-- **`make_replay_handler(mode=record)` produces a proper `effect.Handler`** that sits anywhere in the handler stack. The Phase-2 production chain can now be literally:
-  ```
-  audit → policy → replay(mode=record) → cache → retry → rate-limit → raw
-  ```
-  And replay mode swaps the same handler to `replay(mode=replay, cache=..., calls=...)` and drops everything below it.
-- **`Store.next_tx()`** is now the tx-allocation contract. W-rigor's concurrency tests and Phase 2's `persistence.txn` STM module can call it directly without worrying about a hidden global.
-
-## Explicitly out of scope (per coordination note in task brief)
-
-Deferred — owned by other workers, not addressed here:
-
-- **Datom / audit key colon-prefix alignment** (R1 F1, F2, F6, F13 · R3 F1, F3) — W-boundary.
-- **`:persistence.plan/node` vector-vs-map** (R1 F4) — W-boundary.
-- **`:persistence.replay/fact` keyword-keys alignment** (R1 F5) — W-boundary.
-- **`effect/__init__.py` `__all__`** (R3 F7) — W-boundary.
-- **`pyproject.toml` deps (`hypothesis`, `pytest-asyncio`)** (R3 F9) — W-boundary.
-- **Audit-chain deletion/reorder tampering tests** (R2 F2 extended) — W-rigor.
-- **`DB.transact` retroactive valid-to guard** (R1 F3) — W-rigor.
-- **Wall-clock lint rule** (R2 F5) — W-rigor.
-- **`ContextVar` concurrency test** (R2 F4) — W-rigor.
-- **Paper §4.1 Prop 1 HAMT / ed25519 / "seven capabilities"** (R4 F1, F2, F4, F7) — W-paper.
-- **SQLite `AUTOINCREMENT` → portable `GENERATED AS IDENTITY`** (R3 F4) — not in my brief; likely W-boundary's territory since they're touching migration-adjacent schema work. Flagging for coordinator.
-
-## Verification commands
+## How to verify
 
 ```bash
-cd /Users/nawfalsaadi/Projects/persistence-os/.claude/worktrees/W-integration
-source /Users/nawfalsaadi/Projects/persistence-os/.venv/bin/activate
-python3 -m pytest tests/ -q                     # 376 passed in ~2s
-python3 -m pytest tests/integration/ -v          # 12 passed (6 bridge + 6 mem0)
-python3 -m pytest tests/fact/test_tx_allocation.py -v  # 8 passed
-PYTHONPATH=src python3 -m persistence.effect.demo       # end-to-end demo
-PYTHONPATH=src python3 -m persistence.replay.demo       # replay demo
+cd /Users/nawfalsaadi/Projects/persistence-os/.claude/worktrees/W-rigor
+.venv/bin/python -m pytest --tb=short
+# → 380 passed
 ```
 
-## Merge
+Specifically target this worker's additions:
 
 ```bash
-cd /Users/nawfalsaadi/Projects/persistence-os
-git merge --no-ff W-integration \
-  -m "Merge W-integration: R1 F7 / R3 F2 / R3 F5 / R3 F10 fixes"
+.venv/bin/python -m pytest tests/effect/test_audit.py \
+                           tests/effect/test_runtime_concurrency.py \
+                           tests/replay/test_replay.py \
+                           tests/fact/test_db.py \
+                           tests/test_wall_clock_ban.py -v
 ```
-
-Merge order per R0 consolidation plan: `boundary → integration → rigor → paper`. If W-boundary lands first and renames audit datom keys, rebase this branch on top; no code conflicts expected (disjoint files) other than potentially in `audit.py` (datom conversion function) and `tests/effect/test_audit.py` (datom-related assertions).

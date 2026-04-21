@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Iterator, Optional
 
 from persistence.fact.datom import Datom
-from persistence.fact.store import InMemoryStore, Store
+from persistence.fact.store import TX_PLACEHOLDER, InMemoryStore, Store
 
 # Transaction ids are allocated by the Store (see Store.next_tx), not by a
 # module-level counter. Two InMemoryStore instances each get their own id
@@ -126,10 +126,15 @@ class DB:
             return self
 
         prov_base: dict = provenance or {}
-        tx = self.store.next_tx()
+        # tx is allocated atomically by ``store.allocate_and_append`` after
+        # we've shaped all the datoms; see ARIS Round 3 P-concurrency and
+        # the TX_PLACEHOLDER sentinel in fact.store. Until the atomic
+        # append runs, every datom and every provenance reference sits at
+        # the placeholder, which allocate_and_append rewrites in one pass.
+        tx = TX_PLACEHOLDER
         now = self._clock()
         new_datoms: list[Datom] = []
-        invalidations: list[tuple[int, int]] = []  # (old_tx, new_tx=tx)
+        invalidations: list[int] = []  # old_tx values; new_tx patched post-alloc
 
         # Snapshot the log once so auto-retraction sees a stable view.
         current_log = list(self.store.all_datoms())
@@ -188,7 +193,7 @@ class DB:
                         invalidated_by=None,
                     )
                     new_datoms.append(companion)
-                    invalidations.append((prior.tx, tx))
+                    invalidations.append(prior.tx)
 
             prov = {
                 **prov_base,
@@ -208,9 +213,21 @@ class DB:
                 )
             )
 
-        self.store.append(new_datoms)
-        for old_tx, new_tx in invalidations:
-            self.store.mark_invalidated(old_tx, new_tx)
+        # Atomically allocate a tx id and append in a single transaction.
+        # ``allocate_and_append`` returns the datoms with ``tx`` set to the
+        # freshly-allocated id, and also rewrites any TX_PLACEHOLDER in
+        # provenance (e.g. "superseded_by_tx") to the real id (ARIS Round 3
+        # P-concurrency).
+        stored = self.store.allocate_and_append(new_datoms)
+        if stored:
+            real_tx = stored[0].tx
+            # Every datom in a single transact shares one tx — invariant
+            # enforced by allocate_and_append.
+            assert all(d.tx == real_tx for d in stored), (
+                "allocate_and_append returned mixed tx ids"
+            )
+            for old_tx in invalidations:
+                self.store.mark_invalidated(old_tx, real_tx)
 
         return DB(self.store, clock=self._clock)
 

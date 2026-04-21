@@ -261,7 +261,11 @@ class Trajectory:
         dict returned by :func:`to_edn` (they're the same shape).
         """
         id_raw = d.get(":trajectory/id")
-        id_str = str(id_raw) if id_raw is not None else str(uuid.uuid4())
+        # from_edn reconstructs a trajectory; if the wire form lacks an id
+        # (legacy payloads), synthesize one. This is a reconstruction path,
+        # not live state generation — the effect runtime samples ids for
+        # fresh trajectories via :sys/random.
+        id_str = str(id_raw) if id_raw is not None else str(uuid.uuid4())  # noqa: wall-clock
         parent_raw = d.get(":trajectory/parent-id")
         parent_str = str(parent_raw) if parent_raw is not None else None
 

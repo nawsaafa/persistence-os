@@ -115,7 +115,14 @@ class Trajectory:
     id: str = field(default_factory=lambda: str(uuid.uuid4()))  # noqa: wall-clock -- trajectory id is a fresh primary key, never replayed; see trajectory_hash IGNORE list
     parent_id: Optional[str] = None
     branch_point: Optional[int] = None
-    intervention: Optional[dict] = None
+    # ARIS Round 4 W4-intervention-wire (closes B1 + R1 N5 + R2 G4) — the
+    # counterfactual's lineage surface carries every intervention applied,
+    # not just the first. Python-side form: a list of bare-string-keyed
+    # dicts (``{"step": int, "field": "action"|"obs", "new_value": ...}``).
+    # The EDN wire form (``to_edn``) keywordifies each entry to match
+    # ``:persistence.replay/intervention``. ``from_edn`` strips colons
+    # back to bare-string form on the inverse path.
+    intervention: Optional[list[dict]] = None
     agent: str = ""
     goal: dict = field(default_factory=dict)
     seeds: dict = field(default_factory=lambda: {"llm": 0, "tool": 0, "env": 0})
@@ -250,7 +257,17 @@ class Trajectory:
             ":trajectory/hash": hash_val,
         }
         if self.intervention is not None:
-            edn[":trajectory/intervention"] = self.intervention
+            # W4-intervention-wire: keywordify each intervention's keys at
+            # the wire boundary. The engine emits Python-native
+            # ``{"step": ..., "field": "action", "new_value": ...}``; the
+            # spec ``:persistence.replay/intervention`` requires
+            # ``{":step": ..., ":field": :action, ":new-value": ...}`` with
+            # ``:field`` itself a keyword. This is the symmetric
+            # serialisation-time transform (matches ``_principal_to_keyword_map``
+            # in audit.py). Accept pre-keywordified inputs idempotently.
+            edn[":trajectory/intervention"] = [
+                _intervention_to_wire(iv) for iv in self.intervention
+            ]
         if tags:
             edn[":trajectory/tags"] = tags
         # Self-conform at the wire boundary (ARIS Round 3 P-audit-conform).
@@ -304,11 +321,25 @@ class Trajectory:
         facts = [Fact.from_edn(f) if _looks_like_edn_fact(f) else Fact.from_dict(f)
                  for f in facts_raw]
 
+        # W4-intervention-wire: de-keywordify intervention list back to
+        # Python-native form (bare-string keys, bare-string :field value).
+        # Accepts legacy single-dict payloads by wrapping them into a
+        # 1-list, so older serialised trajectories continue to load.
+        iv_raw = d.get(":trajectory/intervention")
+        if iv_raw is None:
+            intervention = None
+        elif isinstance(iv_raw, list):
+            intervention = [_intervention_from_wire(iv) for iv in iv_raw]
+        else:
+            # Legacy single-dict form — lift into a 1-list for forward
+            # compatibility.
+            intervention = [_intervention_from_wire(iv_raw)]
+
         return cls(
             id=id_str,
             parent_id=parent_str,
             branch_point=branch_point_raw,
-            intervention=d.get(":trajectory/intervention"),
+            intervention=intervention,
             agent=d.get(":trajectory/agent", "") or "",
             goal=d.get(":trajectory/goal", {}) or {},
             seeds=seeds,
@@ -358,6 +389,59 @@ def _started_at_to_inst(raw: Any) -> _dt.datetime:
 
 def _looks_like_edn_fact(f: Any) -> bool:
     return isinstance(f, dict) and any(k.startswith(":") for k in f.keys())
+
+
+# ---------------------------------------------------------------------------
+# Intervention wire helpers (ARIS Round 4 W4-intervention-wire)
+#
+# The engine writes Python-native interventions with bare-string keys
+# (``{"step": int, "field": "action"|"obs", "new_value": ...}``); the spec
+# ``:persistence.replay/intervention`` requires EDN keyword form
+# (``{":step": int, ":field": :action|:obs, ":new-value": ...}``). These
+# helpers are the single serialisation-time boundary between the two, so
+# the engine code stays Python-idiomatic and the wire form conforms.
+# Both helpers are idempotent — calling them on an already-keyworded (or
+# already-bare) dict is a no-op in the relevant direction.
+# ---------------------------------------------------------------------------
+
+
+def _intervention_to_wire(iv: dict) -> dict:
+    """Keywordify a single intervention dict for the EDN wire boundary.
+
+    Maps bare-string keys → ``:kw`` keys and keywordifies the ``:field``
+    value (``"action"`` → ``":action"``). Any extra keys pass through with
+    a leading colon (open-map convention).
+    """
+    if not isinstance(iv, dict):
+        # Let the spec check reject non-dicts loudly downstream.
+        return iv
+    out: dict[str, Any] = {}
+    # Known intervention keys with their wire-form spellings. ``new_value``
+    # becomes ``:new-value`` (hyphen, not underscore), matching the spec
+    # registered at spec/_canonical.py.
+    key_map = {"step": ":step", "field": ":field", "new_value": ":new-value"}
+    for k, v in iv.items():
+        wire_key = key_map.get(k, _kw(k) if isinstance(k, str) else k)
+        if wire_key == ":field" and isinstance(v, str) and not v.startswith(":"):
+            v = ":" + v
+        out[wire_key] = v
+    return out
+
+
+def _intervention_from_wire(iv: dict) -> dict:
+    """Inverse of :func:`_intervention_to_wire`. Recovers bare-string keys
+    and bare ``field`` value.
+    """
+    if not isinstance(iv, dict):
+        return iv
+    out: dict[str, Any] = {}
+    key_map = {":step": "step", ":field": "field", ":new-value": "new_value"}
+    for k, v in iv.items():
+        bare_key = key_map.get(k, _from_kw(k) if isinstance(k, str) else k)
+        if bare_key == "field" and isinstance(v, str) and v.startswith(":"):
+            v = v[1:]
+        out[bare_key] = v
+    return out
 
 
 # ----------------------------------------------------------------------- hash

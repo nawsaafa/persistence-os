@@ -211,23 +211,28 @@ def test_multi_step_simultaneous_interventions_produce_consistent_hash(
     )
     assert cf_b.branch_point == expected_branch
 
-    # G4: intervention shape assertions. The current Phase-1 engine
-    # stores only the first intervention on ``Trajectory.intervention``
-    # (see ``src/persistence/replay/engine.py:164`` and the
-    # ``Optional[dict]`` type on ``Trajectory.intervention``). We pin
-    # that shape exactly so a regression (e.g. storing the wrong one,
-    # or None when interventions were supplied) fails loudly, and we
-    # pin the submitted input list length separately.
+    # G4: intervention shape assertions. ARIS Round 4 W4-intervention-wire
+    # fixed B1 — ``Trajectory.intervention`` now stores the FULL list of
+    # interventions submitted to ``replay(...)``, not just the first
+    # (engine.py:165 was ``copy.deepcopy(interventions[0])``; now
+    # ``[copy.deepcopy(iv) for iv in interventions]``). The type
+    # annotation on ``Trajectory.intervention`` is
+    # ``Optional[list[dict]]`` and the ``:persistence.replay/intervention``
+    # spec slot is ``seq_of(...)``. We pin the new correct shape so any
+    # regression (collapsing back to dict, or losing entries) fails loudly.
     assert len(interventions) == 2, "submitted list shape precondition"
-    assert isinstance(cf_a.intervention, dict), (
-        "Phase 1 stores only the first intervention; multi-intervention "
-        "list storage on Trajectory is a Phase 2 upgrade tracked as "
-        "a surfaced-bug item in ARIS Round 3 WORKER-SUMMARY"
+    assert isinstance(cf_a.intervention, list), (
+        "Round 4 stores every intervention on Trajectory.intervention — "
+        "the lineage surface must match the list submitted to replay()."
     )
-    first = interventions[0]
-    assert cf_a.intervention["step"] == first["step"]
-    assert cf_a.intervention["field"] == first["field"]
-    assert cf_a.intervention["new_value"] == first["new_value"]
+    assert len(cf_a.intervention) == len(interventions), (
+        f"expected {len(interventions)} stored interventions, got "
+        f"{len(cf_a.intervention)}"
+    )
+    for stored, submitted in zip(cf_a.intervention, interventions):
+        assert stored["step"] == submitted["step"]
+        assert stored["field"] == submitted["field"]
+        assert stored["new_value"] == submitted["new_value"]
     assert cf_a.intervention == cf_b.intervention, (
         "intervention record diverged across two deterministic replays"
     )

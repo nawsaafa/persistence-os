@@ -161,7 +161,13 @@ def replay(
     new_traj = Trajectory(
         parent_id=traj.id,
         branch_point=branch_point,
-        intervention=copy.deepcopy(interventions[0]),
+        # ARIS Round 4 W4-intervention-wire (closes B1 + R1 N5 + R2 G4) —
+        # store ALL interventions on the counterfactual's lineage surface,
+        # not just the first. The replay loop below (``interventions_by_step``)
+        # has always applied every intervention correctly; this fix brings
+        # the lineage field into parity with the effect, so regulator-replay
+        # and DPO consumers see the full interventional decomposition.
+        intervention=[copy.deepcopy(iv) for iv in interventions],
         agent=traj.agent,
         goal=copy.deepcopy(traj.goal),
         seeds=dict(traj.seeds),

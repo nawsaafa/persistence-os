@@ -10,12 +10,16 @@ Public surface:
 - :class:`DBView`  — snapshot view + entity projection
 - :class:`Store`   — storage backend protocol
 - :class:`InMemoryStore` / :class:`SQLiteStore` — reference backends
+- :func:`load_migrations` — list of ``(name, sql)`` DDL blobs
 """
 
 from persistence.fact.datom import Datom, Op
+from persistence.fact.db import DB, DBView
 from persistence.fact.store import InMemoryStore, SQLiteStore, Store, load_migrations
 
 __all__ = [
+    "DB",
+    "DBView",
     "Datom",
     "InMemoryStore",
     "Op",

@@ -1,0 +1,266 @@
+"""Effect runtime — Effect primitive, Handler, Runtime, perform, mask, named.
+
+Models paper §4.2: a handler stack H = [h_1 ... h_n] with h_1 outermost
+dispatches operation κ to the outermost handler whose domain (wraps)
+contains κ; that handler invokes continuation k, which delegates to the
+remaining stack.
+
+Koka-style additions:
+- **Named handlers.** Every handler carries a ``name``; ``named(name, op, **args)``
+  dispatches to a specific handler regardless of stack order.
+- **Masked effects.** ``with mask(name):`` temporarily hides the named handler
+  from the dispatch search — so a policy handler can itself call ``:llm/call``
+  without re-triggering its own audit wrap.
+
+No hidden globals across threads: the active runtime lives in a ``ContextVar``,
+and each ``Runtime`` owns its handler list plus its own mask set.
+"""
+from __future__ import annotations
+
+import contextlib
+import contextvars
+from dataclasses import dataclass, field
+from typing import Any, Callable, Iterable, Iterator
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class Unhandled(RuntimeError):
+    """No handler (or no *unmasked* handler) covers a performed op."""
+
+
+# ---------------------------------------------------------------------------
+# Effect primitive
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Effect:
+    """A labeled operation plus its arguments.
+
+    Intentionally minimal — the heavy lifting is in the handler stack.
+    """
+
+    op: str
+    args: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
+# Handler
+# ---------------------------------------------------------------------------
+
+
+# Clause signature: (args, k, ctx) -> result
+Clause = Callable[[dict[str, Any], Callable[[dict[str, Any]], Any], dict[str, Any]], Any]
+
+
+@dataclass
+class Handler:
+    """A handler is a set of clauses keyed by op, plus a name and per-instance ctx.
+
+    - ``name`` — identity for ``named(...)`` dispatch and ``mask(...)`` hiding.
+    - ``wraps`` — the set of ops this handler *might* handle; ops outside this
+      set are passed through.
+    - ``clauses`` — map from op to Clause. ``clauses.keys() <= wraps`` by
+      construction (checked in ``__post_init__``).
+    - ``ctx`` — per-instance state. Mutated freely by the handler's own
+      clauses but never shared across handler instances.
+    """
+
+    name: str
+    wraps: set[str]
+    clauses: dict[str, Clause]
+    ctx: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Allow clauses.keys() to be a subset of wraps but not exceed it.
+        extra = set(self.clauses) - set(self.wraps)
+        if extra:
+            raise ValueError(
+                f"handler {self.name!r} declares clauses {extra!r} outside its wraps set"
+            )
+
+    def invoke(
+        self,
+        op: str,
+        args: dict[str, Any],
+        k: Callable[[dict[str, Any]], Any],
+    ) -> Any:
+        return self.clauses[op](args, k, self.ctx)
+
+
+# ---------------------------------------------------------------------------
+# Runtime
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Runtime:
+    """A handler stack. ``handlers[0]`` is the innermost (raw); the last
+    element is the outermost. This matches the prototype in spec §8, where
+    ``reversed(_stack)`` walks outermost→innermost.
+    """
+
+    handlers: list[Handler] = field(default_factory=list)
+    # Stack of masked handler names (set-of-sets, nested masks push a frame).
+    _masks: list[set[str]] = field(default_factory=list)
+
+    # ---------- introspection ----------
+
+    def is_well_formed(self, catalog: Iterable[str]) -> bool:
+        """Paper §4.2 Proposition 2.
+
+        A stack is well-formed iff every op in ``catalog`` has at least one
+        handler covering it.
+        """
+        return not self.uncovered_ops(catalog)
+
+    def uncovered_ops(self, catalog: Iterable[str]) -> set[str]:
+        covered: set[str] = set()
+        for h in self.handlers:
+            covered |= set(h.clauses)
+        return set(catalog) - covered
+
+    # ---------- dispatch ----------
+
+    def _masked_names(self) -> set[str]:
+        if not self._masks:
+            return set()
+        out: set[str] = set()
+        for frame in self._masks:
+            out |= frame
+        return out
+
+    def perform(self, op: str, args: dict[str, Any]) -> Any:
+        """Dispatch ``op`` through the stack, outermost first."""
+        masked = self._masked_names()
+        # Build the ordered list of (handler, index) candidates — outermost first.
+        # Handlers whose name is masked are skipped entirely.
+        candidates: list[tuple[int, Handler]] = []
+        for i in range(len(self.handlers) - 1, -1, -1):
+            h = self.handlers[i]
+            if h.name in masked:
+                continue
+            if op in h.clauses:
+                candidates.append((i, h))
+        if not candidates:
+            raise Unhandled(f"no handler covers op {op!r}")
+
+        # Continuation for position p = dispatch to the next candidate after p.
+        def make_k(pos: int) -> Callable[[dict[str, Any]], Any]:
+            def k(passed_args: dict[str, Any]) -> Any:
+                if pos + 1 >= len(candidates):
+                    raise Unhandled(
+                        f"op {op!r} reached the bottom of the stack "
+                        "(no raw handler for this op)"
+                    )
+                _, next_h = candidates[pos + 1]
+                return next_h.invoke(op, passed_args, make_k(pos + 1))
+            return k
+
+        _, outer = candidates[0]
+        return outer.invoke(op, args, make_k(0))
+
+    def named_perform(self, name: str, op: str, args: dict[str, Any]) -> Any:
+        """Dispatch ``op`` directly to the handler with ``name``.
+
+        The handler is still permitted to call ``k``; when it does, the
+        continuation walks the remaining handlers below it in the stack,
+        which makes named dispatch a useful way to address e.g. an
+        ``audit-archive`` sink that itself uses the clock/random handlers.
+        """
+        # Find the target handler index.
+        target_index = None
+        for i, h in enumerate(self.handlers):
+            if h.name == name:
+                target_index = i
+                break
+        if target_index is None:
+            raise Unhandled(f"no handler named {name!r}")
+        target = self.handlers[target_index]
+        if op not in target.clauses:
+            raise Unhandled(
+                f"handler {name!r} does not handle op {op!r} "
+                f"(handles {sorted(target.clauses)!r})"
+            )
+
+        # Continuation for named call = effectful dispatch through ops *below*
+        # the target handler. We emulate this by building candidates starting
+        # at ``target_index`` and walking downward.
+        masked = self._masked_names()
+        candidates: list[Handler] = []
+        for i in range(target_index, -1, -1):
+            h = self.handlers[i]
+            if i != target_index and h.name in masked:
+                continue
+            if op in h.clauses:
+                candidates.append(h)
+
+        def make_k(pos: int) -> Callable[[dict[str, Any]], Any]:
+            def k(passed_args: dict[str, Any]) -> Any:
+                if pos + 1 >= len(candidates):
+                    raise Unhandled(
+                        f"named op {op!r} reached the bottom of the stack"
+                    )
+                return candidates[pos + 1].invoke(op, passed_args, make_k(pos + 1))
+            return k
+
+        return candidates[0].invoke(op, args, make_k(0))
+
+
+# ---------------------------------------------------------------------------
+# Context-local active runtime
+# ---------------------------------------------------------------------------
+
+
+_active: contextvars.ContextVar[Runtime | None] = contextvars.ContextVar(
+    "persistence_effect_active_runtime", default=None
+)
+
+
+@contextlib.contextmanager
+def with_runtime(rt: Runtime) -> Iterator[Runtime]:
+    """Activate ``rt`` for the duration of the ``with`` block."""
+    token = _active.set(rt)
+    try:
+        yield rt
+    finally:
+        _active.reset(token)
+
+
+def _current() -> Runtime:
+    rt = _active.get()
+    if rt is None:
+        raise Unhandled("no active runtime (wrap in `with with_runtime(...)`)")
+    return rt
+
+
+def perform(op: str, **args: Any) -> Any:
+    """Perform an effect against the currently-active runtime."""
+    return _current().perform(op, args)
+
+
+def named(name: str, op: str, **args: Any) -> Any:
+    """Perform an effect targeting a specific named handler."""
+    return _current().named_perform(name, op, args)
+
+
+@contextlib.contextmanager
+def mask(*names: str) -> Iterator[None]:
+    """Within the block, hide the named handlers from dispatch.
+
+    Masking is cumulative: ``with mask("a"): with mask("b"):`` hides both.
+    Masks are scoped to the current runtime; exiting the block restores the
+    previous state exactly.
+    """
+    rt = _current()
+    frame = set(names)
+    rt._masks.append(frame)
+    try:
+        yield
+    finally:
+        popped = rt._masks.pop()
+        assert popped is frame, "mask stack corrupted"

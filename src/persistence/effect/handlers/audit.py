@@ -124,8 +124,17 @@ class AuditEntry:
         # idempotently collapse — see R3 R4-N3.
 
         if self.policy_id is not None and isinstance(self.policy_id, str):
-            if not self.policy_id.startswith(":"):
-                object.__setattr__(self, "policy_id", ":" + self.policy_id)
+            # ARIS Round 5 W-polish3 W6-canonicalize-harmonize (closes
+            # R5 N2 MINOR). Use ``":" + lstrip(":")`` to match sibling
+            # fields ``handler_chain`` / ``principal`` keys — idempotent
+            # on any number of leading colons (``"::x"`` → ``":x"``).
+            # The previous prepend-if-missing branch left multi-colon
+            # inputs unchanged, so two AuditEntry values with
+            # ``policy_id="::x"`` and ``policy_id=":x"`` had divergent
+            # shapes (non-idempotent under repeat construction).
+            object.__setattr__(
+                self, "policy_id", ":" + self.policy_id.lstrip(":")
+            )
 
         if self.handler_chain is not None:
             # Canonicalise each entry to bare form. ``lstrip(":")`` is

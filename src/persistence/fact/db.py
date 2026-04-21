@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import itertools
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -28,10 +27,10 @@ from typing import Any, Iterable, Iterator, Optional
 from persistence.fact.datom import Datom
 from persistence.fact.store import InMemoryStore, Store
 
-# Module-level monotonic transaction counter. A single-writer deployment is
-# the simplest thing that works; Postgres operators should switch this for a
-# SEQUENCE. The conftest resets it between tests so ids are predictable.
-_tx_counter = itertools.count(1)
+# Transaction ids are allocated by the Store (see Store.next_tx), not by a
+# module-level counter. Two InMemoryStore instances each get their own id
+# sequence starting at 1; a SQLiteStore reopened against an existing file
+# resumes at ``max(tx) + 1`` instead of stomping on row 1 (ARIS R3 F10).
 
 
 def _now_utc() -> datetime:
@@ -83,7 +82,7 @@ class DB:
             return self
 
         prov_base: dict = provenance or {}
-        tx = next(_tx_counter)
+        tx = self.store.next_tx()
         now = _now_utc()
         new_datoms: list[Datom] = []
         invalidations: list[tuple[int, int]] = []  # (old_tx, new_tx=tx)

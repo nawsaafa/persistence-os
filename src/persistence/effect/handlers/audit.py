@@ -165,6 +165,55 @@ class AuditEntry:
             )
         return edn
 
+    @classmethod
+    def from_edn(cls, edn: dict[str, Any]) -> AuditEntry:
+        """Inverse of :meth:`to_edn` — reconstruct an ``AuditEntry`` from
+        its ``:persistence.effect/audit-entry`` wire form.
+
+        Closes ARIS Round 3 R3 N6: Phase-2 regulator-replay needs the
+        audit-entry-wire → AuditEntry inverse (the existing
+        ``datom_to_audit_entry`` is a different shape — it inverts the
+        datom wire form, not the audit-entry wire form). This is the
+        symmetric producer: keyworded entries on the wire come back as
+        bare-string Python-native form.
+        """
+        # recorded_at → float seconds since epoch (the in-memory representation
+        # the dataclass uses; ``to_edn`` projects it to a tz-aware datetime).
+        recorded_at_raw = edn.get(":audit/recorded-at")
+        if isinstance(recorded_at_raw, _dt.datetime):
+            recorded_at = recorded_at_raw.timestamp()
+        else:
+            recorded_at = float(recorded_at_raw)  # type: ignore[arg-type]
+
+        # run_id: uuid.UUID on the wire → str on the Python side.
+        run_id_raw = edn.get(":audit/run-id")
+        if run_id_raw is not None:
+            run_id = str(run_id_raw)
+        else:
+            run_id = None
+
+        # Verdict: ":ok" on wire → "ok" on Python.
+        verdict = _verdict_as_python(edn[":audit/verdict"])
+
+        return cls(
+            id=edn[":audit/id"],
+            prev_hash=edn.get(":audit/prev-hash"),
+            op=edn[":audit/op"],
+            args_hash=edn[":audit/args-hash"],
+            verdict=verdict,
+            latency_ms=edn[":audit/latency-ms"],
+            recorded_at=recorded_at,
+            result_hash=edn.get(":audit/result-hash"),
+            error=edn.get(":audit/error"),
+            policy_id=edn.get(":audit/policy-id"),
+            handler_chain=_handler_chain_from_keywords(
+                edn.get(":audit/handler-chain", ())
+            ),
+            principal=_keyword_map_to_principal(edn.get(":audit/principal", {})),
+            run_id=run_id,
+            parent=edn.get(":audit/parent"),
+        )
+
 
 # ---------------------------------------------------------------------------
 # ID / chain computation

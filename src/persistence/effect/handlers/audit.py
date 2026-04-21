@@ -301,11 +301,13 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
     """
     inst = _recorded_at_to_inst(entry.recorded_at)
     # EDN keyword regex allows a single namespace slash; the op name may itself
-    # contain a slash (e.g. "llm/call"). Encode the inner slash as a dot so
-    # ":audit/llm.call" is a valid keyword. datom_to_audit_entry is the
+    # contain a slash (e.g. "llm/call" or the colon-prefixed ":llm/call").
+    # Strip any leading colon on the op, then encode the inner slash as a dot
+    # so ":audit/llm.call" is a valid keyword. datom_to_audit_entry is the
     # symmetric decoder — these two are co-inverse only because no op in the
     # catalog contains a literal ``.``.
-    a_keyword = ":audit/" + entry.op.replace("/", ".")
+    op_bare = entry.op.lstrip(":")
+    a_keyword = ":audit/" + op_bare.replace("/", ".")
     provenance: dict[str, Any] = {
         ":source": ":persistence.effect.audit",
         ":confidence": 1.0,
@@ -349,8 +351,9 @@ def datom_to_audit_entry(datom: dict[str, Any]) -> AuditEntry:
     value = datom[":datom/v"]
     a = datom[":datom/a"]
     assert a.startswith(":audit/"), f"not an audit datom: {a}"
-    # Decode ``llm.call`` → ``llm/call`` — see audit_entry_to_datom.
-    op = a[len(":audit/") :].replace(".", "/")
+    # Decode ``llm.call`` → ``:llm/call`` — see audit_entry_to_datom. The
+    # original op was leading-colon EDN keyword form; re-add the colon.
+    op = ":" + a[len(":audit/") :].replace(".", "/")
     recorded_at = datom[":datom/tx-time"]
     if isinstance(recorded_at, _dt.datetime):
         recorded_at = recorded_at.timestamp()

@@ -89,11 +89,11 @@ def test_catalog_importable_from_package():
     import pytest
 
     from persistence.effect import CATALOG, OP_NAMES, validate_args
-    assert "llm/call" in OP_NAMES
-    assert "llm/call" in CATALOG
+    assert ":llm/call" in OP_NAMES
+    assert ":llm/call" in CATALOG
     # smoke: raises on unknown op
     with pytest.raises(KeyError):
-        validate_args("nope", {})
+        validate_args(":nope", {})
 
 
 def test_all_names_are_actually_attributes():

@@ -14,7 +14,7 @@ Schema sources (see ``docs/``):
 """
 from __future__ import annotations
 
-from ._combinators import enum, keys, map_of, maybe, ref, seq_of
+from ._combinators import enum, keys, map_of, maybe, or_, ref, seq_of
 from ._primitives import float_, inst, int_, str_, uuid_
 from ._registry import register
 from ._types import ConformError, Conformed, Spec
@@ -95,6 +95,39 @@ class _NonEmptyStr(Spec):
         import string
         n = random.randint(3, 20)
         return "".join(random.choices(string.ascii_letters + " ", k=n)).strip() or "x"
+
+
+class _Sha256Spec(Spec):
+    """Content-address string: ``sha256:<hex>``."""
+
+    spec_name: str = ":persistence.spec/sha256"
+
+    def _conform(self, value):
+        import re as _re
+        if not isinstance(value, str):
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason=f"expected str, got {type(value).__name__}",
+                hint="provide a sha256:HEX content-address",
+            )
+        if not _re.fullmatch(r"sha256:[0-9a-fA-F]+", value):
+            return ConformError(
+                spec_key=self.spec_name,
+                value=value,
+                reason="not a sha256 address",
+                hint="format as 'sha256:<hex>' (e.g. 'sha256:abc123')",
+            )
+        return Conformed(value=value, spec_key=self.spec_name)
+
+    def _generate(self):
+        import random
+        import string
+        n = random.choice([8, 16, 64])
+        return "sha256:" + "".join(random.choices(string.hexdigits.lower(), k=n))
+
+
+_sha256_spec = _Sha256Spec()
 
 
 #: float in [0, 1] — probabilities, confidences, percents
@@ -194,12 +227,20 @@ class _AnyValueSpec(Spec):
 _any_value = _AnyValueSpec()
 
 
+# ARIS R1 F2 / R3 F1: content addressing (sha256:<hex>) is load-bearing
+# for the effect→fact audit boundary (paper §4.1). :datom/e accepts a
+# canonical UUID OR a content-hash string; :datom/tx accepts an int OR a
+# content-hash string. Relaxing the spec rather than coercing the effect
+# module preserves content addressing end-to-end.
+_datom_e = or_(uuid_(), _sha256_spec)
+_datom_tx = or_(int_(), _sha256_spec)
+
 _datom = keys(
     required={
-        ":datom/e": uuid_(),
+        ":datom/e": _datom_e,
         ":datom/a": _keyword_spec,
         ":datom/v": _any_value,
-        ":datom/tx": int_(),
+        ":datom/tx": _datom_tx,
         ":datom/tx-time": inst(),
         ":datom/valid-from": inst(),
         ":datom/valid-to": maybe(inst()),
@@ -207,7 +248,7 @@ _datom = keys(
         ":datom/provenance": _provenance,
     },
     optional={
-        ":datom/invalidated-by": maybe(int_()),
+        ":datom/invalidated-by": maybe(or_(int_(), _sha256_spec)),
     },
 )
 
@@ -251,6 +292,10 @@ _cost = keys(
     optional={":category": _keyword_spec},
 )
 
+# ARIS R1 F6 — ``make_audit_handler(policy_id=None)`` is the default;
+# requiring a keyword here means every in-module test fails conform on
+# its own entries. Move :audit/policy-id to optional. When present, it
+# must still be a namespaced keyword.
 _audit_entry = keys(
     required={
         ":audit/id": uuid_(),
@@ -260,7 +305,6 @@ _audit_entry = keys(
         ":audit/args": map_of(str_(), _any_value),
         ":audit/args-hash": str_(),
         ":audit/verdict": _verdict,
-        ":audit/policy-id": _keyword_spec,
         ":audit/result": _any_value,
         ":audit/latency-ms": int_(),
         ":audit/cost": _cost,
@@ -269,6 +313,9 @@ _audit_entry = keys(
         ":audit/handler-chain": seq_of(_keyword_spec),
         ":audit/principal": map_of(_keyword_spec, _any_value),
         ":audit/prev-hash": maybe(str_()),
+    },
+    optional={
+        ":audit/policy-id": _keyword_spec,
     },
 )
 register(":persistence.effect/audit-entry", _audit_entry)
@@ -288,39 +335,6 @@ PLAN_NODE_KINDS = (
 )
 
 _plan_kind = enum(*PLAN_NODE_KINDS)
-
-class _Sha256Spec(Spec):
-    """Content-address string: ``sha256:<hex>``."""
-
-    spec_name: str = ":persistence.spec/sha256"
-
-    def _conform(self, value):
-        import re as _re
-        if not isinstance(value, str):
-            return ConformError(
-                spec_key=self.spec_name,
-                value=value,
-                reason=f"expected str, got {type(value).__name__}",
-                hint="provide a sha256:HEX content-address",
-            )
-        if not _re.fullmatch(r"sha256:[0-9a-fA-F]+", value):
-            return ConformError(
-                spec_key=self.spec_name,
-                value=value,
-                reason="not a sha256 address",
-                hint="format as 'sha256:<hex>' (e.g. 'sha256:abc123')",
-            )
-        return Conformed(value=value, spec_key=self.spec_name)
-
-    def _generate(self):
-        import random
-        import string
-        n = random.choice([8, 16, 64])
-        return "sha256:" + "".join(random.choices(string.hexdigits.lower(), k=n))
-
-
-_sha256_spec = _Sha256Spec()
-
 
 class _VersionSpec(Spec):
     """Version tag like ``v1``, ``v27``."""
@@ -411,19 +425,23 @@ _seeds = keys(
 _trajectory_status = enum(":running", ":completed", ":failed", ":counterfactual")
 _wall_clock_basis = enum(":recorded", ":now")
 
+# ARIS R1 F5 — the Python agent reference implementation stores state/obs/
+# action with bare string keys (spec §7 prototype uses ``"balance"``, not
+# ``":balance"``). Keywords are the wire format; Python uses strings. Allow
+# either so the replay module's own fixtures conform out of the box.
 _trajectory_fact = keys(
     required={
         ":step": int_(),
         ":t": inst(),
-        ":state": map_of(_keyword_spec, _any_value),
-        ":obs": map_of(_keyword_spec, _any_value),
-        ":action": map_of(_keyword_spec, _any_value),
+        ":state": map_of(str_(), _any_value),
+        ":obs": map_of(str_(), _any_value),
+        ":action": map_of(str_(), _any_value),
     },
     optional={
-        ":llm-in": map_of(_keyword_spec, _any_value),
-        ":llm-out": map_of(_keyword_spec, _any_value),
+        ":llm-in": map_of(str_(), _any_value),
+        ":llm-out": map_of(str_(), _any_value),
         ":tool-calls": seq_of(_any_value),
-        ":random-draws": map_of(_keyword_spec, _any_value),
+        ":random-draws": map_of(str_(), _any_value),
     },
 )
 register(":persistence.replay/fact", _trajectory_fact)

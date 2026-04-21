@@ -18,7 +18,7 @@ from persistence.effect.runtime import Handler
 
 def make_cache_handler(
     *,
-    wraps: Iterable[str] = ("llm/call", "net/fetch"),
+    wraps: Iterable[str] = (":llm/call", ":net/fetch"),
     store: MutableMapping[str, Any] | None = None,
 ) -> Handler:
     """Return a cache handler.

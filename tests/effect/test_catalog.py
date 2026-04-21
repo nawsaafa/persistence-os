@@ -17,21 +17,21 @@ def test_catalog_has_exactly_15_ops():
 
 def test_catalog_covers_all_spec_ops():
     expected = {
-        "llm/call",
-        "tool/call",
-        "mem/read",
-        "mem/write",
-        "decide",
-        "ask-user",
-        "emit-artifact",
-        "sleep",
-        "random",
-        "env/read",
-        "net/fetch",
-        "secret/use",
-        "cost/charge",
-        "clock/now",
-        "audit/emit",
+        ":llm/call",
+        ":tool/call",
+        ":mem/read",
+        ":mem/write",
+        ":decide",
+        ":ask-user",
+        ":emit-artifact",
+        ":sleep",
+        ":random",
+        ":env/read",
+        ":net/fetch",
+        ":secret/use",
+        ":cost/charge",
+        ":clock/now",
+        ":audit/emit",
     }
     assert OP_NAMES == expected
 
@@ -46,17 +46,17 @@ def test_every_op_has_args_and_returns_schema():
 
 def test_validate_args_accepts_well_typed_call():
     """llm/call expects model, messages — well-typed payload passes."""
-    validate_args("llm/call", {"model": "claude", "messages": [{"role": "user"}]})
+    validate_args(":llm/call", {"model": "claude", "messages": [{"role": "user"}]})
 
 
 def test_validate_args_rejects_missing_required_field():
     with pytest.raises(ValueError, match="missing"):
-        validate_args("llm/call", {"messages": []})  # no :model
+        validate_args(":llm/call", {"messages": []})  # no :model
 
 
 def test_validate_args_rejects_wrong_type():
     with pytest.raises(TypeError):
-        validate_args("llm/call", {"model": 42, "messages": []})
+        validate_args(":llm/call", {"model": 42, "messages": []})
 
 
 def test_validate_args_rejects_unknown_op():
@@ -66,14 +66,14 @@ def test_validate_args_rejects_unknown_op():
 
 def test_validate_args_tolerates_extra_fields():
     """Extra args are allowed — handlers may add auxiliary metadata."""
-    validate_args("llm/call", {"model": "m", "messages": [], "extra": 1})
+    validate_args(":llm/call", {"model": "m", "messages": [], "extra": 1})
 
 
 def test_clock_now_takes_empty_args():
-    validate_args("clock/now", {})
+    validate_args(":clock/now", {})
 
 
 def test_sleep_requires_int_ms():
-    validate_args("sleep", {"ms": 100})
+    validate_args(":sleep", {"ms": 100})
     with pytest.raises(TypeError):
-        validate_args("sleep", {"ms": "100"})
+        validate_args(":sleep", {"ms": "100"})

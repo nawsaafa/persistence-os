@@ -44,7 +44,7 @@ def _redact_in_place(value: Any, fields: set[str], paths: set[str], prefix: str 
 def make_pii_redact_handler(
     *,
     schema: dict[str, set[str]],
-    wraps: Iterable[str] = ("net/fetch", "tool/call", "emit-artifact"),
+    wraps: Iterable[str] = (":net/fetch", ":tool/call", ":emit-artifact"),
 ) -> Handler:
     """Return a PII-redact handler."""
     fields = set(schema.get("fields", set()))

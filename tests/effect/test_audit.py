@@ -14,7 +14,7 @@ from persistence.effect.runtime import Handler, Runtime, mask, perform, with_run
 
 def _stack_with_audit(entries, clock_ts=1_712_000_000_000):
     """audit → raw-echo for :llm/call, with a fixed clock."""
-    audit = make_audit_handler(entries, wraps={"llm/call", "decide"})
+    audit = make_audit_handler(entries, wraps={":llm/call", ":decide"})
     raw = make_echo_llm_handler()
     clock = make_fixed_clock_handler(ts=clock_ts)
     return Runtime([raw, clock, audit])
@@ -27,10 +27,10 @@ def test_audit_captures_op_and_args_hash():
     entries: list[AuditEntry] = []
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "hi"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "hi"}])
     assert len(entries) == 1
     e = entries[0]
-    assert e.op == "llm/call"
+    assert e.op == ":llm/call"
     assert e.args_hash.startswith("sha256:")
     assert e.verdict == "ok"
 
@@ -39,7 +39,7 @@ def test_audit_latency_ms_is_non_negative():
     entries: list[AuditEntry] = []
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[])
+        perform(":llm/call", model="m", messages=[])
     assert entries[0].latency_ms >= 0
 
 
@@ -50,7 +50,7 @@ def test_prev_hash_of_first_entry_is_none():
     entries: list[AuditEntry] = []
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[])
+        perform(":llm/call", model="m", messages=[])
     assert entries[0].prev_hash is None
 
 
@@ -58,9 +58,9 @@ def test_prev_hash_of_nth_entry_is_id_of_prior():
     entries: list[AuditEntry] = []
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "a"}])
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "b"}])
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "c"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "a"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "b"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "c"}])
     assert len(entries) == 3
     assert entries[1].prev_hash == entries[0].id
     assert entries[2].prev_hash == entries[1].id
@@ -72,7 +72,7 @@ def test_tampering_an_entry_breaks_the_chain():
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
         for i in range(3):
-            perform("llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+            perform(":llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
     from persistence.effect.handlers.audit import verify_chain
     assert verify_chain(entries) is True
     # Tamper
@@ -87,7 +87,7 @@ def test_audit_entry_to_datom_has_fact_schema_fields():
     entries: list[AuditEntry] = []
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[])
+        perform(":llm/call", model="m", messages=[])
     datom = audit_entry_to_datom(entries[0])
     # Required fields from agent1-fact-spec §1 (the 8-tuple).
     for key in (
@@ -112,7 +112,7 @@ def test_datom_roundtrip_preserves_audit_entry():
     entries: list[AuditEntry] = []
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "x"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "x"}])
     original = entries[0]
     datom = audit_entry_to_datom(original)
     restored = datom_to_audit_entry(datom)
@@ -140,22 +140,22 @@ def test_audit_routes_sink_through_named_handler_not_disk():
 
     audit = make_audit_handler(
         entries,
-        wraps={"llm/call"},
+        wraps={":llm/call"},
         sink_name="archive",  # forward to named handler
     )
     raw = make_echo_llm_handler()
     clock = make_fixed_clock_handler(ts=1_712_000_000_000)
     sink = Handler(
         name="archive",
-        wraps={"audit/emit"},
-        clauses={"audit/emit": sink_clause},
+        wraps={":audit/emit"},
+        clauses={":audit/emit": sink_clause},
     )
     rt = Runtime([raw, clock, sink, audit])
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[])
+        perform(":llm/call", model="m", messages=[])
     assert len(sink_calls) == 1
     assert sink_calls[0]["kind"] == "audit-entry"
-    assert sink_calls[0]["payload"]["op"] == "llm/call"
+    assert sink_calls[0]["payload"]["op"] == ":llm/call"
 
 
 # ---------- mask prevents re-entry ----------
@@ -167,7 +167,7 @@ def test_audit_masked_inside_body_prevents_re_entry():
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
         with mask("audit"):
-            perform("llm/call", model="m", messages=[])
+            perform(":llm/call", model="m", messages=[])
     assert entries == []  # masked body did not audit
 
 
@@ -177,17 +177,17 @@ def test_audit_masked_inside_body_prevents_re_entry():
 def test_audit_records_error_verdict():
     """Failed calls must still produce an audit entry (intent logging)."""
     entries: list[AuditEntry] = []
-    audit = make_audit_handler(entries, wraps={"llm/call"})
+    audit = make_audit_handler(entries, wraps={":llm/call"})
 
     def failing(args, k, ctx):
         raise RuntimeError("vendor down")
 
-    raw = Handler(name="raw", wraps={"llm/call"}, clauses={"llm/call": failing})
+    raw = Handler(name="raw", wraps={":llm/call"}, clauses={":llm/call": failing})
     clock = make_fixed_clock_handler(ts=1_712_000_000_000)
     rt = Runtime([raw, clock, audit])
     with with_runtime(rt):
         with pytest.raises(RuntimeError, match="vendor down"):
-            perform("llm/call", model="m", messages=[])
+            perform(":llm/call", model="m", messages=[])
     assert len(entries) == 1
     assert entries[0].verdict == "error"
     assert "vendor down" in (entries[0].error or "")

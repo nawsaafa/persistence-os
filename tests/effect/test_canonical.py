@@ -13,7 +13,7 @@ def test_sorts_keys_for_stable_repr():
 
 def test_canonical_hash_is_sha256_hex_prefix():
     """canonical_hash returns 'sha256:<64-hex>'."""
-    h = canonical_hash({"op": "llm/call", "args": {"model": "x"}})
+    h = canonical_hash({"op": ":llm/call", "args": {"model": "x"}})
     assert h.startswith("sha256:")
     assert len(h) == len("sha256:") + 64
 

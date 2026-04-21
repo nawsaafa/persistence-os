@@ -20,7 +20,7 @@ Mock = Any
 def make_dry_run_handler(
     *,
     mode: str = "live",
-    wraps: Iterable[str] = ("tool/call", "emit-artifact", "net/fetch"),
+    wraps: Iterable[str] = (":tool/call", ":emit-artifact", ":net/fetch"),
     mocks: dict[str, Mock] | None = None,
     allow_live: set[str] | None = None,
 ) -> Handler:

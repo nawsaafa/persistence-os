@@ -26,7 +26,7 @@ DECIDE_POLICY = {
     "rules": [
         {
             "id": "r4",
-            "when": [":op=", "decide"],
+            "when": [":op=", ":decide"],
             "require": [":non-empty?", [":args", "rationale"]],
             "on-fail": "require-approval",
         }
@@ -66,24 +66,24 @@ def _decide_raw():
     def clause(args, k, ctx):
         return {"choice": args["options"][0] if args.get("options") else None, "confidence": 0.9}
 
-    return Handler(name="raw", wraps={"decide"}, clauses={"decide": clause})
+    return Handler(name="raw", wraps={":decide"}, clauses={":decide": clause})
 
 
 def _tool_raw():
     def clause(args, k, ctx):
         return {"result": f"called-{args['name']}", "error": None}
 
-    return Handler(name="raw", wraps={"tool/call"}, clauses={"tool/call": clause})
+    return Handler(name="raw", wraps={":tool/call"}, clauses={":tool/call": clause})
 
 
 # ---------- allow ----------
 
 
 def test_policy_allows_when_rule_does_not_fire():
-    policy = make_policy_handler(DECIDE_POLICY, wraps={"decide"})
+    policy = make_policy_handler(DECIDE_POLICY, wraps={":decide"})
     rt = Runtime([_decide_raw(), policy])
     with with_runtime(rt):
-        out = perform("decide", question="q", options=["a", "b"], rationale="good")
+        out = perform(":decide", question="q", options=["a", "b"], rationale="good")
     assert out["choice"] == "a"
 
 
@@ -91,10 +91,10 @@ def test_policy_allows_when_rule_does_not_fire():
 
 
 def test_policy_denies_raises_policy_denied():
-    policy = make_policy_handler(BAN_BINANCE_POLICY, wraps={"tool/call"})
+    policy = make_policy_handler(BAN_BINANCE_POLICY, wraps={":tool/call"})
     rt = Runtime([_tool_raw(), policy])
     with with_runtime(rt), pytest.raises(PolicyDenied) as info:
-        perform("tool/call", name="binance.trade", input={})
+        perform(":tool/call", name="binance.trade", input={})
     assert "binance" in str(info.value) or "ban" in str(info.value)
 
 
@@ -103,11 +103,11 @@ def test_policy_denies_raises_policy_denied():
 
 def test_policy_deny_silently_returns_placeholder_no_exception():
     policy = make_policy_handler(
-        DRY_RUN_PROD_POLICY, wraps={"tool/call"}, mode="dry-run"
+        DRY_RUN_PROD_POLICY, wraps={":tool/call"}, mode="dry-run"
     )
     rt = Runtime([_tool_raw(), policy])
     with with_runtime(rt):
-        out = perform("tool/call", name="stripe.charge", input={})
+        out = perform(":tool/call", name="stripe.charge", input={})
     # Must not have called downstream; must return a denied sentinel.
     assert out.get("denied") is True
     assert out.get("silently") is True
@@ -124,28 +124,28 @@ def test_require_approval_calls_approval_fn_and_returns_if_true():
         calls.append(info)
         return True
 
-    policy = make_policy_handler(DECIDE_POLICY, wraps={"decide"}, approval_fn=approval)
+    policy = make_policy_handler(DECIDE_POLICY, wraps={":decide"}, approval_fn=approval)
     rt = Runtime([_decide_raw(), policy])
     with with_runtime(rt):
-        out = perform("decide", question="q", options=["x"])
+        out = perform(":decide", question="q", options=["x"])
     assert out["choice"] == "x"
     assert len(calls) == 1
 
 
 def test_require_approval_raises_when_no_approval_fn():
-    policy = make_policy_handler(DECIDE_POLICY, wraps={"decide"})
+    policy = make_policy_handler(DECIDE_POLICY, wraps={":decide"})
     rt = Runtime([_decide_raw(), policy])
     with with_runtime(rt), pytest.raises(ApprovalRequired):
-        perform("decide", question="q", options=["a"])
+        perform(":decide", question="q", options=["a"])
 
 
 def test_require_approval_raises_when_approval_fn_returns_false():
     policy = make_policy_handler(
-        DECIDE_POLICY, wraps={"decide"}, approval_fn=lambda info: False
+        DECIDE_POLICY, wraps={":decide"}, approval_fn=lambda info: False
     )
     rt = Runtime([_decide_raw(), policy])
     with with_runtime(rt), pytest.raises(ApprovalRequired):
-        perform("decide", question="q", options=["a"])
+        perform(":decide", question="q", options=["a"])
 
 
 # ---------- policy is immutable ----------
@@ -154,13 +154,13 @@ def test_require_approval_raises_when_approval_fn_returns_false():
 def test_hot_reload_by_value_swap_not_mutation():
     """Replacing ctx['policy'] with a new value must take effect without mutating the old."""
     original = dict(BAN_BINANCE_POLICY)
-    policy_handler = make_policy_handler(original, wraps={"tool/call"})
+    policy_handler = make_policy_handler(original, wraps={":tool/call"})
     # Swap to a permissive policy.
     new_policy = {"policy/id": "permissive", "rules": []}
     policy_handler.ctx["policy"] = new_policy
     rt = Runtime([_tool_raw(), policy_handler])
     with with_runtime(rt):
-        out = perform("tool/call", name="binance.trade", input={})
+        out = perform(":tool/call", name="binance.trade", input={})
     assert out["result"] == "called-binance.trade"
     # Original dict untouched.
     assert original["policy/id"] == "ban-binance"

@@ -100,7 +100,7 @@ def verify_chain(entries: Iterable[AuditEntry]) -> bool:
 def make_audit_handler(
     entries: list[AuditEntry],
     *,
-    wraps: Iterable[str] = ("llm/call",),
+    wraps: Iterable[str] = (":llm/call",),
     sink_name: str | None = None,
     run_id: str | None = None,
     principal: dict[str, Any] | None = None,
@@ -130,7 +130,7 @@ def make_audit_handler(
         # Masked so clock/now doesn't re-enter the audit handler (which might
         # itself wrap :clock/now if the caller puts it in wraps).
         with mask(audit_name):
-            t0 = perform("clock/now")["ts"]
+            t0 = perform(":clock/now")["ts"]
 
         op_name = ctx["_current_op"]  # set per-dispatch below
         result_hash: str | None = None
@@ -149,7 +149,7 @@ def make_audit_handler(
             raise
         finally:
             with mask(audit_name):
-                t1 = perform("clock/now")["ts"]
+                t1 = perform(":clock/now")["ts"]
             latency_ms = max(0, int((t1 - t0) * 1000))
             prev_hash = ctx["entries"][-1].id if ctx["entries"] else None
             content: dict[str, Any] = {
@@ -174,7 +174,7 @@ def make_audit_handler(
             sink = ctx.get("sink_name")
             if sink:
                 with mask(audit_name):
-                    named(sink, "audit/emit", kind="audit-entry", payload=entry.to_dict())
+                    named(sink, ":audit/emit", kind="audit-entry", payload=entry.to_dict())
             # Swallow raised? No — re-raise path handled above.
 
     # Dispatch shim: we need op name inside the clause but the clause

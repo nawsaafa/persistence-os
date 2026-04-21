@@ -14,7 +14,7 @@ def _mock_sleep_handler(record):
         record.append(args["ms"])
         return None
 
-    return Handler(name="sleep", wraps={"sleep"}, clauses={"sleep": clause})
+    return Handler(name=":sleep", wraps={":sleep"}, clauses={":sleep": clause})
 
 
 def _mock_random_handler(values):
@@ -25,20 +25,20 @@ def _mock_random_handler(values):
         return {"value": v}
 
     return Handler(
-        name="random",
-        wraps={"random"},
-        clauses={"random": clause},
+        name=":random",
+        wraps={":random"},
+        clauses={":random": clause},
         ctx={"values": list(values)},
     )
 
 
 def test_retry_succeeds_on_first_attempt_without_sleeping():
     sleeps: list[int] = []
-    retry = make_retry_handler(wraps={"llm/call"}, max_attempts=3, base_backoff_ms=100)
+    retry = make_retry_handler(wraps={":llm/call"}, max_attempts=3, base_backoff_ms=100)
     raw = make_flaky_llm_handler(fail_every=10)  # won't fail
     rt = Runtime([raw, _mock_sleep_handler(sleeps), _mock_random_handler([0.0]), retry])
     with with_runtime(rt):
-        out = perform("llm/call", model="m", messages=[{"content": "x"}])
+        out = perform(":llm/call", model="m", messages=[{"content": "x"}])
     assert out["text"] == "echo:x"
     assert sleeps == []
 
@@ -55,8 +55,8 @@ def test_retry_retries_until_success_and_uses_exponential_backoff():
             raise TransientError(f"fail {counter['n']}")
         return {"text": "ok"}
 
-    raw = Handler(name="raw", wraps={"llm/call"}, clauses={"llm/call": flaky})
-    retry = make_retry_handler(wraps={"llm/call"}, max_attempts=5, base_backoff_ms=100)
+    raw = Handler(name="raw", wraps={":llm/call"}, clauses={":llm/call": flaky})
+    retry = make_retry_handler(wraps={":llm/call"}, max_attempts=5, base_backoff_ms=100)
     # Jitter values = 0 so backoff is exactly base * 2^attempt
     rt = Runtime([
         raw,
@@ -65,7 +65,7 @@ def test_retry_retries_until_success_and_uses_exponential_backoff():
         retry,
     ])
     with with_runtime(rt):
-        out = perform("llm/call", model="m", messages=[{"content": "x"}])
+        out = perform(":llm/call", model="m", messages=[{"content": "x"}])
     assert out == {"text": "ok"}
     # Two failures → two sleeps.
     # attempt 0 fails → sleep base*1 = 100
@@ -83,8 +83,8 @@ def test_retry_applies_jitter_from_random_handler():
             raise TransientError("fail")
         return {"ok": True}
 
-    raw = Handler(name="raw", wraps={"llm/call"}, clauses={"llm/call": flaky})
-    retry = make_retry_handler(wraps={"llm/call"}, max_attempts=3, base_backoff_ms=100, jitter_ms=50)
+    raw = Handler(name="raw", wraps={":llm/call"}, clauses={":llm/call": flaky})
+    retry = make_retry_handler(wraps={":llm/call"}, max_attempts=3, base_backoff_ms=100, jitter_ms=50)
     # jitter sample = 25 ms → sleep = 100 + 25
     rt = Runtime([
         raw,
@@ -93,7 +93,7 @@ def test_retry_applies_jitter_from_random_handler():
         retry,
     ])
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"content": "x"}])
+        perform(":llm/call", model="m", messages=[{"content": "x"}])
     assert sleeps == [125]
 
 
@@ -103,8 +103,8 @@ def test_retry_gives_up_after_max_attempts_and_re_raises():
     def always_fail(args, k, ctx):
         raise TransientError("nope")
 
-    raw = Handler(name="raw", wraps={"llm/call"}, clauses={"llm/call": always_fail})
-    retry = make_retry_handler(wraps={"llm/call"}, max_attempts=3, base_backoff_ms=100)
+    raw = Handler(name="raw", wraps={":llm/call"}, clauses={":llm/call": always_fail})
+    retry = make_retry_handler(wraps={":llm/call"}, max_attempts=3, base_backoff_ms=100)
     rt = Runtime([
         raw,
         _mock_sleep_handler(sleeps),
@@ -112,7 +112,7 @@ def test_retry_gives_up_after_max_attempts_and_re_raises():
         retry,
     ])
     with with_runtime(rt), pytest.raises(TransientError, match="nope"):
-        perform("llm/call", model="m", messages=[{"content": "x"}])
+        perform(":llm/call", model="m", messages=[{"content": "x"}])
     # 2 backoffs between 3 attempts.
     assert len(sleeps) == 2
 
@@ -124,8 +124,8 @@ def test_retry_does_not_retry_non_transient_errors():
     def permanent(args, k, ctx):
         raise ValueError("bug")
 
-    raw = Handler(name="raw", wraps={"llm/call"}, clauses={"llm/call": permanent})
-    retry = make_retry_handler(wraps={"llm/call"}, max_attempts=3, base_backoff_ms=100)
+    raw = Handler(name="raw", wraps={":llm/call"}, clauses={":llm/call": permanent})
+    retry = make_retry_handler(wraps={":llm/call"}, max_attempts=3, base_backoff_ms=100)
     rt = Runtime([
         raw,
         _mock_sleep_handler(sleeps),
@@ -133,5 +133,5 @@ def test_retry_does_not_retry_non_transient_errors():
         retry,
     ])
     with with_runtime(rt), pytest.raises(ValueError, match="bug"):
-        perform("llm/call", model="m", messages=[{"content": "x"}])
+        perform(":llm/call", model="m", messages=[{"content": "x"}])
     assert sleeps == []

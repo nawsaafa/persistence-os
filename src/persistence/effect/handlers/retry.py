@@ -14,7 +14,7 @@ from persistence.effect.runtime import Handler, perform
 
 def make_retry_handler(
     *,
-    wraps: Iterable[str] = ("llm/call", "tool/call", "net/fetch"),
+    wraps: Iterable[str] = (":llm/call", ":tool/call", ":net/fetch"),
     max_attempts: int = 3,
     base_backoff_ms: int = 200,
     jitter_ms: int = 100,
@@ -42,10 +42,10 @@ def make_retry_handler(
                     if attempt == ctx["max_attempts"] - 1:
                         raise
                     jitter = perform(
-                        "random", kind="jitter", params={"max": ctx["jitter_ms"]}
+                        ":random", kind="jitter", params={"max": ctx["jitter_ms"]}
                     )["value"]
                     sleep_ms = int(ctx["base_backoff_ms"] * (2 ** attempt) + jitter)
-                    perform("sleep", ms=sleep_ms)
+                    perform(":sleep", ms=sleep_ms)
             # unreachable — either returned or raised
             if last_exc is not None:
                 raise last_exc

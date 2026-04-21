@@ -46,7 +46,7 @@ class ApprovalRequired(Exception):
 def make_policy_handler(
     policy: dict,
     *,
-    wraps: Iterable[str] = ("llm/call", "tool/call", "decide", "emit-artifact", "mem/write"),
+    wraps: Iterable[str] = (":llm/call", ":tool/call", ":decide", ":emit-artifact", ":mem/write"),
     mode: str = "live",
     principal: dict[str, Any] | None = None,
     approval_fn: Callable[[dict[str, Any]], bool] | None = None,

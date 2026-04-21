@@ -55,7 +55,7 @@ class Trajectory:
     forms a lineage DAG; counterfactuals are first-class trajectories.
     """
 
-    id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))  # noqa: wall-clock -- trajectory id is a fresh primary key, never replayed; see trajectory_hash IGNORE list
     parent_id: Optional[str] = None
     branch_point: Optional[int] = None
     intervention: Optional[dict] = None
@@ -110,7 +110,7 @@ class Trajectory:
         tags = set(d.get("tags", []) or [])
         facts = [Fact.from_dict(f) for f in d.get("facts", [])]
         return cls(
-            id=d.get("id") or str(uuid.uuid4()),
+            id=d.get("id") or str(uuid.uuid4()),  # noqa: wall-clock -- fallback id for legacy records missing one; same justification as Trajectory.id default
             parent_id=d.get("parent_id"),
             branch_point=d.get("branch_point"),
             intervention=d.get("intervention"),

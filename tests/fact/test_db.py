@@ -313,6 +313,50 @@ class TestEntityProjection:
 
 
 # ---------------------------------------------------------------------------
+# Clock injection (ARIS R2 F5) — a DB constructed with a frozen clock must
+# stamp every tx_time from that clock, not from the wall clock. This is the
+# seam replay uses to reproduce tx_time deterministically.
+# ---------------------------------------------------------------------------
+class TestClockInjection:
+    def test_injected_clock_is_used_for_tx_time(self, store):
+        fixed = _dt(2026, 4, 21, 12, 0)
+        db = DB(store, clock=lambda: fixed)
+        db = db.transact(
+            [{"e": "p-042", "a": "project/wacc", "v": 0.087,
+              "valid_from": _dt(2026, 4, 14)}],
+            provenance={"source": "dfi-agent"},
+        )
+        log = list(db.log())
+        assert len(log) == 1
+        assert log[0].tx_time == fixed
+
+    def test_injected_clock_survives_transact_return(self, store):
+        """DB.transact returns a new DB bound to the same clock so chained
+        transacts all use the injected clock."""
+        fixed = _dt(2026, 4, 21, 12, 0)
+        db = DB(store, clock=lambda: fixed)
+        db = db.transact(
+            [{"e": "a", "a": "x", "v": 1, "valid_from": fixed}], provenance={}
+        )
+        db = db.transact(
+            [{"e": "b", "a": "x", "v": 2, "valid_from": fixed}], provenance={}
+        )
+        for d in db.log():
+            assert d.tx_time == fixed
+
+    def test_injected_clock_survives_branch(self, store):
+        """A counterfactual branch inherits the parent DB's clock."""
+        fixed = _dt(2026, 4, 21, 12, 0)
+        db = DB(store, clock=lambda: fixed)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.1, "valid_from": fixed}], provenance={}
+        )
+        cf = db.branch(fixed, [{"e": "p", "a": "w", "v": 0.2, "valid_from": fixed}])
+        for d in cf.log():
+            assert d.tx_time == fixed
+
+
+# ---------------------------------------------------------------------------
 # Backend parity — sanity check that in-memory and SQLite agree on the same
 # scenario end-to-end (belt-and-braces on top of the conformance suite).
 # ---------------------------------------------------------------------------

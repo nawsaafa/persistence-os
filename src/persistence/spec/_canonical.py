@@ -14,10 +14,33 @@ Schema sources (see ``docs/``):
 """
 from __future__ import annotations
 
+import random as _random
+
 from ._combinators import enum, keys, map_of, maybe, ref, seq_of
 from ._primitives import float_, inst, int_, str_, uuid_
 from ._registry import register
 from ._types import ConformError, Conformed, Spec
+
+
+# Module-local rng for ``_generate`` hooks. ARIS R2 F5 bans bare
+# ``random.random()`` / ``random.randint()`` / ``random.choice()`` in
+# production source so all non-determinism stays inside a seedable
+# boundary. Tests that need reproducible samples may call
+# :func:`set_generator_seed` before generating. The production contract
+# for a deterministic generator is :func:`persistence.effect.perform`
+# on ``:sys/random`` (W-integration is aligning ops to leading-colon);
+# this module-local rng is the Phase-1 fallback until that wiring lands.
+_rng = _random.Random()
+
+
+def set_generator_seed(seed: int | None) -> None:
+    """Re-seed the canonical-spec generator rng.
+
+    Intended for regression tests that need reproducible samples from
+    ``Spec.generate()`` / quickcheck. Passing ``None`` reinitialises
+    from OS entropy.
+    """
+    _rng.seed(seed)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -56,13 +79,12 @@ class _KeywordSpec(Spec):
         return Conformed(value=value, spec_key=self.spec_name)
 
     def _generate(self):
-        import random
         import string
         def seg():
-            n = random.randint(2, 6)
-            return random.choice(string.ascii_lowercase) + "".join(
-                random.choices(string.ascii_lowercase + "-", k=n - 1))
-        if random.random() < 0.5:
+            n = _rng.randint(2, 6)
+            return _rng.choice(string.ascii_lowercase) + "".join(
+                _rng.choices(string.ascii_lowercase + "-", k=n - 1))
+        if _rng.random() < 0.5:
             return ":" + seg()
         return ":" + seg() + "/" + seg()
 
@@ -91,10 +113,9 @@ class _NonEmptyStr(Spec):
         return Conformed(value=value, spec_key=self.spec_name)
 
     def _generate(self):
-        import random
         import string
-        n = random.randint(3, 20)
-        return "".join(random.choices(string.ascii_letters + " ", k=n)).strip() or "x"
+        n = _rng.randint(3, 20)
+        return "".join(_rng.choices(string.ascii_letters + " ", k=n)).strip() or "x"
 
 
 #: float in [0, 1] — probabilities, confidences, percents
@@ -126,8 +147,7 @@ class _UnitFloat(Spec):
         return Conformed(value=value, spec_key=self.spec_name)
 
     def _generate(self):
-        import random
-        return random.random()
+        return _rng.random()
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +207,7 @@ class _AnyValueSpec(Spec):
         )
 
     def _generate(self):
-        import random
-        return random.choice([42, 3.14, "hello", True, None])
+        return _rng.choice([42, 3.14, "hello", True, None])
 
 
 _any_value = _AnyValueSpec()
@@ -313,10 +332,9 @@ class _Sha256Spec(Spec):
         return Conformed(value=value, spec_key=self.spec_name)
 
     def _generate(self):
-        import random
         import string
-        n = random.choice([8, 16, 64])
-        return "sha256:" + "".join(random.choices(string.hexdigits.lower(), k=n))
+        n = _rng.choice([8, 16, 64])
+        return "sha256:" + "".join(_rng.choices(string.hexdigits.lower(), k=n))
 
 
 _sha256_spec = _Sha256Spec()
@@ -346,8 +364,7 @@ class _VersionSpec(Spec):
         return Conformed(value=value, spec_key=self.spec_name)
 
     def _generate(self):
-        import random
-        return f"v{random.randint(1, 99)}"
+        return f"v{_rng.randint(1, 99)}"
 
 
 _version_spec = _VersionSpec()

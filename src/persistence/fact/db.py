@@ -23,7 +23,7 @@ import itertools
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from persistence.fact.datom import Datom
 from persistence.fact.store import InMemoryStore, Store
@@ -34,8 +34,21 @@ from persistence.fact.store import InMemoryStore, Store
 _tx_counter = itertools.count(1)
 
 
-def _now_utc() -> datetime:
-    return datetime.now(timezone.utc)
+# Clock seam — paper §4.2 / ARIS R2 F5. Production code goes through the
+# Effect runtime's ``:sys/now`` handler (once W-integration lands the
+# leading-colon namespace). Until then, callers that need a deterministic
+# tx_time may pass ``DB(store, clock=...)`` to inject a frozen clock.
+ClockFn = Callable[[], datetime]
+
+
+def _system_clock() -> datetime:
+    """The single authorised ``datetime.now`` call in the fact module.
+
+    This is the only place in ``persistence.fact`` that samples the wall
+    clock; everywhere else takes a :data:`ClockFn` argument or calls
+    ``self._clock()`` on a DB instance so replay can substitute a handler.
+    """
+    return datetime.now(timezone.utc)  # noqa: wall-clock -- authorised clock source
 
 
 def _hash_fact(fact: dict) -> str:
@@ -59,9 +72,17 @@ class DB:
     store: Store
 
     # ---- Construction ----------------------------------------------------
-    def __init__(self, store: Optional[Store] = None) -> None:
+    def __init__(
+        self,
+        store: Optional[Store] = None,
+        *,
+        clock: Optional[ClockFn] = None,
+    ) -> None:
         # Default to in-memory so ``DB()`` is usable from a notebook.
         self.store = store if store is not None else InMemoryStore()
+        # ARIS R2 F5: tx_time comes from an injectable clock so replay mode
+        # can pin timestamps deterministically. Defaults to the system clock.
+        self._clock: ClockFn = clock or _system_clock
 
     # ---- Writes ----------------------------------------------------------
     def transact(
@@ -84,7 +105,7 @@ class DB:
 
         prov_base: dict = provenance or {}
         tx = next(_tx_counter)
-        now = _now_utc()
+        now = self._clock()
         new_datoms: list[Datom] = []
         invalidations: list[tuple[int, int]] = []  # (old_tx, new_tx=tx)
 
@@ -143,7 +164,7 @@ class DB:
         for old_tx, new_tx in invalidations:
             self.store.mark_invalidated(old_tx, new_tx)
 
-        return DB(self.store)
+        return DB(self.store, clock=self._clock)
 
     # ---- Reads -----------------------------------------------------------
     def log(self) -> Iterator[Datom]:
@@ -211,7 +232,7 @@ class DB:
             ]
         )
 
-        db = DB(branched_store)
+        db = DB(branched_store, clock=self._clock)
         if assertions:
             db = db.transact(
                 assertions,

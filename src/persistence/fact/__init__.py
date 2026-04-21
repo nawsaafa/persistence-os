@@ -22,6 +22,7 @@ from persistence.fact.projection import (
     rebuild_view,
 )
 from persistence.fact.store import InMemoryStore, SQLiteStore, Store, load_migrations
+from persistence.fact.wire import datom_to_wire, wire_to_datom
 
 __all__ = [
     "DB",
@@ -33,7 +34,9 @@ __all__ = [
     "ProjectionAdapter",
     "SQLiteStore",
     "Store",
+    "datom_to_wire",
     "load_migrations",
     "rebuild",
     "rebuild_view",
+    "wire_to_datom",
 ]

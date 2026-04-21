@@ -15,15 +15,25 @@ Public surface:
 
 from persistence.fact.datom import Datom, Op
 from persistence.fact.db import DB, DBView
+from persistence.fact.projection import (
+    DictProjection,
+    ProjectionAdapter,
+    rebuild,
+    rebuild_view,
+)
 from persistence.fact.store import InMemoryStore, SQLiteStore, Store, load_migrations
 
 __all__ = [
     "DB",
     "DBView",
     "Datom",
+    "DictProjection",
     "InMemoryStore",
     "Op",
+    "ProjectionAdapter",
     "SQLiteStore",
     "Store",
     "load_migrations",
+    "rebuild",
+    "rebuild_view",
 ]

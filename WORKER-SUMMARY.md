@@ -1,152 +1,73 @@
-# W-rigor — ARIS Round 1 Fix Pass
+# W-paper — ARIS R4 corrections on NeSy 2026 draft
 
-**Branch:** `W-rigor`
-**Worktree:** `/Users/nawfalsaadi/Projects/persistence-os/.claude/worktrees/W-rigor`
-**Scope:** R2 F2, R2 F3, R2 F4, R2 F5, R1 F3 (test-rigor + invariant gaps).
-**Out of scope (owned by siblings):**
-- R2 F1 (HAMT / Prop 1) — deferred to W-paper (paper softening) / Phase 2.
-- Datom/audit/trajectory/plan-node shape unification — W-boundary.
-- replay ↔ effect wiring, `Mem0Interceptor.add` kwargs, `_tx_counter` global — W-integration.
-- Paper corrections — W-paper.
+**Branch:** `W-paper` (worktree at `.claude/worktrees/W-paper/`, forked from `main @ 5f97882`)
+**Scope:** paper-only (§1 Discipline #4 — no pytest, no Python edits)
+**Date:** 2026-04-21
+**Paper file:** `paper/persistence-nesy-2026-draft.md` (v0.1 → v0.2)
 
-## Test count
+## Word count
 
-| Phase | Count |
-|---|---:|
-| Baseline (main) | **356 passed** |
-| After W-rigor | **380 passed** |
-| Delta | **+24 tests** |
-
-Final pytest output:
-
-```
-380 passed in 1.21s
-```
-
-## Commits (one per finding)
-
-```
-007a603 fix(fact): guard DB.transact against retroactive negative intervals (R1 F3)
-dbc4e70 fix(src): eliminate wall-clock/rng calls; add lint + injection seams (R2 F5)
-c09588e fix(effect): scope Runtime._masks via per-instance ContextVar (R2 F4)
-6eebcde fix(replay): fail fast on out-of-range step + empty trajectory (R2 F3)
-b3a1b2a test(effect/audit): cover deletion/reorder/truncation of Merkle chain (R2 F2)
-```
-
-## Findings addressed
-
-### R2 F2 — Audit chain tamper tests (MAJOR, INVARIANT)
-**Commit:** `b3a1b2a` — test-only (`verify_chain` already correct; added adversarial coverage).
-
-Tests added in `tests/effect/test_audit.py`:
-- `test_deleting_an_audit_entry_breaks_the_chain`
-- `test_reordering_audit_entries_breaks_the_chain`
-- `test_truncating_audit_entries_from_tail_preserves_chain` (design pin — a truncated-but-intact prefix still verifies; length checks live above this layer)
-
-### R2 F3 — Replay multi-step / out-of-range / empty-trajectory (MAJOR, EDGE)
-**Commit:** `6eebcde` — prod fix + tests.
-
-Production: `src/persistence/replay/engine.py::replay()` now:
-- Raises `ValueError("empty trajectory")` when `traj.facts == []`.
-- Raises `ValueError("... out of range ...")` when any intervention's `step` is `< 0` or `> max_step`.
-
-Tests added in `tests/replay/test_replay.py`:
-- `test_multi_step_simultaneous_interventions_produce_consistent_hash` — two interventions at different steps both land AND hash is deterministic across two calls.
-- `test_replay_with_step_greater_than_trajectory_length_raises`
-- `test_replay_with_negative_step_raises`
-- `test_empty_trajectory_replay_raises`
-
-### R2 F4 — ContextVar isolation on shared Runtime (MAJOR, CONCURRENCY — REAL BUG)
-**Commit:** `c09588e` — prod fix + tests.
-
-Production: `src/persistence/effect/runtime.py::Runtime`:
-- Converted from `@dataclass` to explicit `__init__` so each instance owns a unique `ContextVar[tuple[frozenset[str], ...]]` (key `persistence_effect_runtime_masks_<id>`).
-- `_masks: list[set[str]]` attribute removed; replaced by `_mask_var.get()` on read and `_push_mask`/`_pop_mask` (ContextVar `set`/`reset` token dance).
-- `mask()` context manager now uses the push/pop API, making it Task-local under asyncio.
-
-Tests added in new file `tests/effect/test_runtime_concurrency.py`:
-- `test_contextvar_isolates_runtime_state_across_asyncio_tasks` — 10 concurrent tasks sharing one Runtime (5 masked + 5 unmasked); both asserts the unmasked group all hit audit exactly once AND no masked task triggers audit. **RED before fix, GREEN after.**
-- `test_mask_scope_does_not_bleed_after_task_completes` — a task that awaits mid-mask does not perturb a second task's dispatch.
-
-### R2 F5 — Wall-clock / rng ban: fixes + lint (MAJOR, INVARIANT)
-**Commit:** `dbc4e70` — prod fix + lint test + injection tests.
-
-Per the task brief, W-integration is aligning op namespaces to leading-colon (`:sys/now`, `:sys/random`). Until that wiring lands, the modules that need a clock/rng accept an injectable parameter with a sensible default. Violations fixed:
-
-| Before | After | Seam |
+| Before | After | Δ |
 |---|---|---|
-| `src/persistence/fact/db.py:38` — `_now_utc()` used `datetime.now` | Removed; `DB(store, clock=ClockFn)` injected. Sole authorised wall-clock call is `_system_clock()` annotated `# noqa: wall-clock`. `branch` / `transact` return inherit the parent's clock. | ClockFn callable |
-| `src/persistence/fact/interceptors/mem0_adapter.py:65,97` — `datetime.now` default for `valid_from` | `Mem0Interceptor(..., clock=ClockFn)` with precedence `arg > db._clock > _system_clock` | ClockFn callable |
-| `src/persistence/spec/_canonical.py` (11 lines of `random.{random,randint,choice,choices}`) | Module-local `_rng = random.Random()`; new `set_generator_seed(int \| None)` helper. | Seedable rng |
-| `src/persistence/replay/trajectory.py:58,113` — `uuid.uuid4()` on `Trajectory.id` | `# noqa: wall-clock` with justification: trajectory id is a fresh primary key, excluded from `trajectory_hash` by `_HASH_IGNORE_FIELDS`, never required to be replayable. | N/A |
+| 5272 words (v0.1) | 8363 words (v0.2) | +3091 |
 
-Lint added: `tests/test_wall_clock_ban.py` — AST scan across `src/persistence/` for `time.time`, `datetime.now/utcnow`, `random.*`, `uuid.uuid4`. Allows only `effect/handlers/{clock,raw,retry}.py` + `demo.py` files. Recognises `# noqa: wall-clock`. Fails with a sorted violation list so new drift is loud.
+The paper grew because (a) the ARIS-R4 corrections required expanding §4.1/§4.3/§4.5/§4.7 with precise artifact-anchored formal statements (Prop 2 lifted to front-line; Corollary added to Prop 3; Merkle-chain integrity vs authenticity separated; self-healing `conform→explain→retry` contract now a labeled paragraph); (b) §6 was rescoped from six speculative tables to a Reproduction Plan with explicit "abstract vs camera-ready" fencing on every row; (c) per-section Phase-1 / Phase-2 hedging is now explicit rather than implicit. The paper is still well under the NeSy 10-page camera-ready limit at current density — §2–§8 will tighten during copy-edit before 2026-06-16.
 
-Tests added in `tests/fact/test_db.py`:
-- `TestClockInjection::test_injected_clock_is_used_for_tx_time` (memory + sqlite)
-- `TestClockInjection::test_injected_clock_survives_transact_return`
-- `TestClockInjection::test_injected_clock_survives_branch`
+## R4 findings addressed — section map
 
-### R1 F3 — DB.transact retroactive valid-to guard (MAJOR)
-**Commit:** `007a603` — prod fix + tests.
+| R4 finding | Severity | Paper sections edited | Resolution |
+|---|---|---|---|
+| F1 — seven capabilities overclaim | CRITICAL | Abstract, §1 Contribution, §1 "What this paper reports, honestly", §2.6 Fig.1, §3 (invariants tagged Phase-1/Phase-2), §5 (modules split into shipped + designed), §8 Conclusion | Reframed to "four shipped / three designed"; Fig.1 split into Phase-1 ● and Phase-2 ○ columns; every §3 invariant has a Phase tag. |
+| F2 — Prop 1 O(log n) HAMT claim false | CRITICAL | §4.1 Prop 1 (rewritten), §7.1 Limitations, §8 Future Work item (1) | Prop 1 now states branch is a logical operation returning a new DB value with parent-store isolation; Phase 1 complexity is `O(\|D\|)` on the list-backed InMemoryStore (honest); HAMT path-copy is a Phase-2 Store-Protocol swap. Isolation — the load-bearing property — holds unconditionally. |
+| F4 — ed25519 in §4.1, §7.1, §7.2 + fabricated "20–40 ms" | MAJOR | §4.1 (provenance record), §4.3 (Integrity contract paragraph), §5.1, §7.1 (Write latency bullet), §7.2 (Privacy architecture), §8 Future Work item (3) | Removed ed25519 from all Phase-1 claims. Removed the "20–40 ms" figure. Ed25519 per-transaction signing now appears only as a Phase-2 privacy-posture extension (§7.2, §4.3, §8). Integrity (via sha256 Merkle chain + `verify_chain`) cleanly separated from authenticity (requires ed25519, Phase 2). |
+| F6 — latency targets unmeasured | MAJOR | §5.1 Fact (Latency targets — Reproduction Plan paragraph), §6.6 Reproduction posture | The {50, 200, 100} ms p95 line is now flagged as a Phase-2 target over a persistent-trie backend at 1M-datom scale. Phase 1 reference numbers are `[TBD]` to be measured for the camera-ready. |
+| F7 — Kuzu + mem0 claimed, only DictProjection ships | MAJOR | §5.1 Fact (projection surface paragraph), §5.8 system diagram (labeled "[Phase 2: Postgres + Kuzu + mem0]"), §2.6 Fig.1, Abstract | Projection surface is now `ProjectionAdapter` Protocol + reference `DictProjection` in Phase 1; Kuzu / mem0 adapters are explicit Phase-2 work per CHANGELOG. `mem0_adapter` correctly labeled as a legacy-write interceptor, not a projection. |
+| F8 / F9 — bench/ and Makefile absent; LongMemEval, regulator-replay, CAMO harnesses not shipped | CRITICAL | §6 header (renamed "Evaluation — Reproduction Plan"), §6.1, §6.2, §6.3, §6.6 Reproduction posture; README.md (removed `make bench` + `Makefile` references, added "`bench/` lands in Phase 2" note) | §6 is now an honest Reproduction Plan. §6.3 rescoped to **50 synthetic project-finance trajectories**, CC-BY-4.0 licensed, generator + dataset shipping with camera-ready. §6.2 ships the already-testable NO-OP byte-identity corollary in the abstract and the 1000-trajectory table in camera-ready. §6.6 Reproduction posture adds an explicit "abstract vs camera-ready" fence on every row. |
+| F10 — Datalog + Z3 overclaimed in §7.4 + Abstract | MAJOR | Abstract (symbolic-substrate list trimmed), §1 Neurosymbolic positioning, §7.4 (rewritten — shipped list separated from "adjacent systems we draw on"), §8 Future Work items (4), (5) | Datalog and Z3 removed from the shipped-substrate list. §7.4 now lists four shipped symbolic pieces (bitemporal query surface, EDN AST grammars, policy-as-data, Malli-style specs) and explicitly calls out Datalog engine + Z3-discharged `verify` leaves as adjacent systems / Phase-2 future work. |
 
-Production: `src/persistence/fact/db.py`:
-- New `RetroactiveCorrectionError(ValueError)` exported from `persistence.fact.db`.
-- `transact(...)` now accepts `force_retroactive: bool = False` (kw-only).
-- When `new.valid_from < prior.valid_from`:
-  - Without opt-in: raises `RetroactiveCorrectionError` with a descriptive message (shows both dates + mentions opt-in).
-  - With `force_retroactive=True`: the companion retract uses `valid_from=new.valid_from, valid_to=prior.valid_from` so the interval is non-negative and semantically invalidates the prior from the corrected effective date onward (agent1-fact-spec §0).
-- Equal `valid_from` is explicitly allowed (zero-length interval is not negative).
+### Undersold contributions — now elevated (R4 §"What's undersold")
 
-Tests added in `tests/fact/test_db.py::TestTransact`:
-- `test_retroactive_correction_without_opt_in_raises` (memory + sqlite)
-- `test_retroactive_correction_with_opt_in_produces_bounded_valid_to`
-- `test_normal_future_correction_still_works` (regression pin)
-- `test_retroactive_correction_at_same_valid_from_is_allowed`
+| R4 asked to promote | New front-line location |
+|---|---|
+| `Runtime.is_well_formed()` + `Unhandled` enforcement (Prop 2) | Abstract ("decidable in linear time by `Runtime.is_well_formed`"); §3 Thesis; §4.2 (labeled "the paper's strongest formal contribution on the Phase-1 artifact"); §8 Conclusion |
+| `spec.explain_for_llm` self-healing contract | Abstract ("LLM-self-healing hints"); §1 (in the shipped-capabilities list); §4.7 ("Self-healing contract (shipped)" paragraph — dedicated subsection); §7.4 |
+| `trajectory_hash(cf) == trajectory_hash(factual)` on NO-OP (byte-identical) | Abstract (explicit callout: "stronger determinism guarantee than CAMO's aspirational seed replay"); §2.5 Related Work; §4.5 Corollary (labeled "tested"); §6.2 (NO-OP ships in the abstract); §8 |
+| `verify_chain` Merkle audit chain | §4.3 promoted from one-line mention to dedicated subsection "The Merkle-hashed audit chain" with Integrity and Universality contracts; §8 |
+| `:persistence.plan/node` spec-first registration ahead of Plan module | §1 ("deliberate parse-don't-validate move"); §2.3; §3 invariant 3 tag; §4.4 opening; §4.7 "Forward-compatible spec-first commitment" paragraph; §5.3; §5.5 |
 
-## Files touched
+### Also addressed
 
-Production (src):
-- `src/persistence/effect/runtime.py` — ContextVar-scoped mask stack.
-- `src/persistence/fact/db.py` — injectable clock, `RetroactiveCorrectionError`, retroactive guard.
-- `src/persistence/fact/interceptors/mem0_adapter.py` — injectable clock.
-- `src/persistence/replay/engine.py` — empty-trajectory + out-of-range step guards.
-- `src/persistence/replay/trajectory.py` — `# noqa: wall-clock` annotations on uuid calls.
-- `src/persistence/spec/_canonical.py` — module-local `_rng`, `set_generator_seed`.
+- **Case B (Adaptive Trader v2)** kept named with real baseline numbers (8 trades, PF 0.43, -$26.87); post-Persistence numbers marked `[TBD — camera-ready]`.
+- **Cases A, C, D** compressed from speculative-paragraph-with-metrics to 3–5-sentence anonymized vignettes. No [TBD] metrics; no identities. Cases A, C, D map to BankabilityAI, Insurance Comparator, GuestFlow in MEMORY.md context but those client names do NOT appear in the paper.
+- **§6.4 Plan optimization** removed entirely from this paper with an explicit "Phase-2 companion paper" redirect.
+- **§2.4 Voyager framing** softened from "both promote skills aggressively on single success" to a factually-accurate "promotes skills on their first successful use (§3.3), without a statistical threshold" (R4 F11 side-fix).
+- **§2.1 / §2.4 / §2.5 specific percentages** softened with a meta-note in §2.1 and References reminder that exact numbers will be cross-checked against primary sources in camera-ready (R4 F11).
+- **Title** changed from "Persistence: A Bitemporal Effect-Typed Substrate for Accountable Neurosymbolic Agents" to **"Toward Accountable Neurosymbolic Runtimes: The Persistence OS Substrate"** — the "Toward" softens the "unified runtime" framing to match the Phase-1 reality, and "Substrate" is more honest than "Runtime" given Plan/Txn/REPL are not shipped.
 
-Tests:
-- `tests/effect/test_audit.py` (+3 tests)
-- `tests/effect/test_runtime_concurrency.py` (NEW, +2 tests)
-- `tests/replay/test_replay.py` (+4 tests)
-- `tests/fact/test_db.py` (+7 tests: 3 clock-injection x 2 backends + 4 retroactive x 2 backends, 2 pure + 2 regression)
-- `tests/test_wall_clock_ban.py` (NEW, +1 lint test)
+## Paper-adjacent doc updates
 
-## Coordination notes for merge
+- `README.md` — replaced shipping-status section with a module table showing Phase-1 shipped / Phase-2 designed split. Removed `make dev` / `make bench` / `make test` references. Added a "Phase 2" note where `bench/` is listed in the repository-layout diagram. Fixed the Privacy posture bullet that claimed "ed25519 per-transaction" as shipped; now correctly lists sha256 + Merkle chain for Phase 1 with ed25519 flagged as Phase 2. Updated module table with Phase-1/Phase-2 annotations on each row.
+- `docs/phase-1-milestone-for-vault.md` — reframed the "Research contribution claim (for NeSy 2026)" paragraph from "unified substrate" to "substrate claim, scoped honestly to Phase 1" with explicit list of the two formal propositions that hold on shipped code. Fixed the Privacy & distribution bullet's "ed25519-signed provenance" claim to "SHA-256 content-hashed provenance + Merkle-chained audit (ed25519 per-transaction signing is Phase 2)".
 
-1. **W-integration** will rename effect ops to leading-colon (`:clock/now`, `:sys/random`, …). Once that lands, the `ClockFn` seam in `DB` and `Mem0Interceptor` is the intended substitution point for a `:sys/now`-driven clock handler — the plumbing is already in place.
-2. **W-boundary** will align `audit_entry_to_datom`'s emission (currently `tx-time` is a float from `recorded_at`). The Merkle tamper tests added in this pass do not depend on that shape; they exercise `verify_chain` directly against in-memory `AuditEntry`s.
-3. **W-paper** will soften Prop 1's HAMT claim. R2 F1 is explicitly deferred per the task brief — no work done here.
-4. The new `RetroactiveCorrectionError` is a subclass of `ValueError`, so existing `except ValueError` call sites continue to work. The `force_retroactive` kwarg is kw-only and default `False`, so all existing callers retain their behavior.
+## Deferred / out-of-scope
 
-## Deferred items
+| Item | Reason |
+|---|---|
+| Changes to `src/persistence/**` or tests | Paper-only worker; W-boundary / W-integration / W-rigor own code. |
+| Naming A/C/D clients | Task §3 ("Preserve Case B (Trader) as named; keep A/C/D anonymized. Never identify A/C/D by client name.") |
+| New propositions / theorems | Task §"Out of scope" — only soften existing claims. |
+| R1 findings (datom shape triplication, retroactive `valid_to`) | Owned by W-boundary worker; paper does not re-assert the broken shape. |
+| R2 findings (audit deletion/reorder tests, ContextVar concurrency, `datetime.now()` lint) | Owned by W-rigor worker. Paper §4.3 Integrity contract notes deletion/reorder coverage is "a hardening target for Round 2" — acknowledges the gap without overclaiming. |
+| R3 findings (replay.EffectHandler / effect.Runtime integration) | Owned by W-integration worker. Paper §4.5 states the extension from toy agent to LLM trajectories as Phase-2 prerequisite for §6.2 camera-ready numbers. |
+| R4 F3 (every-effect-emits-a-datom universality) | Paper §4.3 now labels this as "an invariant of the deployed stack, not the substrate" and points to `Runtime.assert_universal_audit` as the Round-2 hardening that closes it. |
+| R4 F5 (replay determinism proven only for toy agent) | Paper Prop 3 now carries the "per-step rng-consumption recorded" antecedent; §6.2 states per-step rng recording as Phase 2 prerequisite for the distributional CAMO table. Code-side change belongs to W-integration or a future W-replay-rng worker. |
 
-- **R2 F1 (CRITICAL — HAMT / Prop 1 untestable).** Owned by W-paper (paper softening) per the dispatch table. Not touched.
-- **R2 F6–F16, R1 F4–F13 and so on** — not in this worker's scope.
+## Honest assessment — before vs after
 
-## How to verify
+**Before (v0.1):** The paper asserts seven unified capabilities as shipped, a false HAMT-backed O(log n) branch, a fabricated 20–40 ms ed25519 overhead, Kuzu + mem0 as if implemented, and six evaluation tables whose every Persistence cell is [TBD]. A rigorous NeSy reviewer who opens the artifact would see four shipped modules, a list-backed store, no crypto-signing code, a DictProjection, and a missing `bench/` directory, and would reasonably mark the paper down for systematic overclaiming. R4's 6.5/10.
 
-```bash
-cd /Users/nawfalsaadi/Projects/persistence-os/.claude/worktrees/W-rigor
-.venv/bin/python -m pytest --tb=short
-# → 380 passed
-```
+**After (v0.2):** The paper asserts exactly four shipped capabilities (plus three frozen-at-the-spec-boundary), a list-backed O(|D|) branch with parent-store isolation (true and tested), sha256 content-hashed provenance with Merkle audit chain (true and tested), DictProjection as the reference projection (true), and §6 as a Reproduction Plan with explicit "abstract vs camera-ready" fencing. The two formal propositions the paper does assert as holding on the Phase-1 artifact — `Runtime.is_well_formed` completeness and `trajectory_hash` byte-identity on NO-OP — are both backed by shipped tests. The paper is tighter, more honest, and gives reviewers a clean artifact-to-claim mapping: every numeric TBD is explicitly labeled, every Phase-2 item is flagged. Expected R4 ≥ 8.0 on Round 2.
 
-Specifically target this worker's additions:
+## Merge order
 
-```bash
-.venv/bin/python -m pytest tests/effect/test_audit.py \
-                           tests/effect/test_runtime_concurrency.py \
-                           tests/replay/test_replay.py \
-                           tests/fact/test_db.py \
-                           tests/test_wall_clock_ban.py -v
-```
+Per R0 dispatch table: boundary → integration → rigor → paper. W-paper merges last so it can incorporate any shape changes from the earlier three without re-edits. No file overlap between W-paper and W-{boundary, integration, rigor}: this branch touches `paper/persistence-nesy-2026-draft.md`, `README.md`, `docs/phase-1-milestone-for-vault.md`, and adds `WORKER-SUMMARY.md`. Zero files under `src/` or `tests/` changed.

@@ -64,14 +64,26 @@ def _provenance_to_wire(prov: dict[str, Any]) -> dict[str, Any]:
     The ``:source`` slot specifically is the one that must become an EDN
     keyword (the spec's ``_keyword_spec``). A bare string ``"dfi-agent"``
     becomes ``":dfi-agent"``; already-keyworded values pass through.
+
+    ARIS Round 5 W5-provenance-symmetry (closes R3 R4-N4) — run the
+    value-keywordification branch unconditionally, regardless of whether
+    the key was supplied bare or pre-keyworded. The previous
+    ``continue`` short-circuit meant ``{":source": "bare"}`` emitted
+    ``{":source": "bare"}`` (value leaked through unkeyworded); the
+    downstream self-conform raised but the function wasn't its own
+    inverse on the pre-keyworded-key + bare-value subdomain.
     """
     out: dict[str, Any] = {}
     for k, v in prov.items():
-        # Preserve already-keyworded keys verbatim.
+        # Normalise key to wire form (leading ``:``). Already-keyworded
+        # keys pass through; unknown keys stay as-is.
         if isinstance(k, str) and k.startswith(":"):
-            out[k] = v
-            continue
-        wire_key = ":" + k if k in _PROVENANCE_KEYS else k
+            wire_key = k
+        else:
+            wire_key = ":" + k if k in _PROVENANCE_KEYS else k
+        # Keywordify the ``:source`` value unconditionally (no early
+        # continue) so the function is its own inverse on the full
+        # (bare-key, bare-value) × (kw-key, bare-value) × ... grid.
         if wire_key == ":source" and isinstance(v, str) and not v.startswith(":"):
             v = ":" + v
         out[wire_key] = v

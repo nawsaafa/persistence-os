@@ -98,6 +98,61 @@ class AuditEntry:
                 "with the audit datom's '/' → '.' encoding"
             )
 
+        # ARIS Round 5 W5-audit-canonicalize — canonicalise sibling
+        # keyword-keyed fields at construction time (closes R1 N7 +
+        # R3 R4-N1/N2). Mirrors the ``Datom.__post_init__`` pattern
+        # from W-wire: the in-memory form is the canonical one; the
+        # wire layer uniformly prepends ``":"``. Any input with a
+        # leading colon is stripped on construction, so two AuditEntry
+        # values that differ only by a leading colon are impossible.
+        #
+        # - ``policy_id`` is keyword-spec'd on the wire
+        #   (``:audit/policy-id``); ``policy_eval.py`` emits bare-string
+        #   IDs (``"bankability-v3"``, ``"unknown"``) so the in-memory
+        #   form carries the bare string and the wire form prepends.
+        #   Canonical internal form: keyword (leading ``":"``). This
+        #   reverses the sign from handler_chain/principal because the
+        #   ``to_edn`` code path already had a ``":" +`` branch that
+        #   tolerated either form; with canonicalisation we guarantee
+        #   a single shape so self-conform passes.
+        # - ``handler_chain`` and ``principal`` store bare strings
+        #   internally; ``to_edn`` prepends colons. ``from_edn`` strips
+        #   them back. Canonical internal form: bare (no leading
+        #   colon), so ``from_edn ∘ to_edn`` is idempotent.
+        #
+        # ``lstrip(":")`` (not ``[1:]``) so double-colon inputs
+        # idempotently collapse — see R3 R4-N3.
+
+        if self.policy_id is not None and isinstance(self.policy_id, str):
+            if not self.policy_id.startswith(":"):
+                object.__setattr__(self, "policy_id", ":" + self.policy_id)
+
+        if self.handler_chain is not None:
+            # Canonicalise each entry to bare form. ``lstrip(":")`` is
+            # idempotent on both bare and pre-keyworded inputs.
+            object.__setattr__(
+                self,
+                "handler_chain",
+                tuple(
+                    h.lstrip(":") if isinstance(h, str) else h
+                    for h in self.handler_chain
+                ),
+            )
+
+        if isinstance(self.principal, dict):
+            # Canonicalise principal keys to bare form. The dict itself
+            # is mutable (``field(default_factory=dict)``), so we
+            # rebuild in place to propagate to any alias the caller
+            # still holds.
+            canonical = {
+                (k.lstrip(":") if isinstance(k, str) else k): v
+                for k, v in self.principal.items()
+            }
+            # Clear + update to preserve the dict identity (avoids
+            # surprising aliasing semantics).
+            self.principal.clear()
+            self.principal.update(canonical)
+
     # ---- helpers ----
 
     def to_dict(self) -> dict[str, Any]:
@@ -145,6 +200,9 @@ class AuditEntry:
         if self.error is not None:
             edn[":audit/error"] = self.error
         if self.policy_id is not None:
+            # W5 canonicalisation: ``policy_id`` is stored in keyword
+            # form (leading ``":"``) at construction time, so the
+            # wire emission is a straight passthrough.
             edn[":audit/policy-id"] = self.policy_id
         if self.run_id is not None:
             # run_id comes in as a plain UUID string; conform expects uuid_().
@@ -387,58 +445,60 @@ def _recorded_at_to_inst(recorded_at: float | _dt.datetime) -> _dt.datetime:
 def _principal_to_keyword_map(principal: dict[str, Any]) -> dict[str, Any]:
     """Prepend ``":"`` to each string key in the principal dict.
 
-    The canonical ``:audit/principal`` spec is ``map_of(_keyword_spec, _any_value)``
-    — EDN-keyword keys. Ops-side principals today are ordinary Python dicts
-    with bare string keys; leading colons are added at the wire boundary.
-    Already-keyworded keys pass through unchanged.
+    ARIS Round 5 W5-audit-canonicalize: with ``AuditEntry.__post_init__``
+    canonicalising principal keys to bare form, this helper is now the
+    single-direction wire producer — every key is guaranteed to be bare
+    on input. The branch on "already colon" is gone.
+
+    The canonical ``:audit/principal`` spec is
+    ``map_of(_keyword_spec, _any_value)`` — EDN-keyword keys.
     """
-    out: dict[str, Any] = {}
-    for k, v in principal.items():
-        if isinstance(k, str) and not k.startswith(":"):
-            out[":" + k] = v
-        else:
-            out[k] = v
-    return out
+    return {
+        (":" + k if isinstance(k, str) else k): v for k, v in principal.items()
+    }
 
 
 def _keyword_map_to_principal(keyworded: dict[str, Any]) -> dict[str, Any]:
-    """Inverse of :func:`_principal_to_keyword_map`."""
-    out: dict[str, Any] = {}
-    for k, v in keyworded.items():
-        if isinstance(k, str) and k.startswith(":"):
-            out[k[1:]] = v
-        else:
-            out[k] = v
-    return out
+    """Inverse of :func:`_principal_to_keyword_map`.
+
+    With W5 canonicalisation, ``AuditEntry.__post_init__`` strips keys
+    to bare form on construction, so this helper's ``lstrip(":")`` is
+    still defensive on pre-keyworded wire input and idempotent on
+    bare-string input.
+    """
+    return {
+        (k.lstrip(":") if isinstance(k, str) else k): v
+        for k, v in keyworded.items()
+    }
 
 
 def _handler_chain_to_keywords(chain: Iterable[str]) -> list[str]:
     """Prepend ``":"`` to each bare-string handler name in the chain.
 
-    The canonical ``:audit/handler-chain`` spec is ``seq_of(_keyword_spec)`` —
-    each entry must be an EDN keyword. Production handlers are registered
-    with bare-string names (``"audit"``, ``"llm"``, ``"tool"``, etc.);
-    leading colons are added at the wire boundary (ARIS Round 4
-    W4-handler-chain-wire, closes R1 N6). Idempotent on already-keyworded
-    entries, so mixed chains round-trip cleanly.
+    ARIS Round 5 W5-audit-canonicalize: with ``AuditEntry.__post_init__``
+    canonicalising ``handler_chain`` to bare form, this helper is now
+    the single-direction wire producer — every entry is guaranteed to
+    be bare on input. The branch on "already colon" is gone.
+
+    The canonical ``:audit/handler-chain`` spec is
+    ``seq_of(_keyword_spec)`` — each entry must be an EDN keyword.
+    Production handlers are registered with bare-string names
+    (``"audit"``, ``"llm"``, ``"tool"``, etc.); leading colons are
+    added at the wire boundary (ARIS Round 4 W4-handler-chain-wire
+    closed R1 N6 with serialisation-time branching; W5 moves the
+    normalisation to construction so the branch is no longer needed).
     """
-    out: list[str] = []
-    for h in chain:
-        if isinstance(h, str) and not h.startswith(":"):
-            out.append(":" + h)
-        else:
-            out.append(h)
-    return out
+    return [":" + h if isinstance(h, str) else h for h in chain]
 
 
 def _handler_chain_from_keywords(chain: Iterable[str]) -> tuple[str, ...]:
     """Inverse of :func:`_handler_chain_to_keywords` — strip leading colons
-    back to the Python-native bare-string form. Needed by symmetric
-    ``AuditEntry.from_edn`` (see below). Idempotent on bare-string input.
+    back to the Python-native bare-string form. Defensive on both bare
+    and keyworded input (uses ``lstrip`` for idempotency on edge
+    cases like double-colons).
     """
     return tuple(
-        h[1:] if isinstance(h, str) and h.startswith(":") else h
-        for h in chain
+        h.lstrip(":") if isinstance(h, str) else h for h in chain
     )
 
 

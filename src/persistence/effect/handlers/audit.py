@@ -61,6 +61,43 @@ class AuditEntry:
     run_id: str | None = None
     parent: str | None = None
 
+    def __post_init__(self) -> None:
+        """Format invariants on :attr:`op` (ARIS Round 3 P-op-invariants).
+
+        ``op`` must be a well-formed EDN keyword:
+
+        - leading ``:``,
+        - at most one forward slash (``/``) — a bare keyword like
+          ``:decide`` is valid, and so is ``:llm/call``; but
+          ``:llm/call/extra`` breaks the audit datom's ``/ → .``
+          encoding,
+        - no literal ``.`` anywhere — a literal dot collides with the
+          same encoding, so ``datom_to_audit_entry ∘ audit_entry_to_datom``
+          would cease to be identity.
+        """
+        op = self.op
+        if not isinstance(op, str):
+            raise ValueError(
+                f"AuditEntry.op must be a string, got {type(op).__name__}"
+            )
+        if not op:
+            raise ValueError("AuditEntry.op must not be empty")
+        if not op.startswith(":"):
+            raise ValueError(
+                f"AuditEntry.op {op!r} must have a leading colon "
+                "(EDN keyword form, e.g. ':llm/call')"
+            )
+        if op.count("/") > 1:
+            raise ValueError(
+                f"AuditEntry.op {op!r} has multiple forward slashes — "
+                "the audit datom encoding requires at most one '/'"
+            )
+        if "." in op:
+            raise ValueError(
+                f"AuditEntry.op {op!r} contains a literal dot — collides "
+                "with the audit datom's '/' → '.' encoding"
+            )
+
     # ---- helpers ----
 
     def to_dict(self) -> dict[str, Any]:

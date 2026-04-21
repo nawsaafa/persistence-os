@@ -65,6 +65,31 @@ class TestFactDatom:
         d = self._good(); d[":datom/tx-time"] = dt.datetime(2026, 4, 20, 12)
         assert not S.conform(":persistence.fact/datom", d).is_ok
 
+    # ARIS R1 F2 / R3 F1 — content addressing is load-bearing (paper §4.1);
+    # relax the spec to accept the sha256:<hex> content-hash form alongside
+    # canonical UUIDs for :datom/e, and alongside ints for :datom/tx. The
+    # audit→fact boundary emits sha256 strings for both slots.
+    def test_content_hash_e_accepted(self):
+        d = self._good()
+        d[":datom/e"] = "sha256:" + "a" * 64
+        assert S.conform(":persistence.fact/datom", d).is_ok
+
+    def test_content_hash_tx_accepted(self):
+        d = self._good()
+        d[":datom/tx"] = "sha256:" + "b" * 64
+        assert S.conform(":persistence.fact/datom", d).is_ok
+
+    def test_arbitrary_string_e_still_rejected(self):
+        # Relaxation is scoped: not-a-UUID-and-not-a-content-hash is still bad.
+        d = self._good()
+        d[":datom/e"] = "banana"
+        assert not S.conform(":persistence.fact/datom", d).is_ok
+
+    def test_arbitrary_string_tx_still_rejected(self):
+        d = self._good()
+        d[":datom/tx"] = "banana"
+        assert not S.conform(":persistence.fact/datom", d).is_ok
+
 
 class TestEffectOp:
     def test_valid_ops(self):
@@ -109,6 +134,14 @@ class TestEffectAuditEntry:
     def test_op_must_be_in_catalog(self):
         e = self._good(); e[":audit/op"] = ":bogus"
         assert not S.conform(":persistence.effect/audit-entry", e).is_ok
+
+    # ARIS R1 F6 — audit handler factory defaults policy_id to None; making
+    # :audit/policy-id required means every entry produced by the effect
+    # module's own tests fails conform. Move it to optional.
+    def test_policy_id_optional(self):
+        e = self._good()
+        del e[":audit/policy-id"]
+        assert S.conform(":persistence.effect/audit-entry", e).is_ok
 
 
 class TestPlanNode:
@@ -188,6 +221,21 @@ class TestReplayFact:
         fact = {":step": "0", ":t": dt.datetime.now(dt.timezone.utc),
                 ":state": {}, ":obs": {}, ":action": {}}
         assert not S.conform(":persistence.replay/fact", fact).is_ok
+
+    # ARIS R1 F5 — the Python agent reference implementation (spec §7 + the
+    # replay module's own conftest) stores state/obs/action with bare string
+    # keys (``"balance"``, not ``":balance"``). EDN keywords are a wire-layer
+    # convention; Python code uses strings. Relax :state/:obs/:action to
+    # ``map_of(str_(), _any_value)``.
+    def test_string_keyed_state_accepted(self):
+        fact = {
+            ":step": 0,
+            ":t": dt.datetime.now(dt.timezone.utc),
+            ":state": {"step": 0, "balance": 400.0, "position": None, "pnl": 0.0},
+            ":obs": {"btc_price": 67420, "btc_atr": 42.0},
+            ":action": {"type": "hold"},
+        }
+        assert S.conform(":persistence.replay/fact", fact).is_ok
 
 
 class TestReplayIntervention:

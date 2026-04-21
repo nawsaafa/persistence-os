@@ -446,18 +446,21 @@ _trajectory_fact = keys(
 )
 register(":persistence.replay/fact", _trajectory_fact)
 
+# ARIS R1 F5 — same rationale as :persistence.replay/fact: Python
+# reference impl uses str-keyed goal/outcome dicts; EDN keywords are the
+# wire convention. Relax to accept either.
 _trajectory = keys(
     required={
         ":trajectory/id": uuid_(),
         ":trajectory/parent-id": maybe(uuid_()),
         ":trajectory/branch-point": int_(),
         ":trajectory/agent": str_(),
-        ":trajectory/goal": map_of(_keyword_spec, _any_value),
+        ":trajectory/goal": map_of(str_(), _any_value),
         ":trajectory/seeds": _seeds,
         ":trajectory/started-at": inst(),
         ":trajectory/wall-clock-basis": _wall_clock_basis,
         ":trajectory/status": _trajectory_status,
-        ":trajectory/outcome": map_of(_keyword_spec, _any_value),
+        ":trajectory/outcome": map_of(str_(), _any_value),
         ":trajectory/facts": seq_of(ref(":persistence.replay/fact")),
         ":trajectory/hash": str_(),
     },

@@ -70,6 +70,27 @@ class Datom:
                 raise ValueError(
                     f"Datom.valid_to must be timezone-aware, got naive datetime {self.valid_to!r}"
                 )
+        # ARIS Round 4 W4-wire-identity (closes R3 N2) — the canonical
+        # in-memory form of ``a`` and ``provenance["source"]`` is bare
+        # (no leading colon). The wire form uniformly prepends ``":"`` in
+        # ``datom_to_wire``. Normalising at construction time means:
+        #
+        #   Datom(a=":x/y") and Datom(a="x/y") produce identical values
+        #
+        # so ``wire_to_datom ∘ datom_to_wire`` is the identity on every
+        # input, not just the bare-string subdomain. The dataclass is
+        # frozen + slotted, so we mutate via object.__setattr__.
+        if isinstance(self.a, str) and self.a.startswith(":"):
+            object.__setattr__(self, "a", self.a[1:])
+        if isinstance(self.provenance, dict):
+            src = self.provenance.get("source")
+            if isinstance(src, str) and src.startswith(":"):
+                # The dict itself is mutable (``field(default_factory=dict)``
+                # is not frozen, even in a frozen dataclass), so we mutate
+                # in place. Any alias the caller still holds sees the
+                # canonicalised value — the round-trip invariant depends
+                # on the whole provenance mapping being canonical.
+                self.provenance["source"] = src[1:]
 
 
 __all__ = ["Datom", "Op"]

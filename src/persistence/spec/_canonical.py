@@ -631,7 +631,12 @@ _trajectory = keys(
         ":trajectory/hash": str_(),
     },
     optional={
-        ":trajectory/intervention": ref(":persistence.replay/intervention"),
+        # ARIS Round 4 W4-intervention-wire — the intervention slot is a
+        # ``seq_of`` intervention entries (B1 closure), not a single entry.
+        # A counterfactual produced by a multi-step intervention records
+        # every entry on its lineage, so DPO / regulator-replay consumers
+        # can recover the full interventional decomposition.
+        ":trajectory/intervention": seq_of(ref(":persistence.replay/intervention")),
         ":trajectory/tags": seq_of(_keyword_spec),
     },
 )

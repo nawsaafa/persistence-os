@@ -30,7 +30,17 @@ from persistence.replay.trajectory import Fact, Trajectory
 
 
 def _sample_entry() -> AuditEntry:
-    """Representative AuditEntry that every producer path would emit."""
+    """Representative AuditEntry that every producer path would emit.
+
+    Uses bare-string ``handler_chain`` entries — the production shape
+    emitted by ``make_audit_handler`` under a real ``Runtime``. Round 3
+    used ``(":audit", ":policy", ":raw")`` here, which hid R1 N6: the
+    happy-path test conformed because the chain was already keywordified
+    at construction, but every real handler chain failed. After ARIS
+    Round 4 W4-handler-chain-wire, ``AuditEntry.to_edn`` keywordifies at
+    the wire boundary, so bare-string input is the production-realistic
+    shape this test must exercise.
+    """
     return AuditEntry(
         id="sha256:cafebabe00010203",
         prev_hash="sha256:deadbeef00010203",
@@ -42,7 +52,7 @@ def _sample_entry() -> AuditEntry:
         result_hash="sha256:feedface",
         error=None,
         policy_id=":bankability-v3",
-        handler_chain=(":audit", ":policy", ":raw"),
+        handler_chain=("audit", "policy", "raw"),
         principal={"agent": ":bankability"},
         run_id=str(uuid.uuid4()),
         parent=None,

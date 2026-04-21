@@ -125,7 +125,14 @@ class AuditEntry:
             ":audit/verdict": _verdict_as_edn(self.verdict),
             ":audit/latency-ms": self.latency_ms,
             ":audit/recorded-at": _recorded_at_to_inst(self.recorded_at),
-            ":audit/handler-chain": list(self.handler_chain),
+            # ARIS Round 4 W4-handler-chain-wire (closes R1 N6) — keywordify
+            # each entry at the wire boundary (symmetric with
+            # ``_principal_to_keyword_map``). Production handlers register
+            # with bare-string names (``"audit"``, ``"llm"``, etc.); the
+            # ``:persistence.effect/audit-entry`` spec requires each chain
+            # entry to be an EDN keyword. Idempotent on already-keyworded
+            # entries, so mixed chains round-trip cleanly.
+            ":audit/handler-chain": _handler_chain_to_keywords(self.handler_chain),
             ":audit/principal": _principal_to_keyword_map(self.principal),
         }
         # Optional fields: include only when meaningful. ``None`` is a
@@ -157,6 +164,55 @@ class AuditEntry:
                 f"AuditEntry.to_edn produced a non-conformant value: {result}"
             )
         return edn
+
+    @classmethod
+    def from_edn(cls, edn: dict[str, Any]) -> AuditEntry:
+        """Inverse of :meth:`to_edn` — reconstruct an ``AuditEntry`` from
+        its ``:persistence.effect/audit-entry`` wire form.
+
+        Closes ARIS Round 3 R3 N6: Phase-2 regulator-replay needs the
+        audit-entry-wire → AuditEntry inverse (the existing
+        ``datom_to_audit_entry`` is a different shape — it inverts the
+        datom wire form, not the audit-entry wire form). This is the
+        symmetric producer: keyworded entries on the wire come back as
+        bare-string Python-native form.
+        """
+        # recorded_at → float seconds since epoch (the in-memory representation
+        # the dataclass uses; ``to_edn`` projects it to a tz-aware datetime).
+        recorded_at_raw = edn.get(":audit/recorded-at")
+        if isinstance(recorded_at_raw, _dt.datetime):
+            recorded_at = recorded_at_raw.timestamp()
+        else:
+            recorded_at = float(recorded_at_raw)  # type: ignore[arg-type]
+
+        # run_id: uuid.UUID on the wire → str on the Python side.
+        run_id_raw = edn.get(":audit/run-id")
+        if run_id_raw is not None:
+            run_id = str(run_id_raw)
+        else:
+            run_id = None
+
+        # Verdict: ":ok" on wire → "ok" on Python.
+        verdict = _verdict_as_python(edn[":audit/verdict"])
+
+        return cls(
+            id=edn[":audit/id"],
+            prev_hash=edn.get(":audit/prev-hash"),
+            op=edn[":audit/op"],
+            args_hash=edn[":audit/args-hash"],
+            verdict=verdict,
+            latency_ms=edn[":audit/latency-ms"],
+            recorded_at=recorded_at,
+            result_hash=edn.get(":audit/result-hash"),
+            error=edn.get(":audit/error"),
+            policy_id=edn.get(":audit/policy-id"),
+            handler_chain=_handler_chain_from_keywords(
+                edn.get(":audit/handler-chain", ())
+            ),
+            principal=_keyword_map_to_principal(edn.get(":audit/principal", {})),
+            run_id=run_id,
+            parent=edn.get(":audit/parent"),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -354,6 +410,36 @@ def _keyword_map_to_principal(keyworded: dict[str, Any]) -> dict[str, Any]:
         else:
             out[k] = v
     return out
+
+
+def _handler_chain_to_keywords(chain: Iterable[str]) -> list[str]:
+    """Prepend ``":"`` to each bare-string handler name in the chain.
+
+    The canonical ``:audit/handler-chain`` spec is ``seq_of(_keyword_spec)`` —
+    each entry must be an EDN keyword. Production handlers are registered
+    with bare-string names (``"audit"``, ``"llm"``, ``"tool"``, etc.);
+    leading colons are added at the wire boundary (ARIS Round 4
+    W4-handler-chain-wire, closes R1 N6). Idempotent on already-keyworded
+    entries, so mixed chains round-trip cleanly.
+    """
+    out: list[str] = []
+    for h in chain:
+        if isinstance(h, str) and not h.startswith(":"):
+            out.append(":" + h)
+        else:
+            out.append(h)
+    return out
+
+
+def _handler_chain_from_keywords(chain: Iterable[str]) -> tuple[str, ...]:
+    """Inverse of :func:`_handler_chain_to_keywords` — strip leading colons
+    back to the Python-native bare-string form. Needed by symmetric
+    ``AuditEntry.from_edn`` (see below). Idempotent on bare-string input.
+    """
+    return tuple(
+        h[1:] if isinstance(h, str) and h.startswith(":") else h
+        for h in chain
+    )
 
 
 def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:

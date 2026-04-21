@@ -1,0 +1,7 @@
+# persistence.effect runtime dependencies.
+#
+# This module is intentionally stdlib-only — no external packages are
+# required to run the handler stack, policy evaluator, or demo.
+#
+# The only tooling used during development is pytest, which is already
+# pinned at the repository level.

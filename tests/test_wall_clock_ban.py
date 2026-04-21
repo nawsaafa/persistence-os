@@ -40,6 +40,13 @@ SRC_ROOT = REPO_ROOT / "src" / "persistence"
 # Fully-qualified call sites to ban. Keyed as (module, attr).
 BANNED_CALLS: set[tuple[str, str]] = {
     ("time", "time"),
+    # ARIS Round 4 — ``time.monotonic`` and ``time.perf_counter`` are
+    # wall-clock-ish: they affect elapsed_ms / latency measurements on
+    # AuditEntry and the §6.3 regulator-replay p95 target. Route
+    # through ``:clock/now`` instead. Verified zero hits in src/
+    # before banning.
+    ("time", "monotonic"),
+    ("time", "perf_counter"),
     ("datetime", "now"),
     ("datetime", "utcnow"),
     ("dt", "datetime"),  # covers `dt.datetime.now` via ast.Attribute chain below
@@ -186,6 +193,24 @@ def test_lint_detects_planted_time_time():
     planted = "import time\n" "time.time()\n"
     violations = _scan_source_for_violations(planted)
     assert any("time.time" in v for v in violations), violations
+
+
+def test_lint_detects_planted_time_monotonic():
+    """ARIS Round 4 — ``time.monotonic()`` is wall-clock-ish (affects
+    latency measurements / elapsed_ms on AuditEntry). Must be banned.
+    """
+    planted = "import time\n" "time.monotonic()\n"
+    violations = _scan_source_for_violations(planted)
+    assert any("time.monotonic" in v for v in violations), violations
+
+
+def test_lint_detects_planted_time_perf_counter():
+    """ARIS Round 4 — ``time.perf_counter()`` is wall-clock-ish (same
+    latency-measurement vector as monotonic). Must be banned.
+    """
+    planted = "import time\n" "time.perf_counter()\n"
+    violations = _scan_source_for_violations(planted)
+    assert any("time.perf_counter" in v for v in violations), violations
 
 
 def test_lint_detects_planted_random_random():

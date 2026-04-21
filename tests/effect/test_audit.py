@@ -80,6 +80,58 @@ def test_tampering_an_entry_breaks_the_chain():
     assert verify_chain(entries) is False
 
 
+def test_deleting_an_audit_entry_breaks_the_chain():
+    """R2 F2: a regulator-audit adversary deletes a middle entry hoping the
+    chain re-seals. verify_chain must detect the gap because entry[k+1].prev_hash
+    no longer matches entry[k-1].id.
+    """
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        for i in range(5):
+            perform("llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+    from persistence.effect.handlers.audit import verify_chain
+    assert verify_chain(entries) is True
+    # Delete entry[2] — a middle entry.
+    del entries[2]
+    # The chain is broken because entries[2] (was entries[3]) still points
+    # prev_hash at the deleted id.
+    assert verify_chain(entries) is False
+
+
+def test_reordering_audit_entries_breaks_the_chain():
+    """R2 F2: swapping two entries must be detected."""
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        for i in range(5):
+            perform("llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+    from persistence.effect.handlers.audit import verify_chain
+    assert verify_chain(entries) is True
+    # Swap entries[2] and entries[3].
+    entries[2], entries[3] = entries[3], entries[2]
+    assert verify_chain(entries) is False
+
+
+def test_truncating_audit_entries_from_tail_preserves_chain():
+    """R2 F2: design decision — truncation from the tail is allowed.
+
+    A shortened but intact prefix still verifies, because verify_chain walks
+    the entries it is given and each prev_hash -> id link in that prefix is
+    consistent. Regulators noticing a truncated log should compare lengths
+    against a separately-recorded expected count, not rely on verify_chain.
+    """
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        for i in range(5):
+            perform("llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+    from persistence.effect.handlers.audit import verify_chain
+    # Truncate last two entries.
+    truncated = entries[:3]
+    assert verify_chain(truncated) is True
+
+
 # ---------- datom round-trip (Fact spec §1, 8-tuple) ----------
 
 

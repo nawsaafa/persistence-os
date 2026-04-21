@@ -3,24 +3,17 @@
 Every backend is exercised through the same conformance test suite. New
 backends (e.g. a Postgres one) just need to add a branch to the ``store``
 fixture below — no per-backend test duplication.
+
+Tx allocation lives on the Store instance (see Store.next_tx), so each
+test gets a fresh counter automatically via fresh Store construction —
+no module-level reset hook required.
 """
 
 from __future__ import annotations
 
-import itertools
-
 import pytest
 
 from persistence.fact import InMemoryStore, SQLiteStore
-
-
-@pytest.fixture(autouse=True)
-def _reset_tx_counter():
-    """Reset the monotonic transaction counter before each test."""
-    from persistence.fact import db as db_mod
-
-    db_mod._tx_counter = itertools.count(1)
-    yield
 
 
 @pytest.fixture(params=["memory", "sqlite"])

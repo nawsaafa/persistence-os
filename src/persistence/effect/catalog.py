@@ -47,8 +47,8 @@ class OpSpec:
 
 
 CATALOG: dict[str, OpSpec] = {
-    "llm/call": OpSpec(
-        name="llm/call",
+    ":llm/call": OpSpec(
+        name=":llm/call",
         args={
             "model": _req(str),
             "messages": _req(list),
@@ -64,8 +64,8 @@ CATALOG: dict[str, OpSpec] = {
         },
         doc="Call an LLM. Non-deterministic — must be audited and cache-keyable.",
     ),
-    "tool/call": OpSpec(
-        name="tool/call",
+    ":tool/call": OpSpec(
+        name=":tool/call",
         args={
             "name": _req(str),
             "input": _req(dict),
@@ -77,14 +77,14 @@ CATALOG: dict[str, OpSpec] = {
         },
         doc="Call a named tool. Side-effect, must be policy-gated.",
     ),
-    "mem/read": OpSpec(
-        name="mem/read",
+    ":mem/read": OpSpec(
+        name=":mem/read",
         args={"tier": _req(str), "query": _req(str), "scope": _opt(dict)},
         returns={"hits": _req(list)},
         doc="Query the fact store at a given tier.",
     ),
-    "mem/write": OpSpec(
-        name="mem/write",
+    ":mem/write": OpSpec(
+        name=":mem/write",
         args={
             "tier": _req(str),
             "fact": _req(dict),
@@ -94,8 +94,8 @@ CATALOG: dict[str, OpSpec] = {
         returns={"id": _req(str)},
         doc="Write a fact to the store.",
     ),
-    "decide": OpSpec(
-        name="decide",
+    ":decide": OpSpec(
+        name=":decide",
         args={
             "question": _req(str),
             "options": _req(list),
@@ -105,14 +105,14 @@ CATALOG: dict[str, OpSpec] = {
         returns={"choice": _req(object), "confidence": _opt((int, float))},
         doc="Record an explicit decision. Policy-gated: rationale required.",
     ),
-    "ask-user": OpSpec(
-        name="ask-user",
+    ":ask-user": OpSpec(
+        name=":ask-user",
         args={"prompt": _req(str), "options": _opt(list), "timeout_ms": _opt(int)},
         returns={"answer": _req(object)},
         doc="Prompt the human. Bounded by timeout_ms.",
     ),
-    "emit-artifact": OpSpec(
-        name="emit-artifact",
+    ":emit-artifact": OpSpec(
+        name=":emit-artifact",
         args={
             "kind": _req(str),
             "path": _req(str),
@@ -122,50 +122,50 @@ CATALOG: dict[str, OpSpec] = {
         returns={"uri": _req(str)},
         doc="Emit a produced artifact (xlsx, pdf, json).",
     ),
-    "sleep": OpSpec(
-        name="sleep",
+    ":sleep": OpSpec(
+        name=":sleep",
         args={"ms": _req(int)},
         returns=None,
         doc="Sleep. Routed through a handler so replay can skip.",
     ),
-    "random": OpSpec(
-        name="random",
+    ":random": OpSpec(
+        name=":random",
         args={"kind": _req(str), "params": _opt(dict)},
         returns={"value": _req(object)},
         doc="Sample a random value. Handler records for replay.",
     ),
-    "env/read": OpSpec(
-        name="env/read",
+    ":env/read": OpSpec(
+        name=":env/read",
         args={"key": _req(str)},
         returns={"value": _opt(str), "source": _opt(str)},
         doc="Read an env var. Source lets audit catch silent overrides.",
     ),
-    "net/fetch": OpSpec(
-        name="net/fetch",
+    ":net/fetch": OpSpec(
+        name=":net/fetch",
         args={"url": _req(str), "method": _opt(str), "headers": _opt(dict), "body": _opt(object)},
         returns={"status": _req(int), "body": _opt(object)},
         doc="Fetch a URL. PII-redact above; cache below.",
     ),
-    "secret/use": OpSpec(
-        name="secret/use",
+    ":secret/use": OpSpec(
+        name=":secret/use",
         args={"name": _req(str), "purpose": _req(str)},
         returns={"handle": _req(object)},
         doc="Use a secret by handle. Never returns raw material.",
     ),
-    "cost/charge": OpSpec(
-        name="cost/charge",
+    ":cost/charge": OpSpec(
+        name=":cost/charge",
         args={"units": _req((int, float)), "currency": _req(str), "category": _req(str)},
         returns={"remaining": _req((int, float))},
         doc="Charge against the budget.",
     ),
-    "clock/now": OpSpec(
-        name="clock/now",
+    ":clock/now": OpSpec(
+        name=":clock/now",
         args={},
         returns={"ts": _req((int, float, str))},
         doc="Read the clock. Handler returns recorded ts in replay.",
     ),
-    "audit/emit": OpSpec(
-        name="audit/emit",
+    ":audit/emit": OpSpec(
+        name=":audit/emit",
         args={"kind": _req(str), "payload": _req(dict)},
         returns=None,
         doc="Emit an audit record. Usually masked inside audit handler body.",

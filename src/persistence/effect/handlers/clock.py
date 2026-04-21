@@ -14,7 +14,7 @@ from persistence.effect.runtime import Handler
 
 def make_system_clock_handler(
     now: Callable[[], float] | None = None,
-    wraps: Iterable[str] = ("clock/now",),
+    wraps: Iterable[str] = (":clock/now",),
 ) -> Handler:
     """Return a handler that answers :clock/now with the system clock.
 
@@ -30,13 +30,13 @@ def make_system_clock_handler(
     return Handler(
         name="clock",
         wraps=set(wraps),
-        clauses={"clock/now": clock_now},
+        clauses={":clock/now": clock_now},
     )
 
 
 def make_fixed_clock_handler(
     ts: float | int = 0,
-    wraps: Iterable[str] = ("clock/now",),
+    wraps: Iterable[str] = (":clock/now",),
 ) -> Handler:
     """Return a handler that answers :clock/now with a fixed timestamp.
 
@@ -49,14 +49,14 @@ def make_fixed_clock_handler(
     return Handler(
         name="clock",
         wraps=set(wraps),
-        clauses={"clock/now": clock_now},
+        clauses={":clock/now": clock_now},
         ctx={"ts": ts},
     )
 
 
 def make_replay_clock_handler(
     timestamps: list[float],
-    wraps: Iterable[str] = ("clock/now",),
+    wraps: Iterable[str] = (":clock/now",),
 ) -> Handler:
     """Return a handler that answers :clock/now from a pre-recorded list.
 
@@ -72,6 +72,6 @@ def make_replay_clock_handler(
     return Handler(
         name="clock",
         wraps=set(wraps),
-        clauses={"clock/now": clock_now},
+        clauses={":clock/now": clock_now},
         ctx={"timestamps": list(timestamps)},
     )

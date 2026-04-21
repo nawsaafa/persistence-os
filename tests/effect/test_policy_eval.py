@@ -30,61 +30,61 @@ PRINCIPAL = {"role": "user", "tenant_id": "t1", "clearance": "basic"}
 
 
 def test_op_eq():
-    rule_when = [":op=", "llm/call"]
-    assert evaluate._match_when(rule_when, PRINCIPAL, "llm/call", {}, mode="live") is True
-    assert evaluate._match_when(rule_when, PRINCIPAL, "tool/call", {}, mode="live") is False
+    rule_when = [":op=", ":llm/call"]
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":llm/call", {}, mode="live") is True
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":tool/call", {}, mode="live") is False
 
 
 def test_op_in():
-    rule_when = [":op-in", ["tool/call", "emit-artifact"]]
-    assert evaluate._match_when(rule_when, PRINCIPAL, "tool/call", {}, mode="live") is True
-    assert evaluate._match_when(rule_when, PRINCIPAL, "llm/call", {}, mode="live") is False
+    rule_when = [":op-in", [":tool/call", ":emit-artifact"]]
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":tool/call", {}, mode="live") is True
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":llm/call", {}, mode="live") is False
 
 
 def test_mode_eq():
     rule_when = [":mode=", "dry-run"]
-    assert evaluate._match_when(rule_when, PRINCIPAL, "llm/call", {}, mode="dry-run") is True
-    assert evaluate._match_when(rule_when, PRINCIPAL, "llm/call", {}, mode="live") is False
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":llm/call", {}, mode="dry-run") is True
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":llm/call", {}, mode="live") is False
 
 
 def test_contains_in_args_list():
     rule_when = [":contains?", [":args", "tags"], "regulator-facing"]
     args = {"tags": ["regulator-facing", "internal"]}
-    assert evaluate._match_when(rule_when, PRINCIPAL, "decide", args, mode="live") is True
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":decide", args, mode="live") is True
 
 
 def test_contains_miss():
     rule_when = [":contains?", [":args", "tags"], "public"]
     args = {"tags": ["internal"]}
-    assert evaluate._match_when(rule_when, PRINCIPAL, "decide", args, mode="live") is False
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":decide", args, mode="live") is False
 
 
 def test_matches_regex():
     rule_when = [":matches?", [":args", "name"], r"^(stripe|supabase-prod)"]
     args = {"name": "stripe.charge"}
-    assert evaluate._match_when(rule_when, PRINCIPAL, "tool/call", args, mode="live") is True
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":tool/call", args, mode="live") is True
 
 
 def test_and_or_not():
     rule_when = [
         ":and",
-        [":op=", "decide"],
+        [":op=", ":decide"],
         [":or", [":contains?", [":args", "tags"], "regulator-facing"], [":mode=", "strict"]],
         [":not", [":mode=", "dry-run"]],
     ]
     args = {"tags": ["regulator-facing"]}
-    assert evaluate._match_when(rule_when, PRINCIPAL, "decide", args, mode="live") is True
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":decide", args, mode="live") is True
     # not: :mode=dry-run → false when mode is dry-run
     assert (
-        evaluate._match_when(rule_when, PRINCIPAL, "decide", args, mode="dry-run") is False
+        evaluate._match_when(rule_when, PRINCIPAL, ":decide", args, mode="dry-run") is False
     )
 
 
 def test_non_empty_check_on_args_field():
     rule_when = [":non-empty?", [":args", "rationale"]]
-    assert evaluate._match_when(rule_when, PRINCIPAL, "decide", {"rationale": "yes"}, mode="live")
-    assert not evaluate._match_when(rule_when, PRINCIPAL, "decide", {"rationale": ""}, mode="live")
-    assert not evaluate._match_when(rule_when, PRINCIPAL, "decide", {}, mode="live")
+    assert evaluate._match_when(rule_when, PRINCIPAL, ":decide", {"rationale": "yes"}, mode="live")
+    assert not evaluate._match_when(rule_when, PRINCIPAL, ":decide", {"rationale": ""}, mode="live")
+    assert not evaluate._match_when(rule_when, PRINCIPAL, ":decide", {}, mode="live")
 
 
 # ---------- full policy decisions ----------
@@ -92,7 +92,7 @@ def test_non_empty_check_on_args_field():
 
 def test_empty_policy_allows_all():
     policy = {"policy/id": "empty", "rules": []}
-    v = evaluate(policy, PRINCIPAL, "llm/call", {}, mode="live")
+    v = evaluate(policy, PRINCIPAL, ":llm/call", {}, mode="live")
     assert v["verdict"] == "allow"
 
 
@@ -103,13 +103,13 @@ def test_rule_denies_on_when_match_and_require_fail():
         "rules": [
             {
                 "id": "r4",
-                "when": [":op=", "decide"],
+                "when": [":op=", ":decide"],
                 "require": [":non-empty?", [":args", "rationale"]],
                 "on-fail": "require-approval",
             }
         ],
     }
-    v = evaluate(policy, PRINCIPAL, "decide", {"question": "?", "options": []}, mode="live")
+    v = evaluate(policy, PRINCIPAL, ":decide", {"question": "?", "options": []}, mode="live")
     assert v["verdict"] == "require-approval"
     assert "r4" in v["reasons"][0]
 
@@ -120,13 +120,13 @@ def test_rule_passes_when_require_satisfied():
         "rules": [
             {
                 "id": "r4",
-                "when": [":op=", "decide"],
+                "when": [":op=", ":decide"],
                 "require": [":non-empty?", [":args", "rationale"]],
                 "on-fail": "require-approval",
             }
         ],
     }
-    v = evaluate(policy, PRINCIPAL, "decide", {"rationale": "because reasons"}, mode="live")
+    v = evaluate(policy, PRINCIPAL, ":decide", {"rationale": "because reasons"}, mode="live")
     assert v["verdict"] == "allow"
 
 
@@ -140,7 +140,7 @@ def test_deny_silently_verdict():
                 "when": [
                     ":and",
                     [":mode=", "dry-run"],
-                    [":op-in", ["tool/call", "emit-artifact"]],
+                    [":op-in", [":tool/call", ":emit-artifact"]],
                     [":matches?", [":args", "name"], r"^(stripe|supabase-prod|binance)"],
                 ],
                 "on-fail": "deny-silently",
@@ -148,7 +148,7 @@ def test_deny_silently_verdict():
         ],
     }
     v = evaluate(
-        policy, PRINCIPAL, "tool/call", {"name": "stripe.charge", "input": {}}, mode="dry-run"
+        policy, PRINCIPAL, ":tool/call", {"name": "stripe.charge", "input": {}}, mode="dry-run"
     )
     assert v["verdict"] == "deny-silently"
 
@@ -159,17 +159,17 @@ def test_first_matching_rule_wins():
         "rules": [
             {
                 "id": "deny-first",
-                "when": [":op=", "llm/call"],
+                "when": [":op=", ":llm/call"],
                 "on-fail": "deny",
             },
             {
                 "id": "require-approval-never-reached",
-                "when": [":op=", "llm/call"],
+                "when": [":op=", ":llm/call"],
                 "on-fail": "require-approval",
             },
         ],
     }
-    v = evaluate(policy, PRINCIPAL, "llm/call", {}, mode="live")
+    v = evaluate(policy, PRINCIPAL, ":llm/call", {}, mode="live")
     assert v["verdict"] == "deny"
     assert "deny-first" in v["reasons"][0]
 
@@ -187,7 +187,7 @@ def test_rule_without_require_denies_on_when_match():
         ],
     }
     v = evaluate(
-        policy, PRINCIPAL, "tool/call", {"name": "binance.trade", "input": {}}, mode="live"
+        policy, PRINCIPAL, ":tool/call", {"name": "binance.trade", "input": {}}, mode="live"
     )
     assert v["verdict"] == "deny"
 
@@ -199,7 +199,7 @@ def test_principal_attr_check():
         "rules": [
             {
                 "id": "require-license",
-                "when": [":op=", "decide"],
+                "when": [":op=", ":decide"],
                 "require": [":=", [":principal", "clearance"], "mia-licensed"],
                 "on-fail": "deny",
             }
@@ -208,11 +208,11 @@ def test_principal_attr_check():
     principal_ok = {"clearance": "mia-licensed"}
     principal_bad = {"clearance": "basic"}
     assert (
-        evaluate(policy, principal_ok, "decide", {"rationale": "x"}, mode="live")["verdict"]
+        evaluate(policy, principal_ok, ":decide", {"rationale": "x"}, mode="live")["verdict"]
         == "allow"
     )
     assert (
-        evaluate(policy, principal_bad, "decide", {"rationale": "x"}, mode="live")["verdict"]
+        evaluate(policy, principal_bad, ":decide", {"rationale": "x"}, mode="live")["verdict"]
         == "deny"
     )
 
@@ -229,7 +229,7 @@ def test_unknown_operator_raises_policy_error():
         ],
     }
     with pytest.raises(PolicyError, match="unknown operator"):
-        evaluate(policy, PRINCIPAL, "llm/call", {}, mode="live")
+        evaluate(policy, PRINCIPAL, ":llm/call", {}, mode="live")
 
 
 def test_policy_value_is_immutable_from_caller_perspective():
@@ -239,6 +239,6 @@ def test_policy_value_is_immutable_from_caller_perspective():
         "rules": [],
     }
     before = repr(policy)
-    v = evaluate(policy, PRINCIPAL, "llm/call", {}, mode="live")
+    v = evaluate(policy, PRINCIPAL, ":llm/call", {}, mode="live")
     v["reasons"] = ["mutated"]
     assert repr(policy) == before

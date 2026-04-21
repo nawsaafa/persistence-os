@@ -53,7 +53,7 @@ BANKABILITY_POLICY = {
         # r1-regulator-audit: deny :decide without regulator-facing tag AND rationale.
         {
             "id": "r4-decision-needs-rationale",
-            "when": [":op=", "decide"],
+            "when": [":op=", ":decide"],
             "require": [":non-empty?", [":args", "rationale"]],
             "on-fail": "require-approval",
         },
@@ -63,7 +63,7 @@ BANKABILITY_POLICY = {
             "when": [
                 ":and",
                 [":mode=", "dry-run"],
-                [":op-in", ["tool/call", "emit-artifact"]],
+                [":op-in", [":tool/call", ":emit-artifact"]],
                 [":matches?", [":args", "name"], r"^(stripe|supabase-prod|binance)"],
             ],
             "on-fail": "deny-silently",
@@ -73,7 +73,7 @@ BANKABILITY_POLICY = {
             "id": "banned-model",
             "when": [
                 ":and",
-                [":op=", "llm/call"],
+                [":op=", ":llm/call"],
                 [":matches?", [":args", "model"], r"^(gpt-3\.5|gpt-2)"],
             ],
             "on-fail": "deny",
@@ -92,7 +92,7 @@ def make_recording_sleep_handler(record: list) -> Handler:
         record.append(args["ms"])
         return None
 
-    return Handler(name="sleep", wraps={"sleep"}, clauses={"sleep": clause})
+    return Handler(name=":sleep", wraps={":sleep"}, clauses={":sleep": clause})
 
 
 # ---------------------------------------------------------------------------
@@ -107,14 +107,14 @@ def _make_decide_handler() -> Handler:
         options = args.get("options", [])
         return {"choice": options[0] if options else None, "confidence": 0.8}
 
-    return Handler(name="raw-decide", wraps={"decide"}, clauses={"decide": clause})
+    return Handler(name="raw-decide", wraps={":decide"}, clauses={":decide": clause})
 
 
 def _make_tool_handler() -> Handler:
     def clause(args, k, ctx):
         return {"result": f"tool-{args['name']}-called", "error": None}
 
-    return Handler(name="raw-tool", wraps={"tool/call"}, clauses={"tool/call": clause})
+    return Handler(name="raw-tool", wraps={":tool/call"}, clauses={":tool/call": clause})
 
 
 def _make_emit_handler() -> Handler:
@@ -122,7 +122,7 @@ def _make_emit_handler() -> Handler:
         return {"uri": f"s3://demo/{args['kind']}/{args['path']}"}
 
     return Handler(
-        name="raw-emit", wraps={"emit-artifact"}, clauses={"emit-artifact": clause}
+        name="raw-emit", wraps={":emit-artifact"}, clauses={":emit-artifact": clause}
     )
 
 
@@ -137,23 +137,23 @@ def build_stack(
     raw_tool = _make_tool_handler()
     raw_emit = _make_emit_handler()
     rate_limit = make_rate_limit_handler(
-        wraps={"llm/call"}, capacity=3, refill_per_sec=2.0, initial_tokens=3
+        wraps={":llm/call"}, capacity=3, refill_per_sec=2.0, initial_tokens=3
     )
     retry = make_retry_handler(
-        wraps={"llm/call"}, max_attempts=3, base_backoff_ms=50, jitter_ms=10
+        wraps={":llm/call"}, max_attempts=3, base_backoff_ms=50, jitter_ms=10
     )
-    cache = make_cache_handler(wraps={"llm/call"})
+    cache = make_cache_handler(wraps={":llm/call"})
     dry = make_dry_run_handler(
-        mode=mode, wraps={"tool/call", "emit-artifact"}, mocks={}
+        mode=mode, wraps={":tool/call", ":emit-artifact"}, mocks={}
     )
     policy = make_policy_handler(
         BANKABILITY_POLICY,
-        wraps={"llm/call", "tool/call", "decide", "emit-artifact"},
+        wraps={":llm/call", ":tool/call", ":decide", ":emit-artifact"},
         mode=mode,
     )
     audit = make_audit_handler(
         entries,
-        wraps={"llm/call", "tool/call", "decide", "emit-artifact"},
+        wraps={":llm/call", ":tool/call", ":decide", ":emit-artifact"},
     )
     clock = make_fixed_clock_handler(ts=1_712_000_000.0)
     rng = make_random_handler(seed=42)
@@ -197,14 +197,14 @@ def main() -> int:
     _hr("1. Successful :llm/call (raw echoes content)")
     with with_runtime(rt):
         out = perform(
-            "llm/call", model="claude-opus-4-7", messages=[{"role": "user", "content": "hi"}]
+            ":llm/call", model="claude-opus-4-7", messages=[{"role": "user", "content": "hi"}]
         )
     print(f"   result: {out}")
 
     _hr("2. Same args hit the cache (raw not called, retry/rate-limit skipped)")
     with with_runtime(rt):
         out = perform(
-            "llm/call", model="claude-opus-4-7", messages=[{"role": "user", "content": "hi"}]
+            ":llm/call", model="claude-opus-4-7", messages=[{"role": "user", "content": "hi"}]
         )
     print(f"   result: {out}  (identical to #1)")
 
@@ -214,7 +214,7 @@ def main() -> int:
     with with_runtime(rt):
         for i in range(3):
             out = perform(
-                "llm/call",
+                ":llm/call",
                 model="claude-opus-4-7",
                 messages=[{"role": "user", "content": f"msg-{i}"}],
             )
@@ -225,7 +225,7 @@ def main() -> int:
     try:
         with with_runtime(rt):
             perform(
-                "llm/call",
+                ":llm/call",
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": "leak"}],
             )
@@ -235,14 +235,14 @@ def main() -> int:
     _hr("5. :decide without rationale → require-approval, no approval_fn → error")
     try:
         with with_runtime(rt):
-            perform("decide", question="ship it?", options=["yes", "no"])
+            perform(":decide", question="ship it?", options=["yes", "no"])
     except ApprovalRequired as exc:
         print(f"   APPROVAL REQUIRED: {exc}")
 
     _hr("6. :decide WITH rationale → allow")
     with with_runtime(rt):
         out = perform(
-            "decide",
+            ":decide",
             question="ship it?",
             options=["yes", "no"],
             rationale="ARIS 4-reviewer signature present",
@@ -254,7 +254,7 @@ def main() -> int:
     sleeps_dry: list[int] = []
     rt_dry = build_stack(entries_dry, sleeps_dry, mode="dry-run")
     with with_runtime(rt_dry):
-        out = perform("tool/call", name="stripe.charge", input={"amount": 100})
+        out = perform(":tool/call", name="stripe.charge", input={"amount": 100})
     print(f"   result (denied-silently sentinel): {out}")
 
     _hr("8. Merkle audit chain — each entry's prev_hash == prior id")

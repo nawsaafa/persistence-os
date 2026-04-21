@@ -14,7 +14,7 @@ class TransientError(Exception):
 
 
 def make_echo_llm_handler(
-    wraps: Iterable[str] = ("llm/call",),
+    wraps: Iterable[str] = (":llm/call",),
     usage_tokens: int = 12,
 ) -> Handler:
     """Handler that returns ``{"text": "echo:<last-message-content>", "usage": ...}``.
@@ -35,14 +35,14 @@ def make_echo_llm_handler(
     return Handler(
         name="raw-echo",
         wraps=set(wraps),
-        clauses={"llm/call": clause},
+        clauses={":llm/call": clause},
         ctx={"usage_tokens": usage_tokens},
     )
 
 
 def make_flaky_llm_handler(
     fail_every: int = 4,
-    wraps: Iterable[str] = ("llm/call",),
+    wraps: Iterable[str] = (":llm/call",),
 ) -> Handler:
     """Fails every Nth call with a :class:`TransientError` — models vendor 503s.
 
@@ -61,14 +61,14 @@ def make_flaky_llm_handler(
     return Handler(
         name="raw-flaky",
         wraps=set(wraps),
-        clauses={"llm/call": clause},
+        clauses={":llm/call": clause},
         ctx={"n": 0, "fail_every": fail_every},
     )
 
 
 def make_scripted_tool_handler(
     scripts: dict[str, object],
-    wraps: Iterable[str] = ("tool/call",),
+    wraps: Iterable[str] = (":tool/call",),
 ) -> Handler:
     """Handler that returns ``scripts[name]`` on :tool/call for name ``name``.
 
@@ -84,14 +84,14 @@ def make_scripted_tool_handler(
     return Handler(
         name="raw-tools",
         wraps=set(wraps),
-        clauses={"tool/call": clause},
+        clauses={":tool/call": clause},
         ctx={"scripts": dict(scripts)},
     )
 
 
 def make_random_handler(
     seed: int = 0xC001FEE,
-    wraps: Iterable[str] = ("random",),
+    wraps: Iterable[str] = (":random",),
 ) -> Handler:
     """Deterministic PRNG routed through :random. Uses random.Random seeded once.
 
@@ -114,8 +114,8 @@ def make_random_handler(
         raise ValueError(f"unknown random kind: {kind}")
 
     return Handler(
-        name="random",
+        name=":random",
         wraps=set(wraps),
-        clauses={"random": clause},
+        clauses={":random": clause},
         ctx={"rng": _random.Random(seed)},
     )

@@ -25,23 +25,58 @@ def _dt(y, m, d):
 
 
 class FakeMem0:
-    """Minimal shape: records add/update calls, can simulate failure."""
+    """Mirrors the real ``mem0.Memory`` surface (mem0ai 2.x).
+
+    Signatures (reproduced from ``inspect.signature(mem0.Memory.add / update)``,
+    Apr 2026):
+
+    - ``add(messages, *, user_id=None, agent_id=None, run_id=None,
+           metadata=None, infer=True, memory_type=None, prompt=None)``
+    - ``update(memory_id, data, metadata=None)``
+
+    Earlier revisions of this fake accepted ``**kw`` unconditionally; that
+    hid ARIS R3 F5 for months because every extra kwarg the interceptor
+    was passing (``e=, a=, v=, valid_from=``) was silently swallowed.
+    A strict fake reproduces the real-world TypeError.
+    """
 
     def __init__(self, fail_on=None):
         self.added: list[dict] = []
-        self.updated: list[tuple[str, dict]] = []
+        self.updated: list[tuple[str, str, dict | None]] = []
         self._fail_on = fail_on  # "add" | "update" | None
 
-    def add(self, **kw):
+    def add(
+        self,
+        messages,
+        *,
+        user_id=None,
+        agent_id=None,
+        run_id=None,
+        metadata=None,
+        infer=True,
+        memory_type=None,
+        prompt=None,
+    ):
         if self._fail_on == "add":
             raise RuntimeError("legacy mem0 write failed")
-        self.added.append(kw)
+        self.added.append(
+            {
+                "messages": messages,
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "run_id": run_id,
+                "metadata": metadata,
+                "infer": infer,
+                "memory_type": memory_type,
+                "prompt": prompt,
+            }
+        )
         return {"id": f"m-{len(self.added)}"}
 
-    def update(self, memory_id, **kw):
+    def update(self, memory_id, data, metadata=None):
         if self._fail_on == "update":
             raise RuntimeError("legacy mem0 update failed")
-        self.updated.append((memory_id, kw))
+        self.updated.append((memory_id, data, metadata))
         return {"id": memory_id}
 
 

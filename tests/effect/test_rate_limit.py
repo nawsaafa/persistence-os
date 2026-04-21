@@ -14,7 +14,7 @@ def _sleep_record(record):
         record.append(args["ms"])
         return None
 
-    return Handler(name="sleep", wraps={"sleep"}, clauses={"sleep": clause})
+    return Handler(name=":sleep", wraps={":sleep"}, clauses={":sleep": clause})
 
 
 def _advancing_clock(ts_seq: list[float]):
@@ -25,8 +25,8 @@ def _advancing_clock(ts_seq: list[float]):
 
     return Handler(
         name="clock",
-        wraps={"clock/now"},
-        clauses={"clock/now": clause},
+        wraps={":clock/now"},
+        clauses={":clock/now": clause},
         ctx={"seq": list(ts_seq)},
     )
 
@@ -35,14 +35,14 @@ def test_under_capacity_passes_through_without_sleep():
     sleeps: list = []
     # 2 tokens capacity, refill 1/s.
     rl = make_rate_limit_handler(
-        wraps={"llm/call"}, capacity=2, refill_per_sec=1.0, initial_tokens=2
+        wraps={":llm/call"}, capacity=2, refill_per_sec=1.0, initial_tokens=2
     )
     raw = make_echo_llm_handler()
     clock = _advancing_clock([100.0, 100.0, 100.0, 100.0])  # two calls, 2 reads each
     rt = Runtime([raw, clock, _sleep_record(sleeps), rl])
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"content": "a"}])
-        perform("llm/call", model="m", messages=[{"content": "b"}])
+        perform(":llm/call", model="m", messages=[{"content": "a"}])
+        perform(":llm/call", model="m", messages=[{"content": "b"}])
     assert sleeps == []
 
 
@@ -50,7 +50,7 @@ def test_over_capacity_sleeps_for_next_refill():
     sleeps: list = []
     # Capacity=1, refill 1/s. Second call must sleep ~1000ms.
     rl = make_rate_limit_handler(
-        wraps={"llm/call"}, capacity=1, refill_per_sec=1.0, initial_tokens=1
+        wraps={":llm/call"}, capacity=1, refill_per_sec=1.0, initial_tokens=1
     )
     raw = make_echo_llm_handler()
     # Clock reads: call1=100.0 (enter) + 100.0 (refill check unused),
@@ -59,8 +59,8 @@ def test_over_capacity_sleeps_for_next_refill():
     clock = _advancing_clock([100.0, 100.0])
     rt = Runtime([raw, clock, _sleep_record(sleeps), rl])
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"content": "a"}])
-        perform("llm/call", model="m", messages=[{"content": "b"}])
+        perform(":llm/call", model="m", messages=[{"content": "a"}])
+        perform(":llm/call", model="m", messages=[{"content": "b"}])
     # 2nd call had 0 tokens → must sleep ~1000 ms.
     assert sleeps == [1000]
 
@@ -68,15 +68,15 @@ def test_over_capacity_sleeps_for_next_refill():
 def test_refill_after_clock_advance():
     sleeps: list = []
     rl = make_rate_limit_handler(
-        wraps={"llm/call"}, capacity=1, refill_per_sec=1.0, initial_tokens=0
+        wraps={":llm/call"}, capacity=1, refill_per_sec=1.0, initial_tokens=0
     )
     raw = make_echo_llm_handler()
     # First call at t=100 → 0 tokens, sleep 1s. Second at t=102 → refilled, free.
     clock = _advancing_clock([100.0, 102.0])
     rt = Runtime([raw, clock, _sleep_record(sleeps), rl])
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"content": "a"}])
-        perform("llm/call", model="m", messages=[{"content": "b"}])
+        perform(":llm/call", model="m", messages=[{"content": "a"}])
+        perform(":llm/call", model="m", messages=[{"content": "b"}])
     # Call 1: 0 tokens → sleep 1000 ms
     # Call 2: refilled to cap → no sleep
     assert sleeps == [1000]
@@ -90,7 +90,7 @@ def test_thread_safety_basic_lock_contract():
     """
     threads = 8
     rl = make_rate_limit_handler(
-        wraps={"llm/call"}, capacity=threads, refill_per_sec=1000.0, initial_tokens=threads
+        wraps={":llm/call"}, capacity=threads, refill_per_sec=1000.0, initial_tokens=threads
     )
     raw = make_echo_llm_handler()
     # Every thread reads clock once; supply enough.
@@ -103,7 +103,7 @@ def test_thread_safety_basic_lock_contract():
     def worker():
         try:
             with with_runtime(rt):
-                perform("llm/call", model="m", messages=[{"content": "x"}])
+                perform(":llm/call", model="m", messages=[{"content": "x"}])
         except Exception as exc:  # noqa: BLE001
             errors.append(exc)
 

@@ -11,8 +11,12 @@ Entry points:
 from persistence.replay.trajectory import Fact, Trajectory
 from persistence.replay.effect_handler import (
     EffectHandler,
-    ReplayCacheMiss,
+    NON_REPLAYABLE_OPS,
+    PROMPT_HASH_OPS,
     PromptHashMismatch,
+    RefusedInReplay,
+    ReplayCacheMiss,
+    make_replay_handler,
 )
 from persistence.replay.engine import record, replay, compare
 from persistence.replay.dpo import extract_dpo_pair
@@ -22,8 +26,12 @@ __all__ = [
     "Fact",
     "Trajectory",
     "EffectHandler",
-    "ReplayCacheMiss",
+    "NON_REPLAYABLE_OPS",
+    "PROMPT_HASH_OPS",
     "PromptHashMismatch",
+    "RefusedInReplay",
+    "ReplayCacheMiss",
+    "make_replay_handler",
     "record",
     "replay",
     "compare",

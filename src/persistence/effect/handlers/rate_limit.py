@@ -15,7 +15,7 @@ from persistence.effect.runtime import Handler, perform
 
 def make_rate_limit_handler(
     *,
-    wraps: Iterable[str] = ("llm/call",),
+    wraps: Iterable[str] = (":llm/call",),
     capacity: float = 2.0,
     refill_per_sec: float = 1.0,
     initial_tokens: float | None = None,
@@ -36,7 +36,7 @@ def make_rate_limit_handler(
 
     def make_op_clause(op_name: str):
         def clause(args, k, ctx):
-            now = perform("clock/now")["ts"]
+            now = perform(":clock/now")["ts"]
             sleep_ms: int = 0
             with ctx["_lock"]:
                 last = ctx["last"]
@@ -61,7 +61,7 @@ def make_rate_limit_handler(
                 else:
                     ctx["tokens"] -= 1.0
             if sleep_ms > 0:
-                perform("sleep", ms=sleep_ms)
+                perform(":sleep", ms=sleep_ms)
             return k(args)
 
         return clause

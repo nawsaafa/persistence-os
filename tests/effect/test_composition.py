@@ -32,7 +32,7 @@ def _sleep_record(record: list):
         record.append(args["ms"])
         return None
 
-    return Handler(name="sleep", wraps={"sleep"}, clauses={"sleep": clause})
+    return Handler(name=":sleep", wraps={":sleep"}, clauses={":sleep": clause})
 
 
 def _bankability_stack(entries, *, policy_doc, mode="live", raw_clause=None, clock_ts=1_712_000_000):
@@ -41,9 +41,9 @@ def _bankability_stack(entries, *, policy_doc, mode="live", raw_clause=None, clo
     Returns (Runtime, sleeps-list).
     """
     sleeps: list = []
-    base_ops = {"llm/call"}
+    base_ops = {":llm/call"}
     raw = (
-        Handler(name="raw", wraps=base_ops, clauses={"llm/call": raw_clause})
+        Handler(name="raw", wraps=base_ops, clauses={":llm/call": raw_clause})
         if raw_clause is not None
         else make_echo_llm_handler()
     )
@@ -73,7 +73,7 @@ def test_full_stack_smoke_call_succeeds():
     entries: list[AuditEntry] = []
     rt, _ = _bankability_stack(entries, policy_doc=PERMISSIVE_POLICY)
     with with_runtime(rt):
-        out = perform("llm/call", model="m", messages=[{"role": "user", "content": "hello"}])
+        out = perform(":llm/call", model="m", messages=[{"role": "user", "content": "hello"}])
     assert out["text"] == "echo:hello"
     assert len(entries) == 1
     assert entries[0].verdict == "ok"
@@ -84,7 +84,7 @@ def test_full_stack_smoke_call_succeeds():
 
 BAN_POLICY = {
     "policy/id": "no-llm",
-    "rules": [{"id": "deny-llm", "when": [":op=", "llm/call"], "on-fail": "deny"}],
+    "rules": [{"id": "deny-llm", "when": [":op=", ":llm/call"], "on-fail": "deny"}],
 }
 
 
@@ -92,7 +92,7 @@ def test_policy_denied_halts_and_still_audited():
     entries: list[AuditEntry] = []
     rt, _ = _bankability_stack(entries, policy_doc=BAN_POLICY)
     with with_runtime(rt), pytest.raises(PolicyDenied):
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "x"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "x"}])
     # Audit is outermost; it must still see the attempt.
     assert len(entries) == 1
     assert entries[0].verdict == "error"
@@ -114,7 +114,7 @@ def test_retry_recovers_from_transient_failure_and_audit_sees_one_success():
     entries: list[AuditEntry] = []
     rt, sleeps = _bankability_stack(entries, policy_doc=PERMISSIVE_POLICY, raw_clause=flaky)
     with with_runtime(rt):
-        out = perform("llm/call", model="m", messages=[{"role": "user", "content": "a"}])
+        out = perform(":llm/call", model="m", messages=[{"role": "user", "content": "a"}])
     assert out["text"] == "ok-after-retry"
     # Audit sits above retry, so it only sees ONE call (the successful one).
     assert len(entries) == 1
@@ -137,8 +137,8 @@ def test_cache_hit_bypasses_everything_below():
     rt, sleeps = _bankability_stack(entries, policy_doc=PERMISSIVE_POLICY, raw_clause=raw)
     args_payload = {"model": "m", "messages": [{"role": "user", "content": "same"}]}
     with with_runtime(rt):
-        perform("llm/call", **args_payload)
-        perform("llm/call", **args_payload)
+        perform(":llm/call", **args_payload)
+        perform(":llm/call", **args_payload)
     assert calls["n"] == 1  # raw only called once
     # Both calls still get an audit entry — audit is above the cache.
     assert len(entries) == 2
@@ -153,7 +153,7 @@ def test_full_stack_is_well_formed_over_the_catalog_of_ops_it_covers():
     rt, _ = _bankability_stack(entries, policy_doc=PERMISSIVE_POLICY)
     # The ops that this stack covers (not the full 15-op catalog — the stack
     # is purpose-built for llm/call + the auxiliary ops used by handlers).
-    catalog = {"llm/call", "clock/now", "random", "sleep"}
+    catalog = {":llm/call", ":clock/now", ":random", ":sleep"}
     assert rt.is_well_formed(catalog), f"uncovered: {rt.uncovered_ops(catalog)}"
 
 
@@ -162,9 +162,9 @@ def test_audit_prev_hash_chain_intact_across_full_stack():
     entries: list[AuditEntry] = []
     rt, _ = _bankability_stack(entries, policy_doc=PERMISSIVE_POLICY)
     with with_runtime(rt):
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "a"}])
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "b"}])
-        perform("llm/call", model="m", messages=[{"role": "user", "content": "c"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "a"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "b"}])
+        perform(":llm/call", model="m", messages=[{"role": "user", "content": "c"}])
     assert len(entries) == 3
     assert entries[-1].prev_hash == entries[-2].id
     from persistence.effect.handlers.audit import verify_chain

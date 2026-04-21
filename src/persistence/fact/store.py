@@ -64,6 +64,16 @@ class Store(Protocol):
         """
         ...
 
+    def next_tx(self) -> int:
+        """Return the next monotonic transaction id this Store should use.
+
+        Tx allocation lives on the Store (not on a module-level counter)
+        so two Stores backed by different files / databases do not collide,
+        and a Store restored from an existing log resumes at ``max(tx)+1``
+        instead of overwriting row 1 (ARIS R3 F10).
+        """
+        ...
+
 
 # ---------------------------------------------------------------------------
 # InMemoryStore — reference backend, fastest path for tests and the CLI demo.
@@ -106,6 +116,13 @@ class InMemoryStore:
                         provenance=d.provenance,
                         invalidated_by=invalidated_by_tx,
                     )
+
+    def next_tx(self) -> int:
+        """``max(tx across the log) + 1``; starts at 1 for an empty store."""
+        with self._lock:
+            if not self._log:
+                return 1
+            return max(d.tx for d in self._log) + 1
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +195,21 @@ class SQLiteStore:
                 """,
                 (invalidated_by_tx, tx),
             )
+
+    def next_tx(self) -> int:
+        """``SELECT COALESCE(MAX(tx), 0) + 1 FROM datom_log`` under lock.
+
+        Reads from the on-disk log so a SQLiteStore reopened against an
+        existing file resumes at the correct id, and two stores pointed
+        at the same file allocate monotonic ids (ARIS R3 F10).
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COALESCE(MAX(tx), 0) + 1 FROM datom_log"
+            )
+            row = cur.fetchone()
+        # Result is either a Row (when row_factory=Row) or a plain tuple.
+        return int(row[0] if row is not None else 1)
 
     # ---- Connection management ------------------------------------------
     def close(self) -> None:

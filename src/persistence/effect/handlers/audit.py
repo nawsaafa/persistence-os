@@ -283,6 +283,50 @@ def _content_hash(entry_content: dict[str, Any]) -> str:
     return canonical_hash(entry_content)
 
 
+def _canonicalise_content(content: dict[str, Any]) -> dict[str, Any]:
+    """Mirror ``AuditEntry.__post_init__``'s canonicalisation on a *dict*.
+
+    ARIS Round 5 W-polish3 W6-factory-canonicalize (closes R5 N1 MAJOR).
+
+    W-polish2 introduced canonicalisation of ``policy_id`` /
+    ``handler_chain`` / ``principal`` inside ``AuditEntry.__post_init__``,
+    but ``make_audit_handler`` was hashing the *pre-canonical* content
+    before constructing the entry. The stored ``entry.id`` thus differed
+    from what ``verify_chain`` recomputed (which runs against the
+    *canonical* ``entry.to_dict()``), so every production chain where
+    ``policy_id`` arrived bare — the shape ``policy_eval.py`` emits —
+    failed the Merkle check.
+
+    This helper is the dict-level twin of the dataclass rules:
+
+    - ``policy_id`` → keyword form: ``":" + lstrip(":")`` (harmonised
+      with sibling fields in R5 N2; idempotent on ``"::x"``).
+    - ``handler_chain`` → tuple of bare strings (``lstrip(":")`` each).
+    - ``principal`` keys → bare strings (``lstrip(":")`` each).
+
+    The helper is pure: it copies the dict and only rewrites the three
+    known keyword-bearing slots. Unknown keys pass through untouched so
+    adding a new field to ``AuditEntry`` doesn't silently break the
+    factory hash.
+    """
+    out = dict(content)
+    pid = out.get("policy_id")
+    if isinstance(pid, str):
+        out["policy_id"] = ":" + pid.lstrip(":")
+    chain = out.get("handler_chain")
+    if chain is not None:
+        out["handler_chain"] = tuple(
+            h.lstrip(":") if isinstance(h, str) else h for h in chain
+        )
+    principal = out.get("principal")
+    if isinstance(principal, dict):
+        out["principal"] = {
+            (k.lstrip(":") if isinstance(k, str) else k): v
+            for k, v in principal.items()
+        }
+    return out
+
+
 def verify_chain(entries: Iterable[AuditEntry]) -> bool:
     """True iff every entry's id is the content hash of its fields AND
     prev_hash references the previous entry's id.
@@ -376,8 +420,15 @@ def make_audit_handler(
                 "run_id": ctx.get("run_id"),
                 "parent": prev_hash,
             }
-            entry_id = _content_hash(content)
-            entry = AuditEntry(id=entry_id, **content)
+            # ARIS Round 5 W-polish3 W6-factory-canonicalize (closes R5
+            # N1 MAJOR). W-polish2's ``__post_init__`` canonicalises
+            # ``policy_id`` / ``handler_chain`` / ``principal`` on the
+            # dataclass side; we must mirror that canonicalisation on
+            # the dict side *before* hashing so ``entry.id`` == the hash
+            # of ``entry.to_dict()`` (which ``verify_chain`` recomputes).
+            canonical_content = _canonicalise_content(content)
+            entry_id = _content_hash(canonical_content)
+            entry = AuditEntry(id=entry_id, **canonical_content)
             ctx["entries"].append(entry)
             # Drain to named sink if configured.
             sink = ctx.get("sink_name")

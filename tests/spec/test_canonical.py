@@ -145,18 +145,20 @@ class TestEffectAuditEntry:
 
 
 class TestPlanNode:
+    """Plan node is a vector [:tag {attrs} & children] per agent2 §1
+    (ARIS Round 3 P-plan-node migrated from the former map form)."""
+
     def test_control_node(self):
-        node = {":node/id": "sha256:aa", ":node/kind": ":seq",
-                ":node/children": []}
+        node = [":seq", {":id": "sha256:aa"}]
         assert S.conform(":persistence.plan/node", node).is_ok
 
     def test_leaf_node(self):
-        node = {":node/id": "sha256:bb", ":node/kind": ":llm-call",
-                ":node/args": {":model": ":claude-opus"}}
+        node = [":llm-call", {":id": "sha256:bb",
+                              ":model": ":claude-opus"}]
         assert S.conform(":persistence.plan/node", node).is_ok
 
     def test_unknown_kind_rejected(self):
-        node = {":node/id": "sha256:cc", ":node/kind": ":not-a-kind"}
+        node = [":not-a-kind", {":id": "sha256:cc"}]
         assert not S.conform(":persistence.plan/node", node).is_ok
 
 
@@ -166,8 +168,7 @@ class TestPlanSkill:
             ":skill/name": ":regime-chop-wait",
             ":skill/version": "v3",
             ":skill/parent": "v2",
-            ":skill/ast": {":node/id": "sha256:aa", ":node/kind": ":seq",
-                           ":node/children": []},
+            ":skill/ast": [":seq", {":id": "sha256:aa"}],
             ":skill/stats": {":uses": 5, ":success": 0.82, ":cost": 0.0031},
             ":skill/embedding": [0.1, 0.2, 0.3],
         }

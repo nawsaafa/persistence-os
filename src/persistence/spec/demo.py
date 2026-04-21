@@ -69,14 +69,16 @@ def _audit_entry_bad():
 
 
 def _plan_node_bad():
-    return {":node/id": "not-a-hash", ":node/kind": ":mutate"}  # both bad
+    # Vector form — bad tag (":mutate" isn't a PLAN_NODE_KIND) and bad :id
+    # (not a sha256 hex). Both fail the spec (ARIS Round 3 P-plan-node).
+    return [":mutate", {":id": "not-a-hash"}]
 
 
 def _plan_skill_bad():
     return {
         ":skill/name": ":regime",
         ":skill/version": "3",  # bad: must be 'v3'
-        ":skill/ast": {":node/id": "sha256:aa", ":node/kind": ":seq"},
+        ":skill/ast": [":seq", {":id": "sha256:aa"}],
         ":skill/stats": {":uses": 1, ":success": 0.5, ":cost": 0.01},
     }
 

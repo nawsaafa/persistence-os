@@ -65,6 +65,21 @@ class TestAuditEntryFromEdnRoundTrip:
         assert restored.principal == original.principal
         assert restored.run_id == original.run_id
 
+    def test_round_trip_equality_by_dataclass_eq(self):
+        """ARIS Round 5 R2 R4-G1 — with W5-audit-canonicalize landing
+        canonical internal forms for ``policy_id``, ``handler_chain``,
+        and ``principal`` keys, ``from_edn ∘ to_edn`` is the identity
+        on the entire input domain (modulo float recorded_at precision,
+        which is exact for the test's chosen 1_700_000_000.0 value).
+
+        The dataclass's synthesised ``__eq__`` is therefore the right
+        assertion — stronger than the field-by-field checks above
+        because any new dataclass field automatically participates.
+        """
+        original = _entry()
+        restored = AuditEntry.from_edn(original.to_edn())
+        assert restored == original
+
     def test_handler_chain_restored_to_bare_strings(self):
         """The wire form has keyworded chain entries; from_edn strips
         them back to Python-native bare strings, so round-trip equality

@@ -80,17 +80,28 @@ class Datom:
         # so ``wire_to_datom ∘ datom_to_wire`` is the identity on every
         # input, not just the bare-string subdomain. The dataclass is
         # frozen + slotted, so we mutate via object.__setattr__.
-        if isinstance(self.a, str) and self.a.startswith(":"):
-            object.__setattr__(self, "a", self.a[1:])
+        #
+        # ARIS Round 5 W5-datom-idempotent (closes R3 R4-N3) — use
+        # ``lstrip(":")`` rather than ``[1:]`` so double-colon inputs
+        # (``"::x/y"``) collapse fully to ``"x/y"`` and canonicalisation
+        # is idempotent under repeat construction.
+        if isinstance(self.a, str):
+            stripped_a = self.a.lstrip(":")
+            if stripped_a != self.a:
+                object.__setattr__(self, "a", stripped_a)
         if isinstance(self.provenance, dict):
             src = self.provenance.get("source")
-            if isinstance(src, str) and src.startswith(":"):
-                # The dict itself is mutable (``field(default_factory=dict)``
-                # is not frozen, even in a frozen dataclass), so we mutate
-                # in place. Any alias the caller still holds sees the
-                # canonicalised value — the round-trip invariant depends
-                # on the whole provenance mapping being canonical.
-                self.provenance["source"] = src[1:]
+            if isinstance(src, str):
+                stripped_src = src.lstrip(":")
+                if stripped_src != src:
+                    # The dict itself is mutable
+                    # (``field(default_factory=dict)`` is not frozen,
+                    # even in a frozen dataclass), so we mutate in
+                    # place. Any alias the caller still holds sees the
+                    # canonicalised value — the round-trip invariant
+                    # depends on the whole provenance mapping being
+                    # canonical.
+                    self.provenance["source"] = stripped_src
 
 
 __all__ = ["Datom", "Op"]

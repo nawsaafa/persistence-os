@@ -160,7 +160,7 @@ When the `audit` handler wraps a set of operations $W \subseteq K$, each effect 
 
 **Integrity contract.** `verify_chain` detects any single-field mutation inside an entry (tested). Deletion/reorder coverage is flagged in the Round-1 rigor review and is a hardening target for Round 2. Authenticity — proving *who* signed — is distinct from integrity and is not claimed for Phase 1: the current `signature` slot stores a SHA-256 content hash, and per-transaction ed25519 signing is Phase 2 work (§7.2).
 
-**Proposition 4 (Audit-chain immutability).** For any audit-chain $C = \langle e_0, e_1, \dots, e_n \rangle$ produced by the Merkle-hashed `append_audit_entry`, `verify_chain(C) = True` iff for all $i$, $e_i.\text{id} = \text{sha256}(\text{canonical}(e_i.\text{fields} \setminus \{\text{id}\})) $ and $e_i.\text{prev\_hash} = e_{i-1}.\text{id}$ — i.e. no entry has been mutated, deleted, reordered, or truncated from the middle. This is exercised end-to-end by `tests/effect/test_audit.py::test_tampering_an_entry_breaks_the_chain`, `test_deleting_an_audit_entry_breaks_the_chain`, and `test_reordering_audit_entries_breaks_the_chain`; tail-truncation is allowed by construction (`test_truncating_audit_entries_from_tail_preserves_chain`) and must be detected by regulators comparing a separately-recorded expected length.
+**Proposition 4 (Audit-chain immutability).** For any audit-chain $C = \langle e_0, e_1, \dots, e_n \rangle$ produced by `make_audit_handler`'s Merkle-hashed chain-append clause, `verify_chain(C) = True` iff for all $i$, $e_i.\text{id} = \text{sha256}(\text{canonical}(e_i.\text{fields} \setminus \{\text{id}\})) $ and $e_i.\text{prev\_hash} = e_{i-1}.\text{id}$ — i.e. no entry has been mutated, deleted, reordered, or truncated from the middle. This is exercised end-to-end by `tests/effect/test_audit.py::test_tampering_an_entry_breaks_the_chain`, `test_deleting_an_audit_entry_breaks_the_chain`, and `test_reordering_audit_entries_breaks_the_chain`; tail-truncation is allowed by construction (`test_truncating_audit_entries_from_tail_preserves_chain`) and must be detected by regulators comparing a separately-recorded expected length.
 
 **Universality contract.** "Every effect emits a datom" is an invariant of the deployed stack, not the substrate: it holds when and only when the audit handler's $W$ covers the full catalog. Phase 1 exposes `Runtime.is_well_formed(catalog)` to check coverage of $W$ against $K$; a `Runtime.assert_universal_audit` hardening is scheduled for Round 2. For regulated deployments (Case A in §6.5), the configured stack wraps all 15 ops.
 
@@ -181,7 +181,7 @@ Gate (4) is the cheapest way to enforce semantic non-collision: if an LLM-writte
 
 ### 4.5 Trajectories and replay
 
-A **trajectory** is an ordered sequence of effect datoms sharing a run-id, plus a seed vector $\sigma = \langle \sigma_{llm}, \sigma_{tool}, \sigma_{env} \rangle$. An **intervention** is $I = \langle \text{step},\ \text{field},\ \text{new-value} \rangle$.
+A **trajectory** is an ordered sequence of effect datoms sharing a run-id, plus a seed vector $\sigma = \langle \sigma_{llm}, \sigma_{tool}, \sigma_{env} \rangle$. An **intervention set** is $I = [\langle \text{step},\ \text{field},\ \text{new-value} \rangle, \dots]$ — a (possibly empty) list of per-step modifications to the counterfactual, sorted by `step`. The single-triple case is the Phase-1 default; the shipped replay engine and the `:trajectory/intervention` slot (registered as `seq_of(:persistence.replay/intervention)`) both accept the multi-entry form.
 
 The replay operator is:
 
@@ -314,7 +314,7 @@ For the abstract, this subsection is qualitative; the camera-ready will ship num
 
 ### 6.2 CAMO-style counterfactual fidelity
 
-This evaluation has two components. The *byte-identical NO-OP* property (§4.5 Corollary) is **already testable on the Phase 1 artifact** — `tests/replay/test_determinism.py::test_noop_intervention_produces_byte_identical_trajectory` passes; we cite it directly in the abstract as the structural baseline stronger than CAMO's statistical aligned-randomness. The *distributional CAMO protocol* — 1000 paired rollouts with single-variable interventions, measuring prefix alignment (Hamming distance from factual), intervention faithfulness (probability the counterfactual at step $k$ reflects the intervention), and suffix variance over 100 re-replays — requires (i) the per-step rng-state recording extension to the replay engine (Phase 2) and (ii) a meaningful LLM budget for stochastic agents. Both are feasible within the 2026-06-16 → 2026-07-20 camera-ready window if scoped to a single base agent.
+This evaluation has two components. The *byte-identical NO-OP* property (§4.5 Corollary) is **already testable on the Phase 1 artifact** — `tests/replay/test_determinism.py::test_noop_intervention_produces_byte_identical_trajectory` passes; we cite it directly in the abstract as the structural baseline stronger than CAMO's statistical aligned-randomness. The *distributional CAMO protocol* — 1000 paired rollouts with single-variable interventions, measuring prefix alignment (Hamming distance from factual), intervention faithfulness (probability the counterfactual at step $k$ reflects the intervention), and suffix variance over 100 re-replays — requires (i) the per-step rng-state recording extension to the replay engine (Phase 2) and (ii) a meaningful LLM budget for stochastic agents. Both are feasible within the 2026-06-09 → 2026-07-20 camera-ready window if scoped to a single base agent.
 
 **Reproduction Plan.** Abstract ships the NO-OP corollary. Camera-ready ships the full 1000-trajectory table on a toy agent with honest per-step rng recording and, if budget permits, a scaled-down 100-trajectory table on Claude Haiku as the stochastic agent.
 
@@ -362,7 +362,7 @@ Case B (Adaptive Trader v2) is the only named deployment in this paper. Case A, 
 - **Artifact.** The Phase-1 artifact (`persistence-os @ v0.1.0a1`) is bundled with the paper submission. `pytest -q` from a clean clone runs the 356 test suite in under one minute.
 - **Benchmark timeline.** §6.1 (LongMemEval) and §6.2 (CAMO 1000-trajectory table) ship in the camera-ready (2026-07-20). §6.3 (50-trajectory synthetic regulator-replay) ships in the camera-ready with the generator script. §6.5 Case B (Adaptive Trader v2) ships post-Persistence-migration numbers in the camera-ready.
 - **Licensing.** Runtime: AGPL-3. Paper + benchmark harness + regulator-replay dataset: CC-BY-4.0.
-- **Abstract submission scope.** At the 2026-06-16 abstract deadline, §6 reports the formal properties (Prop 2 and the §4.5 NO-OP corollary) as *already-checked on the shipped artifact*; all numeric tables carry `[TBD]` honestly.
+- **Abstract submission scope.** At the 2026-06-09 abstract deadline, §6 reports the formal properties (Prop 2 and the §4.5 NO-OP corollary) as *already-checked on the shipped artifact*; all numeric tables carry `[TBD]` honestly.
 
 ---
 

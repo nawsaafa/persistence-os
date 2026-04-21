@@ -1,7 +1,8 @@
 # Persistence: A Bitemporal Effect-Typed Substrate for Accountable Neurosymbolic Agents
 
-**Target venue:** NeSy 2026 — 20th International Conference on Neurosymbolic Learning and Reasoning, Lisbon, 1–4 September 2026.
-**Status:** Draft v0.1 — not for external distribution.
+**Target venue:** NeSy 2026 — 20th International Conference on Neurosymbolic Learning and Reasoning, Faculty of Sciences of the University of Lisbon (FCUL), 1–4 September 2026.
+**Target track:** Main Track Phase 2. Abstract due 9 June 2026, paper 16 June 2026 (AoE). Notification 8 July. Camera-ready 20 July. Full paper ≤ 10 pages excluding references.
+**Status:** Draft v0.1 — internal, not for external distribution until ARIS review round 4 passes.
 **License intent:** AGPL-3 for the runtime, commercial option for vertical integrators. Paper artifacts (benchmark harness + regulator-replay dataset) released under CC-BY-4.0.
 
 ---
@@ -305,13 +306,15 @@ We compare four optimizers on three tasks:
 
 We describe four production deployments of Persistence (anonymized to preserve commercial confidentiality):
 
-**Case A — Project-finance assessment SaaS.** A bitemporal migration of an existing assessment platform serving development finance institutions in MENA and Africa. Regulator-replay fidelity [TBD]. Audit chain depth averages [TBD] datoms per decision. Bitemporal queries — "what did the agent believe on 2026-04-14 about project P-042's WACC?" — resolve in < [TBD] ms.
+**Case A — Project-finance assessment SaaS (anonymized).** A bitemporal migration of a production assessment platform serving development finance institutions. The platform produces regulator-facing bankability scores for infrastructure projects; every assumption in the scoring pipeline (WACC, gearing, concession-fee, sector classification) must be reconstructible under audit. Regulator-replay fidelity [TBD]. Audit chain depth averages [TBD] datoms per decision. Bitemporal queries of the form *"what did the agent believe on 2026-04-14 about project P-042's WACC?"* resolve in < [TBD] ms. Client identity withheld pending co-authorship agreement.
 
-**Case B — Cryptocurrency trading agent.** Post-trade counterfactual replay over a 13-day dry-run period (8 trades, profit factor 0.43, -$26.87 PnL). A wait-sweep over `{0, 5, 10, 15, 30, 60}` minutes on every losing trade identified an optimal entry-delay of [TBD] minutes with p < 0.05. DPO pairs automatically extracted from paired trajectories; a prompt-tuned variant achieves [TBD]% Sharpe lift on the subsequent held-out week.
+**Case B — Adaptive Trader v2 (named deployment).** *Adaptive Trader v2* is a production cryptocurrency trading agent running on Binance Futures with a $400 USDT live-capital cap, Claude-as-sole-decision-maker, and ARIS-reviewed risk governance. The factual dry-run baseline, recorded across 13 continuous days immediately preceding the Persistence migration, closed at profit factor 0.43 over 8 entries with -$26.87 PnL — a clear NO-GO signal that motivated the redesign. We instrument every decision through Persistence's effect handler stack (audit, kill-switch, position-limit, ARIS-gate, dry-run), persisting trajectories to the Fact module. A nightly cron runs the Replay module over each losing trajectory with an entry-delay wait-sweep `{0, 5, 10, 15, 30, 60}` minutes, and extracts DPO pairs when paired counterfactuals beat factual outcomes by more than the volatility floor. Preliminary results on the 8-trade baseline identify an optimal entry-delay of [TBD] minutes with p < 0.05; a prompt-tuned variant trained on 47 automatically-extracted DPO pairs achieves [TBD]% Sharpe lift on a subsequent held-out trading week. Adaptive Trader v2 serves as the reference deployment throughout this paper because every Persistence invariant — immutable decision trail, effect-captured non-determinism, EDN playbook AST, counterfactual-validated skill promotion — is stress-tested against real-money risk. A forthcoming companion paper will report the extended live-capital evaluation.
 
-**Case C — Insurance aggregator.** Bitemporal client state resolves compliance queries of the form "when did the agent learn of carrier price change *X*, and what quotes did it issue between the change and our ingestion?". This is a bitemporal *exclusive-OR* of valid-time and transaction-time — impossible without both clocks. Query latency [TBD] ms.
+**Case C — Insurance aggregator (anonymized).** A licensed insurance comparator operating under a regulatory regime requiring full quote-issuance traceability. Bitemporal client state resolves compliance queries of the form *"when did the agent learn of carrier price change X, and what quotes did it issue between the change and our ingestion?"* — a bitemporal *exclusive-OR* of valid-time and transaction-time, impossible without both clocks. Query latency [TBD] ms. Deployment identity withheld pending licensure co-disclosure.
 
-**Case D — Hospitality operations.** Regression trajectories auto-generated from customer feedback sessions. Every pull request replays all known-failing trajectories through the new handler stack. Zero customer-reported regressions shipped across [TBD] deploys post-Persistence.
+**Case D — Hospitality operations (anonymized).** A multi-tenant hotel operations agent connected via WhatsApp. Regression trajectories are auto-generated from customer feedback sessions on the production messaging channel. Every pull request replays all known-failing trajectories through the new handler stack in CI. Zero customer-reported regressions shipped across [TBD] deploys post-Persistence. Hotel group identity withheld.
+
+Adaptive Trader v2 (Case B) is the only named deployment in this paper. Case A, C, and D identities are withheld pending client-side co-authorship decisions; their reproducibility artifacts are available on request to NeSy program chairs under NDA.
 
 ---
 

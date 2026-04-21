@@ -96,6 +96,93 @@ class TestTransact:
         orig = next(d for d in log if d.op == "assert" and d.v == 0.087)
         assert orig.invalidated_by is not None
 
+    # ------------------------------------------------------------------
+    # Retroactive corrections (ARIS Round 1 R1 F3)
+    # ------------------------------------------------------------------
+    def test_retroactive_correction_without_opt_in_raises(self, store):
+        """Asserting a new value with ``valid_from`` earlier than the prior
+        assert's ``valid_from`` would otherwise emit a companion retract with
+        ``valid_to < valid_from`` — a negative interval. Must fail fast unless
+        the caller opts in via ``force_retroactive=True``.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.091, "valid_from": _dt(2026, 4, 19)}],
+            provenance={},
+        )
+        from persistence.fact.db import RetroactiveCorrectionError
+        with pytest.raises(RetroactiveCorrectionError):
+            db.transact(
+                [{"e": "p", "a": "w", "v": 0.089, "valid_from": _dt(2026, 4, 10)}],
+                provenance={},
+            )
+
+    def test_retroactive_correction_with_opt_in_produces_bounded_valid_to(self, store):
+        """With ``force_retroactive=True`` the companion retract is emitted
+        with ``valid_to = new.valid_from`` (a bounded interval that invalidates
+        the prior from the new effective date onward), NOT with
+        ``valid_to < valid_from``.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.091, "valid_from": _dt(2026, 4, 19)}],
+            provenance={},
+        )
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.089, "valid_from": _dt(2026, 4, 10)}],
+            provenance={},
+            force_retroactive=True,
+        )
+        # The companion retract must have valid_from <= valid_to (no negative
+        # interval). See agent1-fact-spec §0: retroactive corrections are
+        # legitimate but MUST produce consistent intervals.
+        retracts = [d for d in db.log() if d.op == "retract"]
+        assert len(retracts) == 1
+        r = retracts[0]
+        assert r.valid_from <= r.valid_to, (
+            f"retroactive correction produced negative interval: "
+            f"valid_from={r.valid_from} valid_to={r.valid_to}"
+        )
+
+    def test_normal_future_correction_still_works(self, store):
+        """Regression — the non-retroactive common case (new valid_from >= prior)
+        must still produce a companion retract with valid_to = new.valid_from.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.087, "valid_from": _dt(2026, 4, 14)}],
+            provenance={},
+        )
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.091, "valid_from": _dt(2026, 4, 19)}],
+            provenance={},
+        )
+        retracts = [d for d in db.log() if d.op == "retract"]
+        assert len(retracts) == 1
+        r = retracts[0]
+        assert r.valid_from == _dt(2026, 4, 14)
+        assert r.valid_to == _dt(2026, 4, 19)
+        assert r.valid_from < r.valid_to
+
+    def test_retroactive_correction_at_same_valid_from_is_allowed(self, store):
+        """Edge case: new.valid_from == prior.valid_from is not retroactive
+        (they cover the same interval; retract closes it to an empty interval,
+        which is a no-op but not negative). Must not raise.
+        """
+        db = DB(store)
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.087, "valid_from": _dt(2026, 4, 14)}],
+            provenance={},
+        )
+        # Same valid_from — equal is not retroactive.
+        db = db.transact(
+            [{"e": "p", "a": "w", "v": 0.088, "valid_from": _dt(2026, 4, 14)}],
+            provenance={},
+        )
+        retracts = [d for d in db.log() if d.op == "retract"]
+        assert len(retracts) == 1
+        assert retracts[0].valid_from == retracts[0].valid_to
+
 
 # ---------------------------------------------------------------------------
 # as_of / as_of_valid — three-point-in-time correctness

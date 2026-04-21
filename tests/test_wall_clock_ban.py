@@ -86,6 +86,24 @@ def _iter_source_files() -> list[pathlib.Path]:
     return out
 
 
+def _has_noqa_in_span(node: ast.Call, source_lines: list[str]) -> bool:
+    """Return True if any physical line of the call's span carries
+    ``noqa: wall-clock``. Covers the R4 R2-new-G2 multi-line case — a
+    call split across lines with the noqa on the closing paren line
+    should be accepted.
+    """
+    start = max(node.lineno - 1, 0)
+    # ``end_lineno`` is 1-based and inclusive; default to start if absent
+    # (older Python AST — not applicable on 3.10+, but guard anyway).
+    end = getattr(node, "end_lineno", None)
+    end_idx = (end - 1) if end is not None else start
+    end_idx = min(end_idx, len(source_lines) - 1)
+    for i in range(start, end_idx + 1):
+        if "noqa: wall-clock" in source_lines[i]:
+            return True
+    return False
+
+
 def _is_banned_call(node: ast.Call, source_lines: list[str]) -> str | None:
     """Return a human-readable violation description for this Call node,
     or None if it is not banned (or is opted out via noqa).
@@ -95,9 +113,7 @@ def _is_banned_call(node: ast.Call, source_lines: list[str]) -> str | None:
     if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
         key = (func.value.id, func.attr)
         if key in BANNED_CALLS:
-            # Check for noqa on the call's line.
-            line = source_lines[node.lineno - 1] if node.lineno <= len(source_lines) else ""
-            if "noqa: wall-clock" in line:
+            if _has_noqa_in_span(node, source_lines):
                 return None
             return f"{func.value.id}.{func.attr}()"
     # Pattern 2: `a.b.c(...)` → e.g. `dt.datetime.now()`
@@ -111,8 +127,7 @@ def _is_banned_call(node: ast.Call, source_lines: list[str]) -> str | None:
         # Check the last two parts against BANNED.
         key = (func.value.attr, func.attr)
         if key in BANNED_CALLS:
-            line = source_lines[node.lineno - 1] if node.lineno <= len(source_lines) else ""
-            if "noqa: wall-clock" in line:
+            if _has_noqa_in_span(node, source_lines):
                 return None
             return f"{chain}()"
     return None
@@ -239,6 +254,25 @@ def test_lint_does_not_flag_noqa_annotated_call():
     )
     violations = _scan_source_for_violations(planted)
     assert not violations, f"noqa annotation ignored: {violations}"
+
+
+def test_lint_does_not_flag_noqa_on_multiline_call():
+    """ARIS Round 4 R2 new G2 — the noqa scan must cover the whole
+    span of a multi-line call (from ``lineno`` through ``end_lineno``),
+    not only the line where the call starts. A long ``datetime.now(...)``
+    split across lines with the noqa on the closing paren line should
+    not be flagged.
+    """
+    planted = (
+        "import datetime\n"
+        "datetime.now(\n"
+        "    datetime.timezone.utc,\n"
+        ")  # noqa: wall-clock -- deliberate example\n"
+    )
+    violations = _scan_source_for_violations(planted)
+    assert not violations, (
+        f"multi-line noqa ignored — detector only reads lineno line: {violations}"
+    )
 
 
 def test_lint_plant_in_tempfile_gets_flagged(tmp_path):

@@ -161,3 +161,83 @@ def test_replay_requires_agent_step_fn():
             t,
             [{"step": 0, "field": "action", "new_value": {"type": "wait"}}],
         )
+
+
+# ---------- R2 F3 — multi-step / out-of-range / empty trajectory ----------
+
+
+def test_multi_step_simultaneous_interventions_produce_consistent_hash(
+    toy_obs_stream, toy_seeds, toy_initial_state, toy_agent, toy_apply, toy_replay
+):
+    """R2 F3: two interventions at different steps must both land AND the
+    replay must be deterministic (same hash across two identical invocations).
+
+    toy_obs_stream has 4 steps; intervene on step 1 (action) and step 3 (obs).
+    """
+    factual = record(toy_obs_stream, toy_seeds, toy_agent, toy_apply, toy_initial_state)
+    assert len(factual.facts) == 4
+
+    interventions = [
+        {"step": 1, "field": "action", "new_value": {"type": "wait"}},
+        {"step": 3, "field": "obs", "new_value": {"price": 999, "regime": "chop"}},
+    ]
+    cf_a = toy_replay(factual, interventions)
+    cf_b = toy_replay(factual, interventions)
+
+    # Both interventions landed.
+    assert cf_a.facts[1].action == {"type": "wait"}
+    assert cf_a.facts[3].obs == {"price": 999, "regime": "chop"}
+    # And the replay is deterministic under fixed seeds.
+    from persistence.replay.trajectory import trajectory_hash
+
+    assert trajectory_hash(cf_a) == trajectory_hash(cf_b)
+    # Step 0 is before every intervention — byte-identical to factual.
+    assert cf_a.facts[0].random_draws == factual.facts[0].random_draws
+    assert cf_a.facts[0].action == factual.facts[0].action
+
+
+def test_replay_with_step_greater_than_trajectory_length_raises(
+    toy_obs_stream, toy_seeds, toy_initial_state, toy_agent, toy_apply, toy_replay
+):
+    """R2 F3: a typo'd step number must fail fast, not silently drop.
+
+    toy_obs_stream has 4 steps (indices 0..3). step=99 is out of range;
+    replay must raise ValueError rather than silently emit a counterfactual
+    identical to the factual.
+    """
+    factual = record(toy_obs_stream, toy_seeds, toy_agent, toy_apply, toy_initial_state)
+    with pytest.raises(ValueError, match="out of range"):
+        toy_replay(
+            factual,
+            [{"step": 99, "field": "action", "new_value": {"type": "wait"}}],
+        )
+
+
+def test_replay_with_negative_step_raises(
+    toy_obs_stream, toy_seeds, toy_initial_state, toy_agent, toy_apply, toy_replay
+):
+    """R2 F3 (complement): negative step is equally nonsensical and must error."""
+    factual = record(toy_obs_stream, toy_seeds, toy_agent, toy_apply, toy_initial_state)
+    with pytest.raises(ValueError, match="out of range"):
+        toy_replay(
+            factual,
+            [{"step": -1, "field": "action", "new_value": {"type": "wait"}}],
+        )
+
+
+def test_empty_trajectory_replay_raises(
+    toy_agent, toy_apply
+):
+    """R2 F3: replay of a trajectory with zero facts must raise, not silently
+    produce a counterfactual with no facts.
+    """
+    from persistence.replay.trajectory import Trajectory
+
+    t = Trajectory(status="completed", facts=[], seeds={"llm": 0, "tool": 0, "env": 0})
+    with pytest.raises(ValueError, match="empty"):
+        replay(
+            t,
+            [{"step": 0, "field": "action", "new_value": {"type": "wait"}}],
+            agent_step_fn=toy_agent,
+            apply_action_fn=toy_apply,
+        )

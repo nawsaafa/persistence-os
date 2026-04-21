@@ -96,6 +96,26 @@ class TestPolicyIdCanonicalizationAtInit:
         edn = entry.to_edn()
         assert edn[":audit/policy-id"] == ":bankability-v3"
 
+    def test_policy_id_canonicalisation_is_idempotent_on_double_colon(self):
+        """ARIS Round 5 W-polish3 W6-canonicalize-harmonize (closes R5 N2).
+
+        ``policy_id`` canonicalisation must use ``":" + lstrip(":")`` —
+        the same shape as sibling fields ``handler_chain`` and
+        ``principal`` keys. The previous prepend-if-missing branch
+        (``if not startswith(":"): prepend``) left multi-colon inputs
+        like ``"::x"`` unchanged, so two ``AuditEntry`` values with
+        ``policy_id="::x"`` and ``policy_id=":x"`` had divergent shapes
+        (non-idempotent under repeat construction).
+        """
+        # Single colon: idempotent.
+        assert AuditEntry(**_base_kwargs(policy_id=":x")).policy_id == ":x"
+        # Bare: prepend.
+        assert AuditEntry(**_base_kwargs(policy_id="x")).policy_id == ":x"
+        # Double colon: collapse to single keyword form.
+        assert AuditEntry(**_base_kwargs(policy_id="::x")).policy_id == ":x"
+        # None: untouched.
+        assert AuditEntry(**_base_kwargs(policy_id=None)).policy_id is None
+
 
 class TestHandlerChainCanonicalizationAtInit:
     """handler_chain entries must be stored in a canonical bare-string

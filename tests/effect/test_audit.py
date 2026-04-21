@@ -132,6 +132,93 @@ def test_truncating_audit_entries_from_tail_preserves_chain():
     assert verify_chain(truncated) is True
 
 
+# ---------- Prop 4 — extended violation coverage (ARIS R2 R4-G4) ----------
+
+
+def test_deleting_two_consecutive_middle_entries_breaks_the_chain():
+    """R2 R4-G4: the single-delete test above proves detection of a
+    one-link gap. A two-consecutive-delete exercises a *two-link* gap,
+    which has the same iff outcome but a different hash-recompute
+    position — the surviving entry at the gap still references the
+    id of the first-deleted entry, not the last-deleted one. Pin this
+    to ensure future optimisations of ``verify_chain`` (e.g. batch
+    hash-verification) don't accidentally short-circuit on larger
+    deletion gaps.
+    """
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        for i in range(6):
+            perform(":llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+    from persistence.effect.handlers.audit import verify_chain
+    assert verify_chain(entries) is True
+    # Delete entries[2] AND entries[3] (two consecutive middle entries).
+    # After deletion, what used to be entries[4] (now at index 2) still
+    # carries prev_hash pointing to the id of the original entries[3] —
+    # which is no longer present, so the chain breaks.
+    del entries[2:4]
+    assert len(entries) == 4
+    assert verify_chain(entries) is False
+
+
+def test_combined_violation_tamper_plus_delete_breaks_the_chain():
+    """R2 R4-G4: Prop 4's iff holds even when multiple defect classes
+    stack simultaneously. Tamper one entry's args_hash AND delete a
+    different middle entry. Either defect alone is enough to break the
+    chain; the conjunction must also break it (the two checks in
+    ``verify_chain`` — hash-recompute vs prev_hash-link — must both be
+    load-bearing, not "only the first failure matters").
+    """
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        for i in range(6):
+            perform(":llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+    from persistence.effect.handlers.audit import verify_chain
+    assert verify_chain(entries) is True
+    # 1. Tamper entries[1].args_hash (hash-recompute failure).
+    entries[1] = entries[1].with_fields(args_hash="sha256:deadbeef")
+    # 2. Delete entries[3] (prev_hash-link failure on what used to be entries[4]).
+    del entries[3]
+    assert verify_chain(entries) is False
+
+
+def test_combined_violation_tamper_plus_reorder_breaks_the_chain():
+    """R2 R4-G4: tamper + reorder simultaneously. The tamper alone
+    would fail hash-recompute; the reorder alone would fail the
+    prev_hash link. Stacked, the chain must still be rejected.
+    """
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        for i in range(6):
+            perform(":llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+    from persistence.effect.handlers.audit import verify_chain
+    assert verify_chain(entries) is True
+    # Tamper entries[1] then reorder entries[3] <-> entries[4].
+    entries[1] = entries[1].with_fields(latency_ms=99999)
+    entries[3], entries[4] = entries[4], entries[3]
+    assert verify_chain(entries) is False
+
+
+def test_combined_violation_delete_plus_reorder_breaks_the_chain():
+    """R2 R4-G4: delete + reorder simultaneously. Both are prev_hash-link
+    failures; the conjunction exercises the walker's handling of a
+    gap-and-swap pattern (which a buggy optimiser might try to fix up
+    by resynchronising on matching ids)."""
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        for i in range(6):
+            perform(":llm/call", model="m", messages=[{"role": "user", "content": str(i)}])
+    from persistence.effect.handlers.audit import verify_chain
+    assert verify_chain(entries) is True
+    # Delete entries[2], then swap the new entries[2] and entries[3].
+    del entries[2]
+    entries[2], entries[3] = entries[3], entries[2]
+    assert verify_chain(entries) is False
+
+
 # ---------- datom round-trip (Fact spec §1, 8-tuple) ----------
 
 

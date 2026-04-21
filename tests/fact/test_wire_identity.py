@@ -195,3 +195,102 @@ class TestWireRoundTripIdentity:
                 wire = datom_to_wire(d)
                 assert wire[":datom/a"] == ":project/wacc"
                 assert wire[":datom/provenance"][":source"] == ":dfi-agent"
+
+
+# ---------------------------------------------------------------------------
+# 4. Algebraic equality — ARIS R2 R4-G2 (carried from Round 4)
+# ---------------------------------------------------------------------------
+
+
+class TestWireRoundTripAlgebraicEquality:
+    """R2 R4-G2 strengthens the round-trip guarantee from field-list
+    comparison to full algebraic ``==`` on ``Datom``.
+
+    ``Datom`` is a frozen dataclass, so ``==`` compares every field —
+    including ones the per-field tests above don't mention (``valid_to``,
+    ``invalidated_by``, ``tx_time`` microseconds, the full ``provenance``
+    dict including non-source keys, etc.). A pass here means: "the
+    adapter pair is identity on *the full record*, not just on the
+    fields the author remembered to test."
+
+    The R4 reviewer flagged that the earlier tests check ``restored.a ==
+    original.a`` plus a couple more, but never ``restored == original`` —
+    a silent omission on any field would slip past.
+    """
+
+    @pytest.mark.parametrize(
+        "a_input,source_input",
+        [
+            ("project/wacc", "dfi-agent"),  # baseline — fully bare
+            (":project/wacc", "dfi-agent"),  # pre-keyworded a
+            ("project/wacc", ":dfi-agent"),  # pre-keyworded source
+            (":project/wacc", ":dfi-agent"),  # both pre-keyworded
+            ("::project/wacc", "::dfi-agent"),  # double-colon (lstrip idempotency)
+        ],
+        ids=[
+            "both-bare",
+            "prekey-a",
+            "prekey-source",
+            "both-prekey",
+            "both-double-colon",
+        ],
+    )
+    def test_algebraic_equality_after_round_trip(self, a_input, source_input):
+        """Full ``Datom ==`` on round-tripped record."""
+        original = _sample(a=a_input, source=source_input)
+        restored = wire_to_datom(datom_to_wire(original))
+        assert restored == original, (
+            f"Algebraic equality failed for a={a_input!r} source={source_input!r}: "
+            f"restored={restored!r} original={original!r}"
+        )
+
+    def test_algebraic_equality_preserves_full_provenance_dict(self):
+        """Extra provenance keys must survive round-trip untouched.
+
+        The per-field tests above happen to check ``model`` and
+        ``confidence``, but a future contributor adding a new provenance
+        key should not have to remember to extend every test —
+        algebraic ``==`` covers it automatically.
+        """
+        now = dt.datetime(2026, 4, 21, 12, tzinfo=dt.timezone.utc)
+        original = Datom(
+            e=str(uuid.uuid4()),
+            a="project/wacc",
+            v=0.087,
+            tx=17332,
+            tx_time=now,
+            valid_from=now,
+            valid_to=None,
+            op="assert",
+            provenance={
+                "source": "dfi-agent",
+                "confidence": 0.82,
+                "model": ":llm/call",
+                "audit_id": "sha256:" + "a" * 64,
+            },
+            invalidated_by=None,
+        )
+        restored = wire_to_datom(datom_to_wire(original))
+        assert restored == original
+
+    def test_algebraic_equality_with_valid_to_and_invalidated_by(self):
+        """Optional fields ``valid_to`` and ``invalidated_by`` — the
+        field-level tests above leave both ``None``. Exercise them as
+        non-None to close the algebraic gap.
+        """
+        now = dt.datetime(2026, 4, 21, 12, tzinfo=dt.timezone.utc)
+        later = dt.datetime(2027, 1, 1, 12, tzinfo=dt.timezone.utc)
+        original = Datom(
+            e=str(uuid.uuid4()),
+            a="project/wacc",
+            v=0.087,
+            tx=17332,
+            tx_time=now,
+            valid_from=now,
+            valid_to=later,
+            op="retract",
+            provenance={"source": "dfi-agent", "confidence": 1.0},
+            invalidated_by=17999,
+        )
+        restored = wire_to_datom(datom_to_wire(original))
+        assert restored == original

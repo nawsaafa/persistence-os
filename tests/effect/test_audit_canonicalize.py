@@ -113,6 +113,10 @@ class TestPolicyIdCanonicalizationAtInit:
         assert AuditEntry(**_base_kwargs(policy_id="x")).policy_id == ":x"
         # Double colon: collapse to single keyword form.
         assert AuditEntry(**_base_kwargs(policy_id="::x")).policy_id == ":x"
+        # Triple colon: ``lstrip(":")`` strips all leading colons, then
+        # re-prepends exactly one — the fixed point of the canonical
+        # form regardless of input colon count. R6-G1 edge-case pin.
+        assert AuditEntry(**_base_kwargs(policy_id=":::x")).policy_id == ":x"
         # None: untouched.
         assert AuditEntry(**_base_kwargs(policy_id=None)).policy_id is None
 
@@ -178,7 +182,10 @@ class TestFromEdnRoundTripPreservesVerifyChain:
         """Construct an entry with a pre-keyworded handler_chain; its
         computed id must remain verifiable after the round-trip.
         """
-        from persistence.effect.handlers.audit import _content_hash
+        from persistence.effect.handlers.audit import (
+            _canonicalise_content,
+            _content_hash,
+        )
 
         # Build the content in the exact shape make_audit_handler uses.
         content: dict = dict(
@@ -198,17 +205,11 @@ class TestFromEdnRoundTripPreservesVerifyChain:
             run_id=str(uuid.uuid4()),
             parent=None,
         )
-        # Canonicalise the content to match __post_init__ behaviour,
-        # then compute the id.
-        canonical_content = dict(content)
-        canonical_content["handler_chain"] = tuple(
-            h.lstrip(":") for h in canonical_content["handler_chain"]
-        )
-        canonical_content["principal"] = {
-            (k[1:] if isinstance(k, str) and k.startswith(":") else k): v
-            for k, v in canonical_content["principal"].items()
-        }
-        entry_id = _content_hash(canonical_content)
+        # ARIS Round 6 R6-G3: use the shared ``_canonicalise_content``
+        # helper instead of duplicating the canonicalisation rule
+        # inline. This is the same helper the factory uses, so the
+        # test exercises the production hash path exactly.
+        entry_id = _content_hash(_canonicalise_content(content))
         original = AuditEntry(id=entry_id, **content)
 
         # Round-trip through the wire form.

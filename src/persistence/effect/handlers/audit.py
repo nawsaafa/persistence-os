@@ -15,15 +15,21 @@ Design notes tied to spec §9 anti-patterns:
 
 The 8-tuple datom schema from agent1-fact-spec.md §1 is reproduced by
 :func:`audit_entry_to_datom`; :func:`datom_to_audit_entry` is the inverse.
+The emitted wire form conforms to ``:persistence.fact/datom`` as registered
+in :mod:`persistence.spec`; that contract is exercised by
+``tests/effect/test_audit.py::test_audit_entry_datom_conforms_to_fact_spec``.
 """
 from __future__ import annotations
 
 import dataclasses
+import datetime as _dt
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
 from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.effect.runtime import Handler, mask, named, perform
+from persistence.effect.verdicts import as_edn as _verdict_as_edn
+from persistence.effect.verdicts import as_python as _verdict_as_python
 
 
 # ---------------------------------------------------------------------------
@@ -211,80 +217,158 @@ def make_audit_handler(
 # ---------------------------------------------------------------------------
 
 
+def _recorded_at_to_inst(recorded_at: float | _dt.datetime) -> _dt.datetime:
+    """Coerce the audit handler's ``recorded_at`` to a tz-aware datetime.
+
+    The audit handler reads ``:clock/now`` which the system clock handler
+    returns as a Unix epoch float. The canonical ``:datom/tx-time`` spec is
+    :func:`persistence.spec.inst` (tz-aware). Fix is on the effect side,
+    not the spec side: wall-clock instants are the correct representation.
+
+    Accepts already-tz-aware datetimes for forward compatibility with a
+    future clock handler that returns datetimes directly.
+    """
+    if isinstance(recorded_at, _dt.datetime):
+        if recorded_at.tzinfo is None:
+            raise ValueError(
+                "recorded_at datetime is naive; clock handler must emit "
+                "tz-aware instants"
+            )
+        return recorded_at
+    # float / int — treat as Unix epoch seconds (clock/now convention).
+    return _dt.datetime.fromtimestamp(float(recorded_at), tz=_dt.timezone.utc)
+
+
+def _principal_to_keyword_map(principal: dict[str, Any]) -> dict[str, Any]:
+    """Prepend ``":"`` to each string key in the principal dict.
+
+    The canonical ``:audit/principal`` spec is ``map_of(_keyword_spec, _any_value)``
+    — EDN-keyword keys. Ops-side principals today are ordinary Python dicts
+    with bare string keys; leading colons are added at the wire boundary.
+    Already-keyworded keys pass through unchanged.
+    """
+    out: dict[str, Any] = {}
+    for k, v in principal.items():
+        if isinstance(k, str) and not k.startswith(":"):
+            out[":" + k] = v
+        else:
+            out[k] = v
+    return out
+
+
+def _keyword_map_to_principal(keyworded: dict[str, Any]) -> dict[str, Any]:
+    """Inverse of :func:`_principal_to_keyword_map`."""
+    out: dict[str, Any] = {}
+    for k, v in keyworded.items():
+        if isinstance(k, str) and k.startswith(":"):
+            out[k[1:]] = v
+        else:
+            out[k] = v
+    return out
+
+
 def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
     """Convert an AuditEntry to the 8-tuple datom shape from agent1-fact-spec §1.
 
+    The emitted dict is the *wire form* — it conforms to
+    ``:persistence.fact/datom`` as registered in :mod:`persistence.spec`. That
+    contract is the bridge from the effect module to the fact store, and
+    this function is the single producer of that bridge.
+
     Mapping:
-    - ``:datom/e``           → run-id (the causal root, a uuid-ish string)
-    - ``:datom/a``           → ``:audit/<op>`` (e.g. ``:audit/llm/call``)
-    - ``:datom/v``           → dict with verdict, args_hash, result_hash,
-                               latency_ms, error
-    - ``:datom/tx``          → entry.id (content hash; monotonic-in-chain)
-    - ``:datom/tx-time``     → recorded_at
-    - ``:datom/valid-from``  → recorded_at (we learn the fact at that instant)
-    - ``:datom/valid-to``    → None (open interval; audit entries never
-                               become invalid)
-    - ``:datom/op``          → ``"assert"``
-    - ``:datom/provenance``  → principal/policy-id/prev-hash
-    - ``:datom/invalidated-by`` → None (audit is append-only)
+
+    - ``:datom/e``              → run-id (UUID string) when set, else the
+                                  entry's content hash (sha256:...). The
+                                  canonical spec accepts either via
+                                  ``or_(uuid_(), _sha256_spec)``.
+    - ``:datom/a``              → ``:audit/<op>`` as an EDN keyword with
+                                  leading colon (e.g. ``:audit/llm/call``).
+    - ``:datom/v``              → dict with verdict, args-hash, result-hash,
+                                  latency-ms, error.
+    - ``:datom/tx``             → entry.id (sha256 content hash). Spec accepts
+                                  this via ``or_(int_(), _sha256_spec)``.
+    - ``:datom/tx-time``        → recorded_at as tz-aware datetime (UTC).
+    - ``:datom/valid-from``     → same as tx-time (we learn the fact then).
+    - ``:datom/valid-to``       → None (open interval; audit is append-only).
+    - ``:datom/op``             → ``":assert"`` (EDN keyword).
+    - ``:datom/provenance``     → EDN-keyword-keyed map. Verdict in
+                                  :datom/v is converted via
+                                  :func:`persistence.effect.verdicts.as_edn`
+                                  at the wire boundary — no test needs
+                                  changes because :datom/v is not itself
+                                  the :audit/verdict slot.
+    - ``:datom/invalidated-by`` → None.
     """
-    provenance = {
-        "source": "persistence.effect.audit",
-        "model": None,
-        "prompt_hash": None,
-        "confidence": 1.0,
-        "signature": entry.id,
-        "episode": entry.run_id,
-        "prev_hash": entry.prev_hash,
-        "handler_chain": list(entry.handler_chain),
-        "policy_id": entry.policy_id,
-        "principal": dict(entry.principal),
+    inst = _recorded_at_to_inst(entry.recorded_at)
+    # EDN keyword regex allows a single namespace slash; the op name may itself
+    # contain a slash (e.g. "llm/call"). Encode the inner slash as a dot so
+    # ":audit/llm.call" is a valid keyword. datom_to_audit_entry is the
+    # symmetric decoder — these two are co-inverse only because no op in the
+    # catalog contains a literal ``.``.
+    a_keyword = ":audit/" + entry.op.replace("/", ".")
+    provenance: dict[str, Any] = {
+        ":source": ":persistence.effect.audit",
+        ":confidence": 1.0,
+        ":signature": entry.id,
+        ":prev-hash": entry.prev_hash,
+        ":handler-chain": list(entry.handler_chain),
+        ":policy-id": entry.policy_id,
+        ":principal": _principal_to_keyword_map(entry.principal),
     }
+    if entry.run_id is not None:
+        provenance[":episode"] = entry.run_id
     value = {
-        "verdict": entry.verdict,
+        "verdict": _verdict_as_edn(entry.verdict),
         "args_hash": entry.args_hash,
         "result_hash": entry.result_hash,
         "latency_ms": entry.latency_ms,
         "error": entry.error,
     }
     return {
-        "datom/e": entry.run_id or entry.id,
-        "datom/a": f"audit/{entry.op}",
-        "datom/v": value,
-        "datom/tx": entry.id,
-        "datom/tx-time": entry.recorded_at,
-        "datom/valid-from": entry.recorded_at,
-        "datom/valid-to": None,
-        "datom/op": "assert",
-        "datom/provenance": provenance,
-        "datom/invalidated-by": None,
+        ":datom/e": entry.run_id or entry.id,
+        ":datom/a": a_keyword,
+        ":datom/v": value,
+        ":datom/tx": entry.id,
+        ":datom/tx-time": inst,
+        ":datom/valid-from": inst,
+        ":datom/valid-to": None,
+        ":datom/op": ":assert",
+        ":datom/provenance": provenance,
+        ":datom/invalidated-by": None,
     }
 
 
 def datom_to_audit_entry(datom: dict[str, Any]) -> AuditEntry:
-    """Inverse of :func:`audit_entry_to_datom`. Loses nothing the schema
-    round-trips (principal, run-id, policy-id, handler-chain, etc.).
+    """Inverse of :func:`audit_entry_to_datom`.
+
+    Accepts the EDN-keyword wire form (leading-colon keys). The verdict in
+    ``:datom/v`` is translated back to the bare-string Python form via
+    :func:`persistence.effect.verdicts.as_python`.
     """
-    provenance = datom["datom/provenance"]
-    value = datom["datom/v"]
-    a = datom["datom/a"]
-    assert a.startswith("audit/"), f"not an audit datom: {a}"
-    op = a[len("audit/") :]
+    provenance = datom[":datom/provenance"]
+    value = datom[":datom/v"]
+    a = datom[":datom/a"]
+    assert a.startswith(":audit/"), f"not an audit datom: {a}"
+    # Decode ``llm.call`` → ``llm/call`` — see audit_entry_to_datom.
+    op = a[len(":audit/") :].replace(".", "/")
+    recorded_at = datom[":datom/tx-time"]
+    if isinstance(recorded_at, _dt.datetime):
+        recorded_at = recorded_at.timestamp()
     return AuditEntry(
-        id=datom["datom/tx"],
-        prev_hash=provenance.get("prev_hash"),
+        id=datom[":datom/tx"],
+        prev_hash=provenance.get(":prev-hash"),
         op=op,
         args_hash=value["args_hash"],
-        verdict=value["verdict"],
+        verdict=_verdict_as_python(value["verdict"]),
         latency_ms=value["latency_ms"],
-        recorded_at=datom["datom/tx-time"],
+        recorded_at=recorded_at,
         result_hash=value.get("result_hash"),
         error=value.get("error"),
-        policy_id=provenance.get("policy_id"),
-        handler_chain=tuple(provenance.get("handler_chain", ())),
-        principal=dict(provenance.get("principal", {})),
-        run_id=provenance.get("episode"),
-        parent=provenance.get("prev_hash"),
+        policy_id=provenance.get(":policy-id"),
+        handler_chain=tuple(provenance.get(":handler-chain", ())),
+        principal=_keyword_map_to_principal(provenance.get(":principal", {})),
+        run_id=provenance.get(":episode"),
+        parent=provenance.get(":prev-hash"),
     )
 
 

@@ -12,7 +12,7 @@ from persistence.effect.handlers.clock import make_fixed_clock_handler
 from persistence.effect.runtime import Handler, Runtime, mask, perform, with_runtime
 
 
-def _stack_with_audit(entries, clock_ts=1_712_000_000_000):
+def _stack_with_audit(entries, clock_ts=1_712_000_000):
     """audit → raw-echo for :llm/call, with a fixed clock."""
     audit = make_audit_handler(entries, wraps={"llm/call", "decide"})
     raw = make_echo_llm_handler()
@@ -84,28 +84,51 @@ def test_tampering_an_entry_breaks_the_chain():
 
 
 def test_audit_entry_to_datom_has_fact_schema_fields():
+    """agent1-fact-spec §1 8-tuple — EDN-keyword keys with leading ``:``."""
     entries: list[AuditEntry] = []
     rt = _stack_with_audit(entries)
     with with_runtime(rt):
         perform("llm/call", model="m", messages=[])
     datom = audit_entry_to_datom(entries[0])
-    # Required fields from agent1-fact-spec §1 (the 8-tuple).
+    # Required fields from agent1-fact-spec §1, registered in
+    # persistence.spec._canonical as ``:persistence.fact/datom``.
     for key in (
-        "datom/e",
-        "datom/a",
-        "datom/v",
-        "datom/tx",
-        "datom/tx-time",
-        "datom/valid-from",
-        "datom/valid-to",
-        "datom/op",
-        "datom/provenance",
-        "datom/invalidated-by",
+        ":datom/e",
+        ":datom/a",
+        ":datom/v",
+        ":datom/tx",
+        ":datom/tx-time",
+        ":datom/valid-from",
+        ":datom/valid-to",
+        ":datom/op",
+        ":datom/provenance",
+        ":datom/invalidated-by",
     ):
         assert key in datom, f"datom missing {key}"
-    assert datom["datom/op"] in ("assert", "retract")
-    prov = datom["datom/provenance"]
-    assert "source" in prov and "signature" in prov
+    assert datom[":datom/op"] in (":assert", ":retract")
+    prov = datom[":datom/provenance"]
+    assert ":source" in prov and ":signature" in prov
+
+
+def test_audit_entry_datom_conforms_to_fact_spec():
+    """ARIS R1 F1/F2/F6 + R3 F1 — the audit→fact boundary is the thing this
+    module promises (see docstring). The emitted datom must pass
+    spec.conform(":persistence.fact/datom", ...). Exercise the round-trip
+    through the canonical spec.
+    """
+    from persistence import spec as S
+
+    entries: list[AuditEntry] = []
+    rt = _stack_with_audit(entries)
+    with with_runtime(rt):
+        perform("llm/call", model="m", messages=[{"role": "user", "content": "hi"}])
+    datom = audit_entry_to_datom(entries[0])
+    result = S.conform(":persistence.fact/datom", datom)
+    assert result.is_ok, (
+        f"audit_entry_to_datom output failed fact spec conform:\n"
+        f"  datom: {datom!r}\n"
+        f"  error: {S.explain_for_llm(':persistence.fact/datom', datom)}"
+    )
 
 
 def test_datom_roundtrip_preserves_audit_entry():
@@ -144,7 +167,7 @@ def test_audit_routes_sink_through_named_handler_not_disk():
         sink_name="archive",  # forward to named handler
     )
     raw = make_echo_llm_handler()
-    clock = make_fixed_clock_handler(ts=1_712_000_000_000)
+    clock = make_fixed_clock_handler(ts=1_712_000_000)
     sink = Handler(
         name="archive",
         wraps={"audit/emit"},
@@ -183,7 +206,7 @@ def test_audit_records_error_verdict():
         raise RuntimeError("vendor down")
 
     raw = Handler(name="raw", wraps={"llm/call"}, clauses={"llm/call": failing})
-    clock = make_fixed_clock_handler(ts=1_712_000_000_000)
+    clock = make_fixed_clock_handler(ts=1_712_000_000)
     rt = Runtime([raw, clock, audit])
     with with_runtime(rt):
         with pytest.raises(RuntimeError, match="vendor down"):

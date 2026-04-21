@@ -48,23 +48,17 @@ def _effect_op_bad():
 
 
 def _audit_entry_bad():
+    # ARIS Round 3 P-audit-conform: spec aligned with AuditEntry dataclass.
+    # :audit/verdict bad (":maybe" not in enum) — the rest matches the new shape.
     return {
-        ":audit/id": uuid.uuid4(),
-        ":audit/run-id": uuid.uuid4(),
-        ":audit/parent": None,
+        ":audit/id": "sha256:deadbeef",
         ":audit/op": ":llm/call",
-        ":audit/args": {},
         ":audit/args-hash": "sha256:aa",
         ":audit/verdict": ":maybe",  # bad
-        ":audit/policy-id": ":p",
-        ":audit/result": None,
         ":audit/latency-ms": 10,
-        ":audit/cost": {":units": 0.01, ":currency": ":usd"},
-        ":audit/valid-from": dt.datetime.now(dt.timezone.utc),
         ":audit/recorded-at": dt.datetime.now(dt.timezone.utc),
         ":audit/handler-chain": [":audit"],
         ":audit/principal": {},
-        ":audit/prev-hash": None,
     }
 
 

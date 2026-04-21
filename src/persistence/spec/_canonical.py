@@ -310,30 +310,36 @@ _cost = keys(
     optional={":category": _keyword_spec},
 )
 
-# ARIS R1 F6 — ``make_audit_handler(policy_id=None)`` is the default;
-# requiring a keyword here means every in-module test fails conform on
-# its own entries. Move :audit/policy-id to optional. When present, it
-# must still be a namespaced keyword.
+# ARIS Round 3 P-audit-conform: the spec is now aligned with the actual
+# :class:`persistence.effect.handlers.audit.AuditEntry` dataclass shape
+# so ``AuditEntry.to_edn()`` can self-conform at output. Before, the
+# spec listed 14 keys with zero overlap with the dataclass — an orphan
+# that no producer could satisfy (R1 N1 + R3 N3).
+#
+# Required keys reflect every non-nullable dataclass field. Optional
+# keys reflect ``Optional[...]`` annotated fields (``result_hash``,
+# ``error``, ``policy_id``, ``run_id``, ``parent``, ``prev_hash``).
+# The map is open (extra keys tolerated), so demo-level extras like
+# ``:audit/args`` or ``:audit/cost`` that were in the old spec can
+# still be carried without breaking conform.
 _audit_entry = keys(
     required={
-        ":audit/id": uuid_(),
-        ":audit/run-id": uuid_(),
-        ":audit/parent": maybe(uuid_()),
+        ":audit/id": _sha256_spec,
         ":audit/op": ref(":persistence.effect/op"),
-        ":audit/args": map_of(str_(), _any_value),
-        ":audit/args-hash": str_(),
+        ":audit/args-hash": _sha256_spec,
         ":audit/verdict": _verdict,
-        ":audit/result": _any_value,
         ":audit/latency-ms": int_(),
-        ":audit/cost": _cost,
-        ":audit/valid-from": inst(),
         ":audit/recorded-at": inst(),
         ":audit/handler-chain": seq_of(_keyword_spec),
         ":audit/principal": map_of(_keyword_spec, _any_value),
-        ":audit/prev-hash": maybe(str_()),
     },
     optional={
-        ":audit/policy-id": _keyword_spec,
+        ":audit/prev-hash": maybe(_sha256_spec),
+        ":audit/result-hash": maybe(_sha256_spec),
+        ":audit/error": maybe(str_()),
+        ":audit/policy-id": maybe(_keyword_spec),
+        ":audit/run-id": maybe(uuid_()),
+        ":audit/parent": maybe(or_(uuid_(), _sha256_spec)),
     },
 )
 register(":persistence.effect/audit-entry", _audit_entry)

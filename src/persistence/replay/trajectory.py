@@ -253,6 +253,17 @@ class Trajectory:
             edn[":trajectory/intervention"] = self.intervention
         if tags:
             edn[":trajectory/tags"] = tags
+        # Self-conform at the wire boundary (ARIS Round 3 P-audit-conform).
+        # Symmetric with ``fact/wire.py`` and ``audit_entry_to_datom`` —
+        # the cross-module EDN boundary checks its own output. A
+        # malformed trajectory fails loudly here instead of travelling
+        # silently to the replay log.
+        from persistence.spec import conform as _conform
+        result = _conform(":persistence.replay/trajectory", edn)
+        if not result.is_ok:
+            raise ValueError(
+                f"Trajectory.to_edn produced a non-conformant value: {result}"
+            )
         return edn
 
     @classmethod

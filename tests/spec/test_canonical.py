@@ -104,23 +104,23 @@ class TestEffectOp:
 
 
 class TestEffectAuditEntry:
+    """Post-ARIS-R3: the spec is aligned with the AuditEntry dataclass
+    (P-audit-conform). Keys match the EDN wire form produced by
+    :meth:`AuditEntry.to_edn`."""
+
     def _good(self):
         return {
-            ":audit/id": uuid.uuid4(),
-            ":audit/run-id": uuid.uuid4(),
-            ":audit/parent": None,
+            ":audit/id": "sha256:cafebabe00010203",
             ":audit/op": ":llm/call",
-            ":audit/args": {"foo": "bar"},
             ":audit/args-hash": "sha256:abcd",
-            ":audit/verdict": ":allow",
-            ":audit/policy-id": ":bankability-v3",
-            ":audit/result": {"text": "ok"},
+            ":audit/verdict": ":ok",
             ":audit/latency-ms": 412,
-            ":audit/cost": {":units": 0.0031, ":currency": ":usd"},
-            ":audit/valid-from": dt.datetime.now(dt.timezone.utc),
             ":audit/recorded-at": dt.datetime.now(dt.timezone.utc),
             ":audit/handler-chain": [":audit", ":policy", ":raw"],
             ":audit/principal": {":agent": ":bankability"},
+            # Optional
+            ":audit/policy-id": ":bankability-v3",
+            ":audit/run-id": uuid.uuid4(),
             ":audit/prev-hash": None,
         }
 

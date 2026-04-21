@@ -44,7 +44,7 @@ Persistence OS — the cognitive substrate under AI Box — shipped Phase 1 on 2
 
 ## Research contribution claim (for NeSy 2026)
 
-A unified substrate claim: accountability, replay, counterfactuals, composable safety, compositional skill learning, and multi-agent coordination are derived properties of immutable bitemporal datoms + composable effect handlers + homoiconic plan ASTs — not five separately-engineered features. Novel unification. Individual components have precedent (Zep, Pangolin, DSPy, Voyager, CAMO); nobody has composed them before.
+A substrate claim, scoped honestly to Phase 1: accountability, counterfactual branching, composable safety, and boundary-checked neurosymbolic contracts are derived properties of one shipped substrate (immutable bitemporal datoms + composable effect handlers + Merkle-hashed audit + Malli-style specs with LLM self-healing hints). Three further derived capabilities — compositional skill learning (Plan), multi-agent coordination (Txn), and live production steering (REPL) — are spec-registered ahead of the runtime and ship in Phase 2 (2026-Q3) without substrate schema changes. Two formal propositions hold on the shipped code: (i) `Runtime.is_well_formed(catalog)` decides handler-stack completeness in linear time, with `Unhandled` enforcing it at runtime; (ii) `trajectory_hash(replay(T, I_noop)) == trajectory_hash(T)` — byte-identical canonical-serialization replay on NO-OP, stronger than CAMO's aspirational aligned-randomness. Individual components have precedent (Zep, Pangolin, DSPy, Voyager, CAMO); the substrate-first composition is the novel unification.
 
 ## Privacy & distribution
 
@@ -52,7 +52,7 @@ A unified substrate claim: accountability, replay, counterfactuals, composable s
 - Paper + benchmarks + regulator-replay dataset: CC-BY-4.0
 - Vertical adapters: private forever (gitignored, client IP)
 - Self-hosted on Hostinger VPS; local inference for sensitive paths (Qwen/DeepSeek on RTX 5060 Ti)
-- No cloud telemetry, ed25519-signed provenance, never-to-cloud skill visibility
+- No cloud telemetry, SHA-256 content-hashed provenance + Merkle-chained audit (ed25519 per-transaction signing is Phase 2), never-to-cloud skill visibility
 
 ## Links
 

@@ -29,6 +29,7 @@ where = ["src"]
 include = ["persistence*"]
 
 [tool.setuptools.package-data]
+"persistence" = ["py.typed"]
 "persistence.fact" = ["migrations/*.sql"]
 
 [tool.pytest.ini_options]

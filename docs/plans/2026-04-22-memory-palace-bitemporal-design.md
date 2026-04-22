@@ -10,7 +10,7 @@
 
 The vault memory system becomes bitemporal with the `persistence.fact` datom log as the canonical write-ahead log. Qdrant and Kuzu become deterministic projections of the log — rebuildable from scratch, incrementally maintained in steady state. Taxonomy-v2's tier/bucket capability model composes orthogonally: tier/bucket values ride in `:datom/provenance` (immutable with the fact); enforcement stays in the existing PG capability table at query time. The retrofit adds `/vault-as-of` time-travel, regulator-grade audit chain over vault operations, and counterfactual memory branches — without affecting the hot path of `/vault/recall`.
 
-This is the Phase 2 flagship move for Persistence OS and the flagship differentiator for the Juba OS / AI Box memory system: every agent framework on the market treats memory as a vector-store sidecar; we treat it as a first-class time-travelling substrate with regulator-grade provenance.
+This is the Phase 2 flagship move for Persistence OS and the flagship differentiator for the Juba OS / AI Box memory system: every agent framework on the market treats memory as a vector-store sidecar; we treat it as a first-class time-travelling substrate with Merkle-chained provenance whose integrity properties are defined in §4.6 (three-property form — Merkle-chained, `verify_chain` iff integrity, tier-preserved).
 
 ## 2. Drivers (in priority order)
 
@@ -138,7 +138,7 @@ Both axes sit on the datom, but each is enforced where it already lives:
 - `/vault/as-of?vt=2026-04-10&q="wacc calculation"` → Qdrant vector search with filter `valid_from ≤ vt AND (valid_to IS NULL OR valid_to > vt)`. Mirror of `DB.as_of_valid(vt)` at the projection layer. ~2× present-state cost because an extra indexed comparison runs pre-vector; still <100ms target. Taxonomy-v2 applies at query time using the **caller's current capabilities** (not historical).
 
 **(c) Audit reconstruction (transaction-time)** — rare, offline:
-- Replay an agent session's audit entries. For each `:vault/recall`, extract `vault_snapshot_tx`, compute `tx_time_of_tx` from the datom log, call `db.as_of(tx_time_of_tx)`, re-run the query against the resulting `DBView`, recompute `result_hash`, must match. `verify_chain` semantics extended from the audit-log Merkle chain to the vault state at query time. Prop 4 now covers the vault layer.
+- Replay an agent session's audit entries. For each `:vault/recall`, extract `vault_snapshot_tx`, compute `tx_time_of_tx` from the datom log, call `db.as_of(tx_time_of_tx)`, re-run the query against the resulting `DBView`, recompute `result_hash`, must match. This is **Prop 4′ (vault-extended form)** — the audit-log Merkle chain plus vault-state reconstruction, three-property definition pinned in §4.6. Prop 4 as stated in paper §5.4 (integrity of the audit log alone) is unchanged; Prop 4′ adds the vault-layer extension and inherits the tier-preserved / `verify_chain` iff / Merkle-chained decomposition.
 
 ### 4.6 Audit integration (Phase 3 scope)
 

@@ -230,3 +230,36 @@ class TestUnparse:
     def test_unparse_handles_nested_attrs_maps(self):
         n = Node(tag=":tool-call", attrs={"args": {"url": "x"}}, children=())
         assert unparse(n) == '[:tool-call {:args {:url "x"}}]'
+
+
+class TestRoundTrip:
+    """unparse(parse(x)) == x byte-identical for canonical inputs.
+
+    Non-canonical inputs (extra whitespace, different attr order) are explicitly
+    NOT round-trip preserved — canonicalisation is the whole point.
+    """
+
+    CANONICAL_SHAPES = [
+        "[:seq {}]",
+        '[:llm-call {:prompt "hi"}]',
+        '[:seq {} [:llm-call {:prompt "a"}] [:llm-call {:prompt "b"}]]',
+        '[:tool-call {:args {:url "x"} :tool :http/get}]',
+        '[:par {:join :all} [:llm-call {:prompt "x"}]]',
+    ]
+
+    @pytest.mark.parametrize("canonical", CANONICAL_SHAPES)
+    def test_round_trip_byte_identical(self, canonical: str):
+        assert unparse(parse(canonical, strict=False)) == canonical
+
+    def test_non_canonical_input_normalises(self):
+        """Unsorted attrs in input → sorted attrs in unparse output."""
+        non_canonical = '[:llm-call {:z 1 :a "x"}]'
+        canonical = '[:llm-call {:a "x" :z 1}]'
+        assert unparse(parse(non_canonical, strict=False)) == canonical
+
+    def test_round_trip_idempotent(self):
+        """unparse(parse(unparse(parse(x)))) == unparse(parse(x)) for any x."""
+        input_edn = '[:llm-call {:z 1 :a 2}]'
+        once = unparse(parse(input_edn, strict=False))
+        twice = unparse(parse(once, strict=False))
+        assert once == twice

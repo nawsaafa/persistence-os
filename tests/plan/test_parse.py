@@ -70,12 +70,13 @@ class TestParseAllNodeKinds:
         # Control operators
         ('[:seq {:id "abc"} [:llm-call {:prompt "x"}]]', ":seq"),
         ('[:par {:join :all} [:llm-call {:prompt "x"}] [:llm-call {:prompt "y"}]]', ":par"),
-        ('[:choice {:selector :regime} [:case :bull [:llm-call {:prompt "up"}]]]', ":choice"),
+        ('[:choice {:selector :regime} [:case {:match :bull} [:llm-call {:prompt "up"}]]]', ":choice"),
         ('[:loop {:while :retry :max-iter 3} [:llm-call {:prompt "try"}]]', ":loop"),
         ('[:race {:timeout-ms 5000} [:llm-call {:prompt "a"}] [:llm-call {:prompt "b"}]]', ":race"),
         ('[:let {:bindings {:x 1}} [:llm-call {:prompt "use-x"}]]', ":let"),
-        # Case arm (used inside :choice)
-        ('[:case :bull [:llm-call {:prompt "up"}]]', ":case"),
+        # Case arm (used inside :choice) — uniform [tag attrs *children] shape per spec at
+        # src/persistence/spec/_canonical.py:469 (attrs must be dict); pred lives in attrs as :match.
+        ('[:case {:match :bull} [:llm-call {:prompt "up"}]]', ":case"),
         # Effect leaves (parse OK)
         ('[:tool-call {:tool :http/get :args {:url "x"}}]', ":tool-call"),
         ('[:llm-call {:signature :q->a :prompt "hi" :model :opus-4.7}]', ":llm-call"),

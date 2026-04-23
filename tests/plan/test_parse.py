@@ -159,3 +159,47 @@ class TestSpecValidation:
         assert "id" not in n.attrs
         # But Node.id is always available (computed)
         assert len(n.id) == 16
+
+
+class TestSpecValidationMalformed:
+    """Each node kind has malformed shapes spec should catch.
+
+    v0.1 limitation: :persistence.plan/node (current form) validates
+    TOP-LEVEL shape (tag enum + attrs dict + :id + keyword keys + recursive
+    children) but does NOT enforce per-kind required attrs like :tool-call
+    needing :tool. Tests that depend on per-kind tightness are marked xfail
+    as v0.2 spec-tightening work. See §13 of the design doc (R2 flag).
+    """
+
+    def test_recursive_validation_catches_bad_child(self):
+        """Child with unknown kind is rejected recursively."""
+        with pytest.raises(PlanSpecError):
+            parse('[:seq {} [:not-a-kind {}]]', strict=True)
+
+    def test_tag_not_in_enum_rejected(self):
+        """Unknown tag at top level rejected."""
+        with pytest.raises(PlanSpecError):
+            parse('[:not-a-real-kind {}]', strict=True)
+
+    @pytest.mark.xfail(
+        reason=(
+            "v0.1 spec does not enforce per-kind required attrs — "
+            ":tool-call without :tool, :llm-call without :prompt, etc. "
+            "are valid at the shape level. Per-kind tightening is a v0.2 "
+            "spec extension (R2 flag in design doc §13)."
+        ),
+        strict=False,
+    )
+    @pytest.mark.parametrize("edn,reason", [
+        ('[:tool-call {:args {}}]', "tool-call missing :tool"),
+        ('[:llm-call {:model :opus-4.7}]', "llm-call missing :prompt"),
+        ('[:checkpoint {}]', "checkpoint missing :tier"),
+        ('[:verify {:claim "x"}]', "verify missing :prover"),
+        ('[:call-skill {:args {}}]', "call-skill missing :skill"),
+        ('[:loop {} [:llm-call {:prompt "x"}]]', "loop missing :max-iter"),
+        ('[:choice {:selector :x}]', "choice needs at least one case arm"),
+    ])
+    def test_per_kind_required_attrs_v02(self, edn: str, reason: str):
+        """Will xfail until v0.2 tightens :persistence.plan/node per-kind."""
+        with pytest.raises(PlanSpecError):
+            parse(edn, strict=True)

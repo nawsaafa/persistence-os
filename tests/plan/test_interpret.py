@@ -106,3 +106,40 @@ class TestWalkOrderByKind:
         root = Node(tag=":let", attrs={"bindings": {"x": 1}}, children=(body,))
         ids = walk(root)
         assert ids == [root.id, body.id]
+
+
+class TestUnimplemented:
+    def test_code_leaf_raises(self):
+        n = Node(tag=":code", attrs={"lang": ":python", "body": "pass"}, children=())
+        with pytest.raises(UnimplementedNodeKindError, match="v0.2"):
+            walk(n)
+
+    def test_branch_leaf_raises(self):
+        n = Node(tag=":branch", attrs={"strategy": ":beam", "k": 3}, children=())
+        with pytest.raises(UnimplementedNodeKindError, match="Phase 3"):
+            walk(n)
+
+    def test_code_with_children_does_not_raise(self):
+        """Edge case: :code with children is a spec-malformed shape,
+        but walker only raises for leaf :code. Spec validation is the gate
+        for no-children-allowed check."""
+        child = Node(tag=":llm-call", attrs={"prompt": "x"}, children=())
+        n = Node(tag=":code", attrs={"lang": ":python", "body": "pass"}, children=(child,))
+        # Walker walks it normally; spec layer would reject this shape.
+        ids = walk(n)
+        assert ids == [n.id, child.id]
+
+    def test_error_message_names_upgrade_version(self):
+        n = Node(tag=":code", attrs={"lang": ":python", "body": "pass"}, children=())
+        with pytest.raises(UnimplementedNodeKindError) as excinfo:
+            walk(n)
+        assert "v0.2" in str(excinfo.value)
+        assert "sandbox" in str(excinfo.value).lower()
+
+    def test_error_raised_before_id_added_to_trace(self):
+        """When walker hits unimplemented, exception propagates out of walk()."""
+        ok = Node(tag=":llm-call", attrs={"prompt": "first"}, children=())
+        bad = Node(tag=":code", attrs={"lang": ":python", "body": "pass"}, children=())
+        root = Node(tag=":seq", attrs={}, children=(ok, bad))
+        with pytest.raises(UnimplementedNodeKindError):
+            walk(root)

@@ -183,5 +183,69 @@ def _to_vector_form(node: Node) -> list:
 
 
 def unparse(node: Node) -> str:
-    """Placeholder — real implementation in Task 15."""
-    raise NotImplementedError
+    """Emit canonical EDN for node. Round-trip invariant:
+    ``unparse(parse(x, strict=False)) == x`` for canonical inputs.
+
+    Canonical form:
+    - Node: ``[<tag> <attrs> <child1> <child2> ...]`` space-separated
+    - Attrs: ``{<:k1> <v1> <:k2> <v2> ...}`` keys sorted alphabetically,
+      attr-name keys emitted as keywords (leading colon added back)
+    - Strings: double-quoted with backslash escaping of ``"`` and ``\\``
+    - Keyword-form strings (start with ``:``): emitted bare
+    - Integers: base-10
+    - Floats: ``repr()`` (deterministic)
+    - Booleans: ``true`` / ``false``
+    - Nil: ``nil``
+    - Nested maps inside attr values: treated as attr-maps (symmetric with parse
+      which stripped colons at every map level)
+    """
+    return _emit_node(node)
+
+
+def _emit_node(node: Node) -> str:
+    """Emit a Node as canonical EDN vector."""
+    parts = [node.tag, _emit_attrs(dict(node.attrs))]
+    for child in node.children:
+        parts.append(_emit_node(child))
+    return "[" + " ".join(parts) + "]"
+
+
+def _emit_attrs(attrs: dict) -> str:
+    """Emit an attr map. Keys are attr names (plain strings internally) —
+    re-prefix with ':' to restore keyword form. Values go through _emit_value.
+    Keys sorted alphabetically for canonical ordering.
+    """
+    if not attrs:
+        return "{}"
+    items = sorted(attrs.items(), key=lambda kv: kv[0])
+    parts = []
+    for k, v in items:
+        key_edn = k if k.startswith(":") else f":{k}"
+        parts.append(f"{key_edn} {_emit_value(v)}")
+    return "{" + " ".join(parts) + "}"
+
+
+def _emit_value(v: Any) -> str:
+    """Emit a non-attr-key value as canonical EDN."""
+    if v is None:
+        return "nil"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return repr(v)
+    if isinstance(v, str):
+        if v.startswith(":"):
+            # Keyword form — emit bare
+            return v
+        # String — double-quote with backslash escaping
+        escaped = v.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    if isinstance(v, dict):
+        # A dict inside an attr value is still an attr-shaped map
+        # (parse stripped colons at every map level; unparse restores them).
+        return _emit_attrs(v)
+    if isinstance(v, (list, tuple)):
+        return "[" + " ".join(_emit_value(x) for x in v) + "]"
+    raise TypeError(f"unparse: cannot emit value of type {type(v).__name__}: {v!r}")

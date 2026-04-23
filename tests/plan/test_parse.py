@@ -203,3 +203,30 @@ class TestSpecValidationMalformed:
         """Will xfail until v0.2 tightens :persistence.plan/node per-kind."""
         with pytest.raises(PlanSpecError):
             parse(edn, strict=True)
+
+
+from persistence.plan import unparse
+
+
+class TestUnparse:
+    def test_unparse_empty_seq(self):
+        n = Node(tag=":seq", attrs={}, children=())
+        assert unparse(n) == "[:seq {}]"
+
+    def test_unparse_llm_call_with_attrs(self):
+        n = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+        assert unparse(n) == '[:llm-call {:prompt "hi"}]'
+
+    def test_unparse_nested(self):
+        inner = Node(tag=":llm-call", attrs={"prompt": "deep"}, children=())
+        outer = Node(tag=":seq", attrs={}, children=(inner,))
+        assert unparse(outer) == '[:seq {} [:llm-call {:prompt "deep"}]]'
+
+    def test_unparse_sorts_attrs_keys(self):
+        """Canonical form sorts attrs keys alphabetically."""
+        n = Node(tag=":llm-call", attrs={"z": 1, "a": "x"}, children=())
+        assert unparse(n) == '[:llm-call {:a "x" :z 1}]'
+
+    def test_unparse_handles_nested_attrs_maps(self):
+        n = Node(tag=":tool-call", attrs={"args": {"url": "x"}}, children=())
+        assert unparse(n) == '[:tool-call {:args {:url "x"}}]'

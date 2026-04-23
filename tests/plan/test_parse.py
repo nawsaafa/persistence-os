@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from persistence.plan import Node, parse, ParseError
+from persistence.plan._parse import PlanSpecError
+from persistence.spec import ConformError
 
 
 class TestParseLeaf:
@@ -124,3 +126,36 @@ class TestParseErrors:
     def test_parse_raises_on_tag_not_keyword(self):
         with pytest.raises(ParseError, match="tag must be keyword"):
             parse('["seq" {}]')  # string, not keyword
+
+
+class TestSpecValidation:
+    def test_parse_strict_rejects_unknown_tag(self):
+        """:not-a-real-kind is not in :persistence.plan/node enum."""
+        with pytest.raises(PlanSpecError) as excinfo:
+            parse('[:not-a-real-kind {}]', strict=True)
+        err = excinfo.value
+        assert ":persistence.plan/node" in str(err.spec_key) or ":persistence.plan/node" in repr(err)
+
+    def test_parse_strict_accepts_valid_seq(self):
+        """Valid :seq passes spec validation — :id auto-injected from Node.id."""
+        n = parse('[:seq {} [:llm-call {:prompt "hi"}]]', strict=True)
+        assert n.tag == ":seq"
+
+    def test_parse_non_strict_skips_validation(self):
+        """strict=False bypasses spec check — used for testing."""
+        n = parse('[:not-a-real-kind {}]', strict=False)
+        assert n.tag == ":not-a-real-kind"
+
+    def test_strict_validates_nested_children(self):
+        """Spec validation is recursive — bad child → PlanSpecError."""
+        with pytest.raises(PlanSpecError):
+            parse('[:seq {} [:not-a-real-kind {}]]', strict=True)
+
+    def test_id_auto_injected_at_validate_time_not_on_node(self):
+        """Validation injects :id into vector form for spec check;
+        Node.attrs itself is unchanged (:id is computed, not stored)."""
+        n = parse('[:seq {} [:llm-call {:prompt "hi"}]]', strict=True)
+        assert ":id" not in n.attrs
+        assert "id" not in n.attrs
+        # But Node.id is always available (computed)
+        assert len(n.id) == 16

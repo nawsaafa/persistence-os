@@ -9,6 +9,29 @@ from persistence.plan._ast import Node
 from persistence.plan._errors import ParseError
 
 
+class PlanSpecError(Exception):
+    """Raised when a parsed Node fails :persistence.plan/node spec validation.
+
+    Wraps the structured ConformError for programmatic inspection:
+
+        try:
+            node = parse(edn, strict=True)
+        except PlanSpecError as exc:
+            print(exc.conform_error.spec_key, exc.conform_error.reason)
+
+    The ConformError is also available as ``exc.args[0]`` for generic inspection.
+    The ``spec_key`` property mirrors ``conform_error.spec_key`` for quick access.
+    """
+
+    def __init__(self, conform_error: Any) -> None:
+        self.conform_error = conform_error
+        super().__init__(conform_error)
+
+    @property
+    def spec_key(self) -> Any:
+        return self.conform_error.spec_key
+
+
 def _edn_key_to_str(key: Any) -> str:
     """Convert an EDN map key to a plain Python string attr name.
 
@@ -86,7 +109,8 @@ def parse(
 
     Raises:
         ParseError: malformed EDN or wrong shape.
-        ConformError: AST fails spec validation (strict=True only).
+        PlanSpecError: AST fails spec validation (strict=True only).
+            Wraps a structured ConformError; access via ``exc.conform_error``.
     """
     try:
         raw = edn_format.loads(edn_text)
@@ -119,8 +143,43 @@ def _apply_aliases(node: Node, aliases: Mapping[str, str]) -> Node:
 
 
 def _validate_spec(node: Node) -> None:
-    """Stub — real implementation in Task 13."""
-    return
+    """Validate node against :persistence.plan/node registered spec.
+
+    Converts Node (internal representation: plain-string attr keys,
+    computed Node.id) to the external vector form the spec validates:
+    ``[tag, {:id "sha256:<hex>", <keyword-keyed attrs>}, *child-vectors]``.
+
+    Node.id is content-addressed (sha256 of canonical form) — we prefix
+    with ``sha256:`` to match :persistence.spec/sha256's format contract.
+    Internal Node.attrs is unchanged; the injected :id is ephemeral and
+    lives only in the vector passed to conform().
+
+    Raises PlanSpecError (wrapping ConformError) on validation failure;
+    the error carries .conform_error.spec_key, .conform_error.path,
+    .conform_error.hint for callers to inspect.
+    """
+    from persistence.spec import conform
+
+    vector = _to_vector_form(node)
+    result = conform(":persistence.plan/node", vector)
+    if not result.is_ok:
+        raise PlanSpecError(result)
+
+
+def _to_vector_form(node: Node) -> list:
+    """Build the external vector representation the spec validates.
+
+    Internal Node uses plain-string attr keys like "prompt"; the spec
+    demands keyword-form keys like ":prompt". We prepend ':' at emit time.
+    Injects :id derived from Node.id (16 hex chars → "sha256:<hex>").
+    """
+    keyword_attrs: dict[str, Any] = {":id": f"sha256:{node.id}"}
+    for k, v in node.attrs.items():
+        # Attr keys in internal Node are plain strings (no leading ':');
+        # spec requires keyword-form keys — prepend ':' unless already present.
+        key = k if k.startswith(":") else f":{k}"
+        keyword_attrs[key] = v
+    return [node.tag, keyword_attrs, *(_to_vector_form(c) for c in node.children)]
 
 
 def unparse(node: Node) -> str:

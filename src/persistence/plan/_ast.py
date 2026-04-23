@@ -49,3 +49,18 @@ class Node:
                 raise ValueError(
                     f"Node.children[{i}] must be Node, got {type(child).__name__}"
                 )
+
+
+def _canonical_dict(node: Node) -> dict[str, Any]:
+    """Convert Node to a dict for canonical hashing.
+
+    Attrs are kept as-is (sorting happens at json.dumps with sort_keys=True).
+    Nested Node values in attrs would be a misuse — attrs hold EDN scalars
+    and containers only. If a child-shaped value appears in attrs, we leave
+    it; canonical serialization will still be deterministic via sort_keys.
+    """
+    return {
+        "tag": node.tag,
+        "attrs": dict(node.attrs),
+        "children": [_canonical_dict(c) for c in node.children],
+    }

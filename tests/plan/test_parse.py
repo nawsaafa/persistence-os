@@ -263,3 +263,42 @@ class TestRoundTrip:
         once = unparse(parse(input_edn, strict=False))
         twice = unparse(parse(once, strict=False))
         assert once == twice
+
+
+class TestAliasLowering:
+    def test_phase_lowered_to_seq(self):
+        edn = '[:phase {:id "p1" :name "Bootstrap"} [:llm-call {:prompt "x"}]]'
+        n = parse(edn, lower_aliases={":phase": ":seq"}, strict=False)
+        assert n.tag == ":seq"  # lowered
+        assert n.attrs["name"] == "Bootstrap"  # attrs preserved
+        assert n.children[0].tag == ":llm-call"
+
+    def test_workstream_lowered_to_seq(self):
+        edn = '[:workstream {:id :ws/fact :owner :team/fact} [:llm-call {:prompt "x"}]]'
+        n = parse(edn, lower_aliases={":workstream": ":seq"}, strict=False)
+        assert n.tag == ":seq"
+
+    def test_multiple_aliases_lowered_recursively(self):
+        edn = '[:phase {} [:workstream {} [:llm-call {:prompt "deep"}]]]'
+        n = parse(
+            edn,
+            lower_aliases={":phase": ":seq", ":workstream": ":seq"},
+            strict=False,
+        )
+        assert n.tag == ":seq"
+        assert n.children[0].tag == ":seq"
+        assert n.children[0].children[0].tag == ":llm-call"
+
+    def test_alias_not_round_trip_preserved(self):
+        """Aliased inputs do NOT round-trip — documented behavior."""
+        original = '[:phase {} [:llm-call {:prompt "x"}]]'
+        n = parse(original, lower_aliases={":phase": ":seq"}, strict=False)
+        emitted = unparse(n)
+        assert emitted != original  # explicit non-invariant
+        assert emitted.startswith("[:seq")
+
+    def test_no_aliases_kwarg_no_lowering(self):
+        """Without lower_aliases, unknown tags passed through (strict=False)."""
+        edn = '[:phase {} [:llm-call {:prompt "x"}]]'
+        n = parse(edn, strict=False)
+        assert n.tag == ":phase"  # unchanged

@@ -58,3 +58,51 @@ class TestWalkVisitor:
 
         walk(root, visitor=visitor)
         assert deepest_path == [(":seq", ":loop", ":llm-call")]
+
+
+class TestWalkOrderByKind:
+    def test_par_children_document_order(self):
+        """v0.1 walks :par children in document order — not actual parallelism."""
+        c1 = Node(tag=":llm-call", attrs={"prompt": "1"}, children=())
+        c2 = Node(tag=":llm-call", attrs={"prompt": "2"}, children=())
+        root = Node(tag=":par", attrs={"join": ":all"}, children=(c1, c2))
+        ids = walk(root)
+        assert ids == [root.id, c1.id, c2.id]
+
+    def test_choice_walks_all_case_arms(self):
+        """v0.1 walks ALL :case branches — this is pre-execution structural
+        analysis, not runtime selector dispatch."""
+        arm_a = Node(
+            tag=":case",
+            attrs={"match": ":bull"},
+            children=(Node(tag=":llm-call", attrs={"prompt": "up"}, children=()),),
+        )
+        arm_b = Node(
+            tag=":case",
+            attrs={"match": ":bear"},
+            children=(Node(tag=":llm-call", attrs={"prompt": "down"}, children=()),),
+        )
+        root = Node(tag=":choice", attrs={"selector": ":regime"}, children=(arm_a, arm_b))
+        ids = walk(root)
+        # root + arm_a + arm_a.child + arm_b + arm_b.child = 5 ids
+        assert len(ids) == 5
+
+    def test_loop_body_walked_once(self):
+        """v0.1 walks :loop body ONCE — unrolling is executor concern."""
+        body = Node(tag=":llm-call", attrs={"prompt": "retry"}, children=())
+        root = Node(tag=":loop", attrs={"max-iter": 3}, children=(body,))
+        ids = walk(root)
+        assert ids == [root.id, body.id]  # exactly one body visit
+
+    def test_race_children_walked_once_each(self):
+        c1 = Node(tag=":llm-call", attrs={"prompt": "a"}, children=())
+        c2 = Node(tag=":llm-call", attrs={"prompt": "b"}, children=())
+        root = Node(tag=":race", attrs={"timeout-ms": 1000}, children=(c1, c2))
+        ids = walk(root)
+        assert ids == [root.id, c1.id, c2.id]
+
+    def test_let_body_walked_normally(self):
+        body = Node(tag=":llm-call", attrs={"prompt": "use-x"}, children=())
+        root = Node(tag=":let", attrs={"bindings": {"x": 1}}, children=(body,))
+        ids = walk(root)
+        assert ids == [root.id, body.id]

@@ -57,3 +57,69 @@ class TestParseNested:
         assert dict(n.attrs) == {"join": ":all"}
         assert n.children[0].tag == ":llm-call"
         assert n.children[1].tag == ":tool-call"
+
+
+class TestParseAllNodeKinds:
+    """Each of the 16 spec-listed node kinds parses into a valid Node.
+
+    :code and :branch parse at this layer (they are in the spec) but raise
+    UnimplementedNodeKindError when walked (Task 21).
+    """
+
+    @pytest.mark.parametrize("edn,expected_tag", [
+        # Control operators
+        ('[:seq {:id "abc"} [:llm-call {:prompt "x"}]]', ":seq"),
+        ('[:par {:join :all} [:llm-call {:prompt "x"}] [:llm-call {:prompt "y"}]]', ":par"),
+        ('[:choice {:selector :regime} [:case :bull [:llm-call {:prompt "up"}]]]', ":choice"),
+        ('[:loop {:while :retry :max-iter 3} [:llm-call {:prompt "try"}]]', ":loop"),
+        ('[:race {:timeout-ms 5000} [:llm-call {:prompt "a"}] [:llm-call {:prompt "b"}]]', ":race"),
+        ('[:let {:bindings {:x 1}} [:llm-call {:prompt "use-x"}]]', ":let"),
+        # Case arm (used inside :choice)
+        ('[:case :bull [:llm-call {:prompt "up"}]]', ":case"),
+        # Effect leaves (parse OK)
+        ('[:tool-call {:tool :http/get :args {:url "x"}}]', ":tool-call"),
+        ('[:llm-call {:signature :q->a :prompt "hi" :model :opus-4.7}]', ":llm-call"),
+        ('[:code {:lang :python :body "pass"}]', ":code"),
+        # Cognitive operators
+        ('[:reflect {:criteria ["cost"]}]', ":reflect"),
+        ('[:checkpoint {:persist :vault :tier :L1}]', ":checkpoint"),
+        ('[:verify {:prover :heuristic :claim "non-empty"}]', ":verify"),
+        ('[:call-skill {:skill :skill/boa@v3 :args {}}]', ":call-skill"),
+        # Binding / dataflow
+        ('[:ref {:symbol :q}]', ":ref"),
+        # Speculative search (parse OK, walk raises)
+        ('[:branch {:strategy :beam :k 3} [:llm-call {:prompt "variant"}]]', ":branch"),
+    ])
+    def test_each_kind_parses(self, edn: str, expected_tag: str):
+        n = parse(edn, strict=False)  # strict=False — spec validation comes in Task 13
+        assert n.tag == expected_tag
+
+
+class TestParseErrors:
+    def test_parse_raises_on_empty_string(self):
+        with pytest.raises(ParseError):
+            parse("")
+
+    def test_parse_raises_on_garbage(self):
+        with pytest.raises(ParseError):
+            parse("this is not edn at all {")
+
+    def test_parse_raises_on_top_level_non_vector(self):
+        with pytest.raises(ParseError):
+            parse('{:tag ":seq"}')  # map, not vector
+
+    def test_parse_raises_on_empty_vector(self):
+        with pytest.raises(ParseError, match="too short"):
+            parse("[]")
+
+    def test_parse_raises_on_missing_attrs_map(self):
+        with pytest.raises(ParseError):
+            parse("[:seq]")  # only tag, no attrs
+
+    def test_parse_raises_on_attrs_not_a_map(self):
+        with pytest.raises(ParseError, match="attrs must be map"):
+            parse('[:seq "not-a-map"]')
+
+    def test_parse_raises_on_tag_not_keyword(self):
+        with pytest.raises(ParseError, match="tag must be keyword"):
+            parse('["seq" {}]')  # string, not keyword

@@ -63,3 +63,45 @@ class TestCanonicalDict:
         )
         result = _canonical_dict(n)
         assert result["attrs"]["args"] == {"url": "https://x.com", "method": "GET"}
+
+
+class TestNodeId:
+    def test_id_is_16_hex_chars(self):
+        n = Node(tag=":seq", attrs={}, children=())
+        assert len(n.id) == 16
+        assert all(c in "0123456789abcdef" for c in n.id)
+
+    def test_identical_nodes_have_identical_id(self):
+        a = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+        b = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+        assert a.id == b.id
+
+    def test_different_tag_different_id(self):
+        a = Node(tag=":seq", attrs={}, children=())
+        b = Node(tag=":par", attrs={}, children=())
+        assert a.id != b.id
+
+    def test_different_attrs_different_id(self):
+        a = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+        b = Node(tag=":llm-call", attrs={"prompt": "bye"}, children=())
+        assert a.id != b.id
+
+    def test_different_children_different_id(self):
+        child = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+        a = Node(tag=":seq", attrs={}, children=())
+        b = Node(tag=":seq", attrs={}, children=(child,))
+        assert a.id != b.id
+
+    def test_attrs_key_order_does_not_affect_id(self):
+        """Canonical form sorts attrs keys — key-insertion order is irrelevant."""
+        a = Node(tag=":llm-call", attrs={"a": 1, "z": 2}, children=())
+        b = Node(tag=":llm-call", attrs={"z": 2, "a": 1}, children=())
+        assert a.id == b.id
+
+    def test_child_order_DOES_affect_id(self):
+        """:seq is ordered — child order is semantic."""
+        c1 = Node(tag=":llm-call", attrs={"prompt": "a"}, children=())
+        c2 = Node(tag=":llm-call", attrs={"prompt": "b"}, children=())
+        a = Node(tag=":seq", attrs={}, children=(c1, c2))
+        b = Node(tag=":seq", attrs={}, children=(c2, c1))
+        assert a.id != b.id

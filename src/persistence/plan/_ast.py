@@ -50,6 +50,22 @@ class Node:
                     f"Node.children[{i}] must be Node, got {type(child).__name__}"
                 )
 
+    @property
+    def id(self) -> str:
+        """16-hex-char sha256 prefix of canonical form.
+
+        Matches persistence.replay._canonical pattern: json.dumps with
+        sort_keys=True, separators=(',', ':'). Two Nodes with identical
+        content hash-collide — that IS the content-addressing contract.
+        """
+        canonical = json.dumps(
+            _canonical_dict(self),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return digest[:16]
+
 
 def _canonical_dict(node: Node) -> dict[str, Any]:
     """Convert Node to a dict for canonical hashing.

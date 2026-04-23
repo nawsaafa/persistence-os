@@ -12,7 +12,9 @@ license = { text = "AGPL-3.0-or-later" }
 authors = [
     { name = "Nawfal Saadi", email = "saadinawfal@gmail.com" }
 ]
-dependencies = []
+dependencies = [
+    "edn_format>=0.7.5",
+]
 
 [project.optional-dependencies]
 postgres = [

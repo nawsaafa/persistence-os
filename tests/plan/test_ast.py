@@ -105,3 +105,38 @@ class TestNodeId:
         a = Node(tag=":seq", attrs={}, children=(c1, c2))
         b = Node(tag=":seq", attrs={}, children=(c2, c1))
         assert a.id != b.id
+
+
+import subprocess
+import sys
+
+
+class TestIdDeterminism:
+    def test_id_is_deterministic_across_processes(self, tmp_path):
+        """Same Node constructed in a fresh Python process → identical :id.
+
+        This is the content-addressing contract: two agents independently
+        deriving the same plan fragment MUST hash-collide.
+        """
+        script = tmp_path / "print_id.py"
+        script.write_text(
+            "import sys; sys.path.insert(0, 'src')\n"
+            "from persistence.plan import Node\n"
+            "n = Node(tag=':llm-call', attrs={'prompt': 'hello', 'model': ':opus-4.7'}, children=())\n"
+            "print(n.id)\n"
+        )
+
+        def run_in_subprocess() -> str:
+            result = subprocess.run(
+                [sys.executable, str(script)],
+                capture_output=True,
+                text=True,
+                cwd="/Users/nawfalsaadi/Projects/persistence-os",
+            )
+            assert result.returncode == 0, result.stderr
+            return result.stdout.strip()
+
+        id_a = run_in_subprocess()
+        id_b = run_in_subprocess()
+        assert id_a == id_b
+        assert len(id_a) == 16

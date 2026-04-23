@@ -27,3 +27,34 @@ class TestWalkBasic:
         root = Node(tag=":seq", attrs={}, children=(mid, sibling))
         ids = walk(root)
         assert ids == [root.id, mid.id, inner.id, sibling.id]
+
+
+class TestWalkVisitor:
+    def test_visitor_called_per_node(self):
+        c = Node(tag=":llm-call", attrs={"prompt": "x"}, children=())
+        root = Node(tag=":seq", attrs={}, children=(c,))
+
+        visited: list[tuple[str, tuple[str, ...]]] = []
+
+        def visitor(node: Node, path: tuple[str, ...]) -> None:
+            visited.append((node.tag, path))
+
+        walk(root, visitor=visitor)
+        assert visited == [
+            (":seq", (":seq",)),
+            (":llm-call", (":seq", ":llm-call")),
+        ]
+
+    def test_visitor_receives_deep_path(self):
+        inner = Node(tag=":llm-call", attrs={"prompt": "deep"}, children=())
+        mid = Node(tag=":loop", attrs={"max-iter": 3}, children=(inner,))
+        root = Node(tag=":seq", attrs={}, children=(mid,))
+
+        deepest_path = []
+
+        def visitor(node: Node, path: tuple[str, ...]) -> None:
+            if node.tag == ":llm-call":
+                deepest_path.append(path)
+
+        walk(root, visitor=visitor)
+        assert deepest_path == [(":seq", ":loop", ":llm-call")]

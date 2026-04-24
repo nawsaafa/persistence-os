@@ -108,3 +108,47 @@ after sanitization. Track plan `:track/plan` vector: 8405 chars, bracket-balance
   now accepted (R2 C4). `_python_to_node()` injects `{}` when position 1
   is a list and treats everything from index 1 onward as children.
   Previously rejected with "attrs must be map".
+
+## Schema evolution & id stability (contract)
+
+`Node.id` is pinned to: `sha256(canonical-json(_canonical_dict(node)))[:ID_HEX_WIDTH]`
+— where `ID_HEX_WIDTH = 32` (see `_ast.py:ID_HEX_WIDTH`) and the canonical
+JSON uses `sort_keys=True`, `separators=(",", ":")`, `allow_nan=False`.
+Anything that changes those inputs changes every persisted id.
+
+**Breaking changes** — would move `Node.id` for the same logical node.
+Downstream stores that key off `Node.id` must re-hash:
+
+- Attr-name rename (e.g. `prompt` → `message`). `_canonical_dict` serializes
+  attrs verbatim; a rename rehashes.
+- Any change to `_canonical_dict` serialization — field ordering, type
+  coercion, null handling, nested-Node handling in attrs.
+- Hash algorithm swap (sha256 → blake3) or width change (e.g. 32 → 40 hex).
+- Adding a new structural attr that participates in canonical form —
+  `original-tag` (R3-M3) is a recent example: it IS canonicalized because
+  it sits in `node.attrs`, so enabling alias lowering on a pre-existing
+  plan regenerates ids for the aliased nodes only.
+- Alias-lowering policy change (toggling the `original-tag` injection
+  on/off, changing which aliases are lowered at read time).
+
+**Preserving changes** — safe, will NOT move `Node.id`:
+
+- Visitor / walker logic (`_interpret.py`).
+- Error-message text on `ParseError` / `PlanSpecError`.
+- Parser whitespace / comment handling (EDN input-side only).
+- CHANGELOG / docstring edits.
+- New attr names that are reserved (`:id`, any future `:meta-*` family)
+  and explicitly stripped before `_canonical_dict` — see the
+  `{"id", ":id"}` strip in `_python_to_node`.
+
+**Version contract for external pinners.** Callers that persist `Node.id`
+should pin `persistence.plan ~= 0.2` (or `~= 0.Y` for whatever minor
+they first tested against). Minor and patch bumps within the same
+major preserve ids; a major bump (`0.x` → `1.0`, or `1.x` → `2.0`)
+signals an id-space break.
+
+**Future breaking-change plan.** If a canonical-form change becomes
+unavoidable, the migration path is to add a parallel id namespace
+(`:id@v2` alongside `:id@v1` in the spec) plus a migration helper
+`recompute_ids(node, target="v1" | "v2")`. This keeps old persisted
+ids queryable while letting new writes adopt the new form.

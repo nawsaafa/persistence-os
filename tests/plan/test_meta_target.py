@@ -5,29 +5,27 @@ When this test passes, persistence.plan has honored the track thesis:
 'this plan IS the first test case for the Plan module. When plan/eval can
 execute this file, Phase 3 ships by definition.' v0.1 delivers parse + walk.
 
-## v0.1 parsing status (findings from Task 22 investigation)
+## v0.1 parsing status (after R2 C4 — both blockers closed)
 
-The track plan.edn exercises three EDN features beyond v0.1 parse scope:
+The track plan.edn exercises three EDN features beyond strict-spec parse
+scope; all three are handled at the parser layer:
 
 1. **EDN quote reader macro** ``'[datom-schema -> interceptor-py]``
-   edn_format raises ``Illegal character '''`` on this Clojure-style reader macro.
-   Workaround: strip ``'[`` → ``[`` before parsing (safe for the :track/plan vector).
-   Applied in ``_sanitize_edn_quotes()``.
+   edn_format raises ``Illegal character '''`` on this Clojure-style reader
+   macro. Workaround: strip ``'[`` → ``[`` before parsing (safe for the
+   :track/plan vector). Applied in ``_sanitize_edn_quotes()``.
 
-2. **Bare :seq nodes** — ``[:seq [:tool-call ...] ...]`` without an attrs dict at
-   position 1. The v0.1 parser enforces shape ``[tag, dict, *children]`` per spec.
-   Track plan.edn uses the shorthand form. Fix: ``_normalize_bare_nodes()``.
-   **Deferred to v0.2** — tracked as consumer-driven scope item.
+2. **Bare :seq nodes** — ``[:seq [:tool-call ...] ...]`` without an attrs
+   dict at position 1. R2 C4: ``_python_to_node()`` injects ``{}`` when
+   position 1 is a list and treats index 1+ as children. Malformed shapes
+   with a non-list, non-dict at position 1 still raise the original error.
 
-3. **EDN Symbol type** — ``->`` (in the signature lists after quote-stripping) is
-   an ``edn_format.Symbol``, not handled by ``_edn_to_python()``.  ``json.dumps``
-   raises ``TypeError: Object of type Symbol is not JSON serializable`` when
-   ``Node.id`` tries to hash the canonical dict.
-   **Deferred to v0.2** — tracked as consumer-driven scope item.
+3. **EDN Symbol type** — ``->`` in signature lists after quote-stripping
+   is an ``edn_format.Symbol``. R2 C4: ``_edn_to_python()`` stringifies
+   ``Symbol`` instances so ``json.dumps`` in ``Node.id`` stays total.
 
-Tests in this file reflect real capability at each level, not silence.
-``test_track_plan_vector_parses`` is ``xfail`` on the two v0.2 items above and
-passes structurally once both are resolved.
+``test_track_plan_vector_parses`` exercises the end-to-end parse+walk of
+the actual track plan.edn.
 """
 from __future__ import annotations
 
@@ -137,30 +135,19 @@ class TestMetaTarget:
             f"Unexpected bare quotes after sanitization: {remaining_quotes}"
         )
 
-    @pytest.mark.xfail(
-        reason=(
-            "v0.2 scope — two EDN features block full walk: "
-            "(1) bare :seq nodes without attrs dict ([:seq [:child ...]] shorthand); "
-            "(2) edn_format.Symbol type in :signature attrs not JSON-serializable. "
-            "Both need v0.2 fixes: _python_to_node() must inject {} for bare sequences, "
-            "and _edn_to_python() must convert Symbol to str. "
-            "This xfail pins scope — remove when v0.2 ships both fixes."
-        ),
-        strict=True,
-    )
     def test_track_plan_vector_parses(self):
-        """If the track file has a parseable :track/plan vector, extract and parse it.
-        This tests the actual meta-target: plan-as-data round-tripping through plan.parse.
+        """The meta-target: parse the track's own plan.edn end-to-end.
 
-        BLOCKED (strict=True xfail) on two v0.2 consumer-driven scope items:
+        R2 C4 shipped the two parser capabilities this needs:
 
-        1. Bare :seq shorthand: ``[:seq [:tool-call ...]]`` — no attrs dict at pos 1.
-           Parser raises: ``ParseError: node attrs must be map, got list``
-           Fix: _python_to_node() inserts {} when position 1 is a vector, not a dict.
+        1. Bare ``[:seq [child] [child] ...]`` shorthand. _python_to_node
+           injects ``{}`` when position 1 is a list (children), not a dict
+           (attrs). Only applied when the position-0 tag is keyword-form,
+           so malformed shapes still raise the original "attrs must be map".
 
-        2. Symbol type serialization: ``->`` in signature lists is edn_format.Symbol,
-           not str. json.dumps raises TypeError in Node.id (canonical hash).
-           Fix: _edn_to_python() converts Symbol to str("->").
+        2. ``edn_format.Symbol`` coercion to ``str``. _edn_to_python sees
+           ``->`` in a quoted signature and stringifies it. json.dumps no
+           longer chokes on Symbol when Node.id is computed.
         """
         edn_text = TRACK_PLAN_PATH.read_text()
         _, _, plan_vector_edn = _extract_track_plan_vector(edn_text)

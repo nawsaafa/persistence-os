@@ -99,8 +99,11 @@ after sanitization. Track plan `:track/plan` vector: 8405 chars, bracket-balance
 - Walker is pure depth-first; no parallelism for `:par`, no MCTS for
   `:branch`, no unrolling for `:loop`. Executor semantics land in later
   phases.
-- `edn_format.Symbol` not handled in `_edn_to_python()` — bare EDN symbols
-  like `->` pass through as opaque objects, breaking `Node.id` JSON
-  serialization. Consumer-driven scope item for v0.2.
-- Bare node shorthand `[:seq child1 child2]` (no attrs dict) rejected at
-  parse time. Consumer-driven scope item for v0.2.
+- `edn_format.Symbol` handled by `_edn_to_python()` via ``str(symbol)``
+  coercion (R2 C4). Symbols like ``->`` now survive through Node.id and
+  unparse paths. Previously a consumer-driven v0.2 scope item; shipped
+  in v0.1 so the meta-target can parse end-to-end.
+- Bare node shorthand `[:tag child1 child2]` (no attrs dict at position 1)
+  now accepted (R2 C4). `_python_to_node()` injects `{}` when position 1
+  is a list and treats everything from index 1 onward as children.
+  Previously rejected with "attrs must be map".

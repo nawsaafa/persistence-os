@@ -47,6 +47,9 @@ def _edn_to_python(obj: Any) -> Any:
     """Recursively convert edn_format objects to plain Python values.
 
     - edn_format.Keyword → ":name" string form (name already includes namespace/local)
+    - edn_format.Symbol → bare str("name") — EDN symbols like ``->`` appear in
+      quoted signatures and have no Python-native equivalent; stringifying
+      keeps them JSON-serializable (Node.id needs json.dumps to work).
     - edn_format.ImmutableDict → dict with keyword keys converted to plain strings
     - edn_format.ImmutableList → list of converted values
     - list/tuple → list of converted values (defensive)
@@ -55,6 +58,10 @@ def _edn_to_python(obj: Any) -> Any:
     if isinstance(obj, edn_format.Keyword):
         # obj.name already holds "namespace/localname" for namespaced keywords
         return f":{obj.name}"
+    if isinstance(obj, edn_format.Symbol):
+        # Stringify bare symbols like '-> so json.dumps can serialize them.
+        # Symbols have no canonical Python type; str() preserves the name.
+        return str(obj)
     if isinstance(obj, edn_format.ImmutableDict):
         # Keyword keys become plain string attr names (strip leading colon).
         # Keyword values stay as ":name" strings.
@@ -83,7 +90,18 @@ def _python_to_node(obj: Any) -> Node:
         raise ParseError(f"node tag must be keyword, got {tag!r}")
 
     attrs_raw = obj[1]
-    if not isinstance(attrs_raw, dict):
+    # Bare-shorthand [:tag [child] [child] ...]: when position 1 is a list,
+    # we treat everything from index 1 onward as children and inject an empty
+    # attrs dict. Only applied when index 1 is a list AND the tag is keyword-
+    # form (the tag check above already guarded that) — malformed shapes with
+    # a non-list, non-dict at position 1 still raise the original error.
+    # Motivation: the ai-box track plan.edn uses this shorthand pervasively;
+    # rejecting it blocked the meta-target.
+    children_start = 2
+    if isinstance(attrs_raw, list):
+        attrs_raw = {}
+        children_start = 1
+    elif not isinstance(attrs_raw, dict):
         raise ParseError(f"node attrs must be map, got {type(attrs_raw).__name__}: {attrs_raw!r}")
 
     # User-supplied :id is ignored; content-addressing computes :id canonically.
@@ -98,7 +116,7 @@ def _python_to_node(obj: Any) -> Node:
     # belt-and-braces guard.
     attrs_raw = {k: v for k, v in attrs_raw.items() if k not in ("id", ":id")}
 
-    children_raw = obj[2:]
+    children_raw = obj[children_start:]
     children = tuple(_python_to_node(c) for c in children_raw)
 
     return Node(tag=tag, attrs=attrs_raw, children=children)

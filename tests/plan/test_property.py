@@ -54,7 +54,14 @@ _CONTAINER_KINDS = (":seq", ":par", ":choice", ":loop", ":race", ":let", ":branc
 # can emit safely. Broader EDN keyword coverage is out of scope for the
 # content-addressing properties — any legal key shape exercises the same
 # canonical-form logic.
-_attr_key_strat = st.from_regex(r"[a-z][a-z0-9_-]{0,7}", fullmatch=True)
+#
+# 'id' is excluded: it is reserved as the computed content-address key and
+# rejected at Node construction (symmetric with the parser's :id strip).
+# Generating it here would fail Node construction inside the strategy itself
+# rather than exercise the round-trip property under test.
+_attr_key_strat = st.from_regex(r"[a-z][a-z0-9_-]{0,7}", fullmatch=True).filter(
+    lambda k: k != "id"
+)
 
 
 def _scalar_strat() -> st.SearchStrategy[Any]:

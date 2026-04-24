@@ -71,6 +71,27 @@ class TestAttrKeyShape:
         with pytest.raises(ValueError, match="plain strings"):
             Node(tag=":x", attrs={"": "bad"}, children=())
 
+    def test_reserved_id_attr_rejected_at_construction(self):
+        """'id' is reserved — Node.id is content-addressed and computed.
+
+        Closes the construct-vs-parse asymmetry that let
+        ``Node(tag=':seq', attrs={'id': None})`` round-trip to a different
+        Node.id (Prop 5 Hypothesis falsifier, v0.2.0a3). The parser strips
+        both ``id`` and ``:id`` at parse time; construction rejects them
+        symmetrically so internal callers cannot bypass that strip.
+        """
+        # Bare 'id' (what _edn_to_python would produce from :id)
+        with pytest.raises(ValueError, match="reserved"):
+            Node(tag=":seq", attrs={"id": "anything"}, children=())
+        with pytest.raises(ValueError, match="reserved"):
+            Node(tag=":seq", attrs={"id": None}, children=())
+        # Belt-and-braces: raw ':id' form also rejected with the same
+        # reserved-key message (not the generic 'strip the colon' advice,
+        # which would send the user in a circle since stripping yields 'id'
+        # which is itself rejected).
+        with pytest.raises(ValueError, match="reserved"):
+            Node(tag=":seq", attrs={":id": "anything"}, children=())
+
 
 from persistence.plan._ast import _canonical_dict
 

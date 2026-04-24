@@ -58,11 +58,16 @@ class Node:
             raise ValueError(
                 f"Node.tag must be keyword-form string like ':seq', got {self.tag!r}"
             )
-        # Validate attr keys — plain strings, no leading colon, non-empty.
+        # Validate attr keys — plain strings, no leading colon, non-empty,
+        # not the reserved content-addressed 'id' key.
         # Content-addressing forbids ambiguity: {":prompt": v} vs {"prompt": v}
         # would hash differently despite meaning the same thing. Non-string keys
         # (int, None, bytes) would canonical-serialize through str() and could
-        # likewise collide with their str-equivalents. Reject all three here.
+        # likewise collide with their str-equivalents. And 'id' (or its colon-
+        # prefixed form ':id') is reserved — Node.id is the computed content
+        # address, not an author-supplied attr. The parser strips both forms
+        # at parse time (_parse.py::_python_to_node); construction rejects
+        # them symmetrically so internal callers cannot bypass the strip.
         for k in self.attrs.keys():
             if not isinstance(k, str):
                 raise ValueError(
@@ -73,6 +78,13 @@ class Node:
                 raise ValueError(
                     f"Node.attrs keys must be plain strings without leading colon; "
                     f"got empty string"
+                )
+            if k == "id" or k == ":id":
+                raise ValueError(
+                    "Node.attrs key 'id' is reserved — Node.id is "
+                    "content-addressed and computed, not author-supplied. "
+                    "Parser strips both `id` and `:id` at parse time; "
+                    "construction rejects them symmetrically."
                 )
             if k.startswith(":"):
                 raise ValueError(

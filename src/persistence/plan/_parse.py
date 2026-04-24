@@ -128,6 +128,12 @@ def _python_to_node(obj: Any) -> Node:
     # Strip both the keyword-stripped form ("id") and the defensive raw form
     # (":id") — the former is what _edn_to_python produces, the latter a
     # belt-and-braces guard.
+    #
+    # DEFENSE IN DEPTH — DO NOT REMOVE. This strip defends the parse boundary
+    # against external EDN input that carries :id (hash poisoning). A separate
+    # layer in Node.__post_init__ rejects the same keys for internal API
+    # callers so the two entry points are symmetric: external EDN is cleaned
+    # (silent strip), internal construction is rejected (loud error).
     attrs_raw = {k: v for k, v in attrs_raw.items() if k not in ("id", ":id")}
 
     children_raw = obj[children_start:]

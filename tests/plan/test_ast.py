@@ -107,6 +107,48 @@ class TestNodeId:
         assert a.id != b.id
 
 
+class TestNonFiniteFloatsRejected:
+    """Content-addressing requires deterministic equality.
+
+    NaN ≠ NaN in Python, so two "identical" Nodes containing NaN would
+    hash-collide but compare non-equal — invalidating Claim 1 (Merkle
+    DAG). Infinity serializes as JSON ``Infinity`` which is not strict
+    JSON and cannot round-trip either. Reject both at ``Node.id`` time.
+    """
+
+    def test_nan_in_attrs_rejects(self):
+        n = Node(tag=":llm-call", attrs={"v": float("nan")}, children=())
+        with pytest.raises(ValueError, match="non-finite"):
+            n.id
+
+    def test_positive_inf_in_attrs_rejects(self):
+        n = Node(tag=":llm-call", attrs={"v": float("inf")}, children=())
+        with pytest.raises(ValueError, match="non-finite"):
+            n.id
+
+    def test_negative_inf_in_attrs_rejects(self):
+        n = Node(tag=":llm-call", attrs={"v": float("-inf")}, children=())
+        with pytest.raises(ValueError, match="non-finite"):
+            n.id
+
+    def test_nan_in_nested_attrs_rejects(self):
+        """Non-finite floats anywhere in the nested attr structure fail."""
+        n = Node(
+            tag=":tool-call",
+            attrs={"args": {"timeout": float("nan")}},
+            children=(),
+        )
+        with pytest.raises(ValueError, match="non-finite"):
+            n.id
+
+    def test_nan_in_child_attrs_rejects(self):
+        """Recursion propagates non-finite rejection."""
+        bad_child = Node(tag=":llm-call", attrs={"v": float("inf")}, children=())
+        parent = Node(tag=":seq", attrs={}, children=(bad_child,))
+        with pytest.raises(ValueError, match="non-finite"):
+            parent.id
+
+
 import subprocess
 import sys
 

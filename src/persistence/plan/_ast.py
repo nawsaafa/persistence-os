@@ -57,12 +57,29 @@ class Node:
         Matches persistence.replay._canonical pattern: json.dumps with
         sort_keys=True, separators=(',', ':'). Two Nodes with identical
         content hash-collide — that IS the content-addressing contract.
+
+        Non-finite floats (NaN, Inf, -Inf) in attrs are rejected: NaN
+        violates reflexive equality (NaN != NaN), which would make two
+        content-equal Nodes hash-collide but compare non-equal,
+        invalidating the Merkle DAG claim. Inf/-Inf cannot round-trip
+        through strict JSON. We pass ``allow_nan=False`` to ``json.dumps``
+        and surface a domain-specific error when it trips.
         """
-        canonical = json.dumps(
-            _canonical_dict(self),
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        try:
+            canonical = json.dumps(
+                _canonical_dict(self),
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except ValueError as exc:
+            # json.dumps raises ValueError("Out of range float values ...")
+            # on NaN/Inf when allow_nan=False. Re-raise with plan-specific
+            # message so callers can match on it.
+            raise ValueError(
+                "Node.id: non-finite float (NaN/Inf) in attrs is not allowed; "
+                "content-addressing requires reflexive equality"
+            ) from exc
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         return digest[:16]
 

@@ -1,5 +1,54 @@
 # persistence.plan CHANGELOG
 
+## v0.2.0a3 (2026-04-24) — Prop 5 round-trip falsifier closed
+
+Closes a Hypothesis-found falsifier for Claim 2 (round-trip preserves
+`Node.id`). No API additions; one tightening of the construct-time
+contract.
+
+- **Falsifier.** `Node(tag=':seq', attrs={'id': None})` round-tripped to a
+  Node with a different `Node.id`. Trace:
+  `Node(attrs={'id': None})` → id_A (canonical form includes `id`) →
+  `unparse` emits `[:seq {:id nil}]` → `parse` strips `:id` from attrs →
+  `Node(attrs={})` → id_B ≠ id_A.
+- **Root cause.** Construct-vs-parse asymmetry. `_parse.py::_python_to_node`
+  strips both `id` and `:id` from incoming EDN attrs (hash-poisoning
+  defense). But `Node.__post_init__` accepted the bare key `id` at
+  construction, letting internal callers create a Node whose canonical
+  form carried `id` but whose round-trip would not.
+- **Fix (Option A — reject at construct time).**
+  `Node.__post_init__` now rejects attrs keys `"id"` and `":id"` with a
+  dedicated reserved-key error. The existing `:foo` leading-colon error
+  still fires for other colon-prefixed keys (with the "strip the ':'"
+  advice) — but `:id` and `id` now emit the same reserved-key message
+  rather than sending the user in a circle (stripping `:id` yields `id`
+  which is also rejected). The parser's strip-at-parse remains in place
+  as a defense-in-depth layer for external EDN input (hash-poisoning
+  defense; see comment at `_parse.py::_python_to_node`). Two layers,
+  symmetric: external EDN is cleaned silently, internal construction is
+  rejected loudly.
+- **Hypothesis strategy fix.** `tests/plan/test_property.py::_attr_key_strat`
+  now filters out `"id"` so the strategy generates only legal attr keys.
+- **New test.** `tests/plan/test_ast.py::TestAttrKeyShape::
+  test_reserved_id_attr_rejected_at_construction` covers both `id` and
+  `:id` forms at construction time.
+
+### Forward id-stability note
+
+This is an id-breaking change for any Node that was constructed with
+`attrs={'id': X}` pre-fix — but no consumers are in that state. v0.2.0a2
+and earlier ship-side tests rejected this node shape at the parse
+boundary (`_python_to_node` strip), so no persisted id in the wild
+depends on `id` being present in canonical form. The fix tightens the
+construct-time contract to match the parse-time one; nothing downstream
+rehashed. Consistent with the "reserved attrs rejected" clause of the
+R3-M5 schema-evolution contract at the bottom of this CHANGELOG.
+
+### Tests
+
+783 passed, 7 xfailed full repo. Re-runs clean after
+`rm -rf .hypothesis` (no cached falsifier).
+
 ## v0.2.0a2 (2026-04-24) — hardening micro-batch
 
 Closes 3 R3 MAJORs deferred from the v0.2.0a1 gate. No behavior change for the

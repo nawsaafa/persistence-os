@@ -66,9 +66,16 @@ class TestCanonicalDict:
 
 
 class TestNodeId:
-    def test_id_is_16_hex_chars(self):
+    def test_id_is_32_hex_chars(self):
+        """128-bit truncation of sha256.
+
+        Birthday-collision probability of 1% reached at ~2×10^18 plans;
+        widened from 64-bit (16 hex) in R2 because the smaller width put
+        content-addressing at ~6×10^8 plans — too narrow to back the
+        Merkle-DAG paper claim against adversarial inputs.
+        """
         n = Node(tag=":seq", attrs={}, children=())
-        assert len(n.id) == 16
+        assert len(n.id) == 32
         assert all(c in "0123456789abcdef" for c in n.id)
 
     def test_identical_nodes_have_identical_id(self):
@@ -181,4 +188,4 @@ class TestIdDeterminism:
         id_a = run_in_subprocess()
         id_b = run_in_subprocess()
         assert id_a == id_b
-        assert len(id_a) == 16
+        assert len(id_a) == 32

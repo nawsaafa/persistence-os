@@ -16,6 +16,11 @@ def _freeze_attrs(attrs: Mapping[str, Any] | None) -> Mapping[str, Any]:
     return MappingProxyType(dict(attrs))
 
 
+#: sha256 truncation width (hex chars). 32 = 128 bits. Exposed as a module
+#: constant so callers can assert against it rather than hard-coding.
+ID_HEX_WIDTH: int = 32
+
+
 @dataclass(frozen=True, slots=True)
 class Node:
     """Immutable plan AST node.
@@ -25,8 +30,18 @@ class Node:
         attrs:    attributes map (keyword-keyed strings → arbitrary values)
         children: ordered tuple of child Nodes (possibly empty)
 
-    The :id property is a 16-hex-char sha256 prefix of the canonical form
-    (see _canonical_dict + _id_hex). Two Nodes with identical content hash-collide.
+    The :id property is a 32-hex-char (128-bit) sha256 prefix of the
+    canonical form (see _canonical_dict). Content-addressing contract:
+
+    - :id = sha256(canonical-json(tag, attrs, children-ids-recursive))[:32]
+    - Two Nodes with identical content hash-identically; different content
+      hashes to a different :id with probability ~(1 - 2^-128) per pair.
+    - Birthday-collision probability 1% reached at ~2×10^18 plans; the
+      widened width is what lets the paper back the Merkle-DAG claim
+      against adversarial inputs without requiring rehash checks.
+    - Non-finite floats (NaN, Inf) in attrs are rejected at :id time —
+      NaN != NaN would let two content-equal Nodes hash-collide yet compare
+      non-equal.
     """
 
     tag: str
@@ -52,11 +67,17 @@ class Node:
 
     @property
     def id(self) -> str:
-        """16-hex-char sha256 prefix of canonical form.
+        """32-hex-char (128-bit) sha256 prefix of canonical form.
 
         Matches persistence.replay._canonical pattern: json.dumps with
         sort_keys=True, separators=(',', ':'). Two Nodes with identical
         content hash-collide — that IS the content-addressing contract.
+
+        Width: 128 bits (32 hex chars). See ID_HEX_WIDTH. The birthday-
+        collision argument: for P(collision) ≤ 1%, N ≤ sqrt(2 * 2^128 * 0.01)
+        ≈ 2.6×10^18 plans. Widened from 64-bit (16 hex) in R2 because the
+        narrower form only covered ~6×10^8 plans before adversarial
+        collision risk — insufficient to back the paper's Merkle-DAG claim.
 
         Non-finite floats (NaN, Inf, -Inf) in attrs are rejected: NaN
         violates reflexive equality (NaN != NaN), which would make two
@@ -81,7 +102,7 @@ class Node:
                 "content-addressing requires reflexive equality"
             ) from exc
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return digest[:16]
+        return digest[:ID_HEX_WIDTH]
 
 
 def _canonical_dict(node: Node) -> dict[str, Any]:

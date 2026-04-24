@@ -158,7 +158,7 @@ class TestSpecValidation:
         assert ":id" not in n.attrs
         assert "id" not in n.attrs
         # But Node.id is always available (computed)
-        assert len(n.id) == 16
+        assert len(n.id) == 32
 
 
 class TestUserSuppliedIdStripped:

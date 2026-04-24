@@ -5,8 +5,13 @@
 First release of the homoiconic plan AST module. Commits to three claims:
 
 1. **Content-addressed Merkle DAGs.** Every `Node` carries a deterministic
-   16-hex-char sha256 `:id` derived from canonical JSON form (sort_keys,
-   no whitespace, pattern matches `persistence.replay._canonical`).
+   32-hex-char (128-bit) sha256 `:id` derived from canonical JSON form
+   (sort_keys, no whitespace, `allow_nan=False`, pattern matches
+   `persistence.replay._canonical`). Birthday-collision probability 1%
+   is reached at ~2.6×10^18 plans. Non-finite floats (NaN, Inf) are
+   rejected at `:id` time to preserve reflexive equality. User-supplied
+   `:id` in parsed EDN is stripped — the module computes `:id`, not the
+   caller.
 2. **Byte-identical round-trip.** `unparse(parse(x)) == x` for canonical inputs.
    Canonical form: sorted attrs keys, single-space separator, no extraneous whitespace.
 3. **Spec validation.** Parse-time conformance against the registered
@@ -15,9 +20,27 @@ First release of the homoiconic plan AST module. Commits to three claims:
    computed `:id` ephemerally so `Node.attrs` stays uncluttered while the spec
    sees the canonical `[tag {:id ...} *children]` shape it validates.
 
+### R2 fix-pass changes (pre-GA, no consumers yet)
+
+- **Node.id widened 16 → 32 hex (64 → 128 bit).** Breaking vs R1 preview,
+  but the module has not shipped a GA so no downstream depends on the
+  narrower width. The `:persistence.spec/sha256` regex already accepts
+  variable-length hex, so no spec change was needed.
+- **NaN/Inf rejected in attrs.** `Node.id` on a Node containing non-finite
+  floats raises `ValueError("non-finite float ...")` instead of silently
+  producing a hash that compares non-equal to itself.
+- **User `:id` stripped at parse time.** Parsing EDN with `{:id "x"}` no
+  longer leaks the user string into `Node.attrs`; `:id` is always
+  content-addressed. Closes two attack vectors (Canonical poisoning +
+  spec-validation clobber via attrs.items() iteration in _to_vector_form).
+- **Attr key shape validated.** `Node.attrs` keys must be plain strings
+  without leading colon. `Node(attrs={':foo': ...})` or `{1: ...}` now
+  raises at construction time.
+
 ### Public API
 
 - `Node` — immutable dataclass (tag, attrs, children) with `.id` computed property
+- `ID_HEX_WIDTH: int = 32` — module constant (use instead of hard-coding)
 - `parse(edn_text, *, lower_aliases=None, strict=True)` — EDN text → Node
 - `unparse(node)` — Node → canonical EDN text
 - `walk(node, visitor=None)` — depth-first traversal, returns ordered `:id` list

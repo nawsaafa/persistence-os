@@ -201,13 +201,15 @@ def _to_vector_form(node: Node) -> list:
 
     Internal Node uses plain-string attr keys like "prompt"; the spec
     demands keyword-form keys like ":prompt". We prepend ':' at emit time.
-    Injects :id derived from Node.id (16 hex chars → "sha256:<hex>").
+    Injects :id derived from Node.id (32 hex chars / 128-bit → "sha256:<hex>";
+    see ``ID_HEX_WIDTH`` and Node.id docstring).
     """
     keyword_attrs: dict[str, Any] = {":id": f"sha256:{node.id}"}
     for k, v in node.attrs.items():
-        # Attr keys in internal Node are plain strings (no leading ':');
-        # spec requires keyword-form keys — prepend ':' unless already present.
-        key = k if k.startswith(":") else f":{k}"
+        # Attr keys in internal Node are plain strings (no leading colon) —
+        # `Node.__post_init__` enforces this. Prepend ':' unconditionally to
+        # re-keyword-form at the spec/vector boundary.
+        key = f":{k}"
         keyword_attrs[key] = v
     return [node.tag, keyword_attrs, *(_to_vector_form(c) for c in node.children)]
 

@@ -208,6 +208,26 @@ class TestUserSuppliedIdStripped:
         assert ":id" not in n.attrs
         assert n.attrs.get("name") == "n"
 
+    def test_payload_id_in_args_survives(self):
+        """Payload :id nested in attrs (e.g. a tool arg) is data, not Node identity.
+
+        Contract: only the TOP-LEVEL :id on a Node is the content-address handle
+        (stripped at parse time and recomputed). Nested maps inside attr values
+        are opaque payload — a `:id` key there survives untouched.
+
+        Regression pin: the :id-stripping in `_python_to_node` must NOT recurse
+        into attr values. If it did, a tool call that legitimately needed to
+        carry an external reference id would silently lose it.
+        """
+        edn = '[:tool-call {:tool :http/get :args {:id "ref-123" :limit 5}}]'
+        node = parse(edn, strict=False)
+        # Top-level :id was never in the source, so the strip is a no-op at
+        # the Node level; the load-bearing assertion is about nested payload.
+        assert "id" not in node.attrs
+        assert ":id" not in node.attrs
+        # The nested :id survives as opaque data inside the args map.
+        assert node.attrs["args"] == {"id": "ref-123", "limit": 5}
+
 
 class TestParseAllNodeKindsMalformed:
     """Per-kind malformed coverage — every known kind has a shape the

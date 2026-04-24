@@ -60,12 +60,13 @@ First release of the homoiconic plan AST module. Commits to three claims:
 
 ### Tests
 
-94 passed, 8 xfailed in `tests/plan/`:
+151 passed, 7 xfailed in `tests/plan/` (776 passed, 7 xfailed full repo):
 - `test_ast.py` — Node construction, canonical form, :id (content-addressing)
 - `test_parse.py` — parse, unparse, round-trip, spec validation, alias lowering
 - `test_interpret.py` — walk order, visitor, unimplemented kinds
 - `test_meta_target.py` — parse the track's own plan.edn (3 pass, 1 xfail)
 - `test_misc.py` — unicode, deep nesting, edge cases (7 pass)
+- `test_property.py` — hypothesis property tests for claims 1 + 2 (R2 M4)
 
 ### Meta-target findings (test_meta_target.py)
 

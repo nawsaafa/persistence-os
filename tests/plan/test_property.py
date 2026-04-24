@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import edn_format
 import hypothesis.strategies as st
 import pytest
 from hypothesis import given, settings, HealthCheck
@@ -125,7 +126,7 @@ def plan_node_strat(draw, max_depth: int = 3) -> Node:
 # ---------------------------------------------------------------------------
 
 @given(node=plan_node_strat())
-@settings(max_examples=50, deadline=1000, suppress_health_check=[HealthCheck.too_slow])
+@settings(max_examples=200, deadline=2000, suppress_health_check=[HealthCheck.too_slow])
 def test_round_trip_preserves_id(node: Node):
     """Claim 2 — parse(unparse(n), strict=False).id == n.id for any Node.
 
@@ -252,7 +253,7 @@ def _ancestor_chain_ids(node: Node) -> list[str]:
 
 
 @given(node=plan_node_strat(max_depth=4), sentinel=st.text(min_size=3, max_size=6, alphabet="abcdef"))
-@settings(max_examples=40, deadline=1500, suppress_health_check=[HealthCheck.too_slow])
+@settings(max_examples=200, deadline=3000, suppress_health_check=[HealthCheck.too_slow])
 def test_descendant_mutation_propagates(node: Node, sentinel: str):
     """Mutating the deepest-left leaf changes the id of EVERY node on the
     path from root to that leaf — the Merkle-DAG recursion invariant.
@@ -275,3 +276,43 @@ def test_descendant_mutation_propagates(node: Node, sentinel: str):
             f"ancestor at depth {i} failed to propagate change\n"
             f"before={before}\nafter={after}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Symbol-in-attrs regression pin (not a hypothesis property)
+# ---------------------------------------------------------------------------
+#
+# The hypothesis strategies above build Nodes directly in Python with
+# JSON-safe scalars. `edn_format.Symbol` is NOT JSON-serializable, so
+# injecting it into `plan_attr_value_strat` would break `Node.id` at
+# construction time (json.dumps raises TypeError). The honest place to
+# exercise the Symbol path is at the parse boundary where
+# `_edn_to_python` coerces Symbol → str (commit 7b19cbc, R2 C4).
+#
+# This test is a regression pin for that coercion, not a property.
+
+
+def test_symbol_in_attrs_coerced_to_string_via_parse():
+    """`edn_format.Symbol` in EDN source survives as `str(symbol)` in Node.attrs.
+
+    EDN symbols appear via the quote reader macro (e.g. in signature vectors
+    like `'[datom-schema -> interceptor-py]`). The parser strips the leading
+    quote in `_sanitize_edn_quotes()`, then `edn_format.loads` produces
+    `Symbol` objects for bare identifiers. `_edn_to_python` coerces them to
+    plain strings so `json.dumps` inside `Node.id` succeeds.
+
+    Contract: after parse, no attr value is an `edn_format.Symbol`; any
+    would-be Symbol is a plain string with the symbol's name.
+    """
+    # `->` is a canonical EDN symbol; drop it inside a signature vector so
+    # edn_format tokenizes it as Symbol rather than as part of keyword syntax.
+    edn = '[:llm-call {:signature [datom-schema -> interceptor-py] :prompt "x"}]'
+    node = parse(edn, strict=False)
+    sig = node.attrs["signature"]
+    assert isinstance(sig, list)
+    # No Symbol objects survived the parse boundary.
+    assert not any(isinstance(x, edn_format.Symbol) for x in sig)
+    # Each element is a plain string (name preserved).
+    assert sig == ["datom-schema", "->", "interceptor-py"]
+    # And Node.id succeeds — json.dumps would have raised TypeError pre-fix.
+    assert len(node.id) == 32

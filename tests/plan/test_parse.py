@@ -210,6 +210,65 @@ class TestUserSuppliedIdStripped:
         assert n.attrs.get("name") == "n"
 
 
+class TestParseAllNodeKindsMalformed:
+    """Per-kind malformed coverage — every known kind has a shape the
+    registered :persistence.plan/node spec rejects at strict=True.
+
+    R2 M6 asked for per-kind negative coverage. v0.1 spec enforces
+    SHAPE invariants (tag enum + attrs dict + keyword attr keys +
+    recursive child validation) but not per-kind required attrs
+    (e.g., :tool-call needing :tool). We pick shape-level malformations
+    each kind must reject:
+
+      (a) unknown child tag — recursive child validation fails.
+      (b) malformed attrs (list instead of dict) — NOTE: bare-shorthand
+          fix in R2 C4 makes ``[:tag [child]]`` legal; so (b) needs a
+          shape that can't be confused with shorthand — a string at
+          position 1.
+      (c) non-keyword-form children — bare keyword at child position.
+
+    We use shape (a): every kind is tested with a malformed :not-a-real-kind
+    child. The parent tag drives the parametrize so each kind exercises
+    the spec independently.
+    """
+
+    PLAN_KINDS_WITH_CHILDREN = [
+        ":seq", ":par", ":choice", ":loop", ":race", ":let", ":branch", ":case",
+    ]
+
+    @pytest.mark.parametrize("parent_tag", PLAN_KINDS_WITH_CHILDREN)
+    def test_kind_with_malformed_child_rejected(self, parent_tag: str):
+        """Every kind that accepts children recursively validates them."""
+        edn = f"[{parent_tag} {{}} [:not-a-real-kind {{}}]]"
+        with pytest.raises(PlanSpecError):
+            parse(edn, strict=True)
+
+    PLAN_LEAF_KINDS = [
+        ":tool-call", ":llm-call", ":code", ":checkpoint",
+        ":reflect", ":verify", ":call-skill", ":ref",
+    ]
+
+    @pytest.mark.parametrize("leaf_tag", PLAN_LEAF_KINDS)
+    def test_leaf_kind_rejects_non_dict_attrs(self, leaf_tag: str):
+        """Every leaf kind rejects a string at position 1 (cannot be bare
+        shorthand because shorthand requires a list, not a string)."""
+        edn = f'[{leaf_tag} "not-a-map"]'
+        with pytest.raises(ParseError, match="attrs must be map"):
+            parse(edn, strict=True)
+
+    @pytest.mark.parametrize("tag", [
+        ":seq", ":par", ":choice", ":loop", ":race", ":let", ":branch", ":case",
+        ":tool-call", ":llm-call", ":code", ":checkpoint",
+        ":reflect", ":verify", ":call-skill", ":ref",
+    ])
+    def test_every_kind_wrong_tag_case_rejected(self, tag: str):
+        """Tag case-sensitivity: uppercase tag variants not in the enum."""
+        uppercased = tag.upper()
+        edn = f"[{uppercased} {{}}]"
+        with pytest.raises(PlanSpecError):
+            parse(edn, strict=True)
+
+
 class TestSpecValidationMalformed:
     """Each node kind has malformed shapes spec should catch.
 

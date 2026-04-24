@@ -58,6 +58,27 @@ class Node:
             raise ValueError(
                 f"Node.tag must be keyword-form string like ':seq', got {self.tag!r}"
             )
+        # Validate attr keys — plain strings, no leading colon, non-empty.
+        # Content-addressing forbids ambiguity: {":prompt": v} vs {"prompt": v}
+        # would hash differently despite meaning the same thing. Non-string keys
+        # (int, None, bytes) would canonical-serialize through str() and could
+        # likewise collide with their str-equivalents. Reject all three here.
+        for k in self.attrs.keys():
+            if not isinstance(k, str):
+                raise ValueError(
+                    f"Node.attrs keys must be plain strings without leading colon; "
+                    f"got {k!r} ({type(k).__name__})"
+                )
+            if not k:
+                raise ValueError(
+                    f"Node.attrs keys must be plain strings without leading colon; "
+                    f"got empty string"
+                )
+            if k.startswith(":"):
+                raise ValueError(
+                    f"Node.attrs keys must be plain strings without leading colon "
+                    f"(internal convention); got {k!r}. Strip the ':' at parse time."
+                )
         # All children must be Node instances
         for i, child in enumerate(self.children):
             if not isinstance(child, Node):

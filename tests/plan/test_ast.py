@@ -28,6 +28,50 @@ class TestNodeConstruction:
         assert parent.children == (child,)
 
 
+class TestAttrKeyShape:
+    """R1 m2: attr keys must be plain strings without leading colon.
+
+    The internal convention is that attrs keys are the attribute names AFTER
+    keyword-stripping: ``"prompt"`` not ``":prompt"``. Two Nodes constructed
+    with ``{":prompt": "hi"}`` vs ``{"prompt": "hi"}`` would hash differently,
+    so forbidding the ambiguous leading-colon form at construction time is
+    the only way to preserve the Merkle-DAG claim.
+
+    Non-string keys (int, None) are rejected for the same reason: canonical
+    JSON would serialize them through str(), but content-equal Nodes written
+    as {1: "x"} vs {"1": "x"} would hash-collide — ambiguity the content-
+    addressing contract cannot tolerate.
+    """
+
+    def test_str_attr_keys_accepted(self):
+        n = Node(tag=":llm-call", attrs={"prompt": "hi", "model": ":opus"}, children=())
+        assert n.id  # does not raise
+
+    def test_int_attr_key_rejects(self):
+        with pytest.raises(ValueError, match="plain strings"):
+            Node(tag=":x", attrs={1: "bad"}, children=())
+
+    def test_none_attr_key_rejects(self):
+        with pytest.raises(ValueError, match="plain strings"):
+            Node(tag=":x", attrs={None: "bad"}, children=())
+
+    def test_bytes_attr_key_rejects(self):
+        with pytest.raises(ValueError, match="plain strings"):
+            Node(tag=":x", attrs={b"prompt": "bad"}, children=())
+
+    def test_colon_prefixed_attr_key_rejects(self):
+        """`:foo` key is the EDN keyword form — must be stripped to "foo" before
+        construction. Accepting both would yield two distinct canonical hashes
+        for the same logical attribute."""
+        with pytest.raises(ValueError, match="leading colon"):
+            Node(tag=":x", attrs={":foo": "bad"}, children=())
+
+    def test_empty_string_attr_key_rejects(self):
+        """Empty string is a degenerate case that canonical-form can't round-trip."""
+        with pytest.raises(ValueError, match="plain strings"):
+            Node(tag=":x", attrs={"": "bad"}, children=())
+
+
 from persistence.plan._ast import _canonical_dict
 
 
@@ -161,6 +205,32 @@ import sys
 
 
 class TestIdDeterminism:
+    def test_descendant_change_propagates_to_all_ancestors(self):
+        """R1 m1: Merkle-DAG invariant — mutating any leaf propagates to EVERY ancestor.
+
+        Build a 4-level tree, rebuild with the deepest leaf mutated, assert that
+        every ancestor id (including the root) is different. Two consecutive
+        levels with the same id under mutation would signal that the hashing
+        isn't recursive.
+        """
+        leaf_a = Node(tag=":llm-call", attrs={"prompt": "original"}, children=())
+        leaf_b = Node(tag=":llm-call", attrs={"prompt": "mutated"}, children=())
+
+        def build_tree(leaf: Node) -> tuple[Node, Node, Node, Node]:
+            """Return (root, l1, l2, leaf) 4-level deep chain."""
+            l2 = Node(tag=":seq", attrs={}, children=(leaf,))
+            l1 = Node(tag=":seq", attrs={}, children=(l2,))
+            root = Node(tag=":seq", attrs={}, children=(l1,))
+            return root, l1, l2, leaf
+
+        root_a, l1_a, l2_a, _ = build_tree(leaf_a)
+        root_b, l1_b, l2_b, _ = build_tree(leaf_b)
+
+        assert leaf_a.id != leaf_b.id, "sanity: mutated leaf must differ"
+        assert l2_a.id != l2_b.id, "l2 (leaf's parent) must differ"
+        assert l1_a.id != l1_b.id, "l1 (l2's parent) must differ"
+        assert root_a.id != root_b.id, "root must differ"
+
     def test_id_is_deterministic_across_processes(self, tmp_path):
         """Same Node constructed in a fresh Python process → identical :id.
 

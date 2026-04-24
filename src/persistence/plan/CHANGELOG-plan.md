@@ -1,5 +1,25 @@
 # persistence.plan CHANGELOG
 
+## v0.2.0a2 (2026-04-24) — hardening micro-batch
+
+Closes 3 R3 MAJORs deferred from the v0.2.0a1 gate. No behavior change for the
+happy path; two API-surface refinements for downstream substrate-wide catchers.
+
+- **R3-M2: `PlanSpecError` now inherits from `persistence.spec.SpecError`.**
+  Downstream callers can `except SpecError` to catch spec-validation failures
+  from any substrate module uniformly. `exc.conform_error` is preserved for
+  back-compat; `exc.error` (from `SpecError`) points to the same object.
+  `str(exc)` now routes through `_render_error` — one minor surface change.
+- **R3-M3: `:original-tag` escape hatch for alias lowering.** When
+  `lower_aliases` rewrites a tag (e.g. `:phase → :seq`), the original tag
+  is preserved in `attrs["original-tag"]`. Two nodes that differed only by
+  their pre-lowered alias now hash to distinct `Node.id`s — id-space
+  faithfulness restored. Hand-authored `original-tag` is never clobbered.
+  This is an **id-breaking change** for anyone who persisted ids from
+  `v0.2.0a1` output of alias-lowered plans; no consumers in that state yet.
+- **R3-M5: schema-evolution id-stability contract** documented in a
+  dedicated section at the bottom of this CHANGELOG.
+
 ## v0.1 (2026-04-28) — initial release
 
 First release of the homoiconic plan AST module. Commits to three claims:
@@ -108,3 +128,47 @@ after sanitization. Track plan `:track/plan` vector: 8405 chars, bracket-balance
   now accepted (R2 C4). `_python_to_node()` injects `{}` when position 1
   is a list and treats everything from index 1 onward as children.
   Previously rejected with "attrs must be map".
+
+## Schema evolution & id stability (contract)
+
+`Node.id` is pinned to: `sha256(canonical-json(_canonical_dict(node)))[:ID_HEX_WIDTH]`
+— where `ID_HEX_WIDTH = 32` (see `_ast.py:ID_HEX_WIDTH`) and the canonical
+JSON uses `sort_keys=True`, `separators=(",", ":")`, `allow_nan=False`.
+Anything that changes those inputs changes every persisted id.
+
+**Breaking changes** — would move `Node.id` for the same logical node.
+Downstream stores that key off `Node.id` must re-hash:
+
+- Attr-name rename (e.g. `prompt` → `message`). `_canonical_dict` serializes
+  attrs verbatim; a rename rehashes.
+- Any change to `_canonical_dict` serialization — field ordering, type
+  coercion, null handling, nested-Node handling in attrs.
+- Hash algorithm swap (sha256 → blake3) or width change (e.g. 32 → 40 hex).
+- Adding a new structural attr that participates in canonical form —
+  `original-tag` (R3-M3) is a recent example: it IS canonicalized because
+  it sits in `node.attrs`, so enabling alias lowering on a pre-existing
+  plan regenerates ids for the aliased nodes only.
+- Alias-lowering policy change (toggling the `original-tag` injection
+  on/off, changing which aliases are lowered at read time).
+
+**Preserving changes** — safe, will NOT move `Node.id`:
+
+- Visitor / walker logic (`_interpret.py`).
+- Error-message text on `ParseError` / `PlanSpecError`.
+- Parser whitespace / comment handling (EDN input-side only).
+- CHANGELOG / docstring edits.
+- New attr names that are reserved (`:id`, any future `:meta-*` family)
+  and explicitly stripped before `_canonical_dict` — see the
+  `{"id", ":id"}` strip in `_python_to_node`.
+
+**Version contract for external pinners.** Callers that persist `Node.id`
+should pin `persistence.plan ~= 0.2` (or `~= 0.Y` for whatever minor
+they first tested against). Minor and patch bumps within the same
+major preserve ids; a major bump (`0.x` → `1.0`, or `1.x` → `2.0`)
+signals an id-space break.
+
+**Future breaking-change plan.** If a canonical-form change becomes
+unavoidable, the migration path is to add a parallel id namespace
+(`:id@v2` alongside `:id@v1` in the spec) plus a migration helper
+`recompute_ids(node, target="v1" | "v2")`. This keeps old persisted
+ids queryable while letting new writes adopt the new form.

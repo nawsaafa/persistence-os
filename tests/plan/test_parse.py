@@ -160,6 +160,34 @@ class TestSpecValidation:
         assert len(n.id) == 32
 
 
+class TestPlanSpecErrorSharedBase:
+    """R3-M2: PlanSpecError inherits from SpecError so downstream catchers
+    that want to handle 'any persistence-substrate spec-validation failure'
+    can import one symbol, not two.
+    """
+
+    def test_plan_spec_error_is_spec_error(self):
+        """PlanSpecError inherits from SpecError so downstream catchers work uniformly."""
+        from persistence.plan._parse import PlanSpecError
+        from persistence.spec._registry import SpecError
+        assert issubclass(PlanSpecError, SpecError)
+
+    def test_plan_spec_error_caught_as_spec_error(self):
+        """A real plan validation failure is catchable as SpecError and
+        carries both `conform_error` (back-compat) and `error` (from SpecError)."""
+        from persistence.plan import parse
+        from persistence.spec._registry import SpecError
+        # A vector that triggers spec failure (unknown kind).
+        bad = "[:totally-not-a-real-kind {}]"
+        try:
+            parse(bad, strict=True)
+        except SpecError as e:
+            assert hasattr(e, "conform_error")  # back-compat with PlanSpecError pre-R3
+            assert hasattr(e, "error")  # from SpecError parent
+        else:
+            raise AssertionError("parse(..., strict=True) should have raised")
+
+
 class TestUserSuppliedIdStripped:
     """User-supplied :id in EDN must never enter the canonical form.
 
@@ -429,3 +457,59 @@ class TestAliasLowering:
         edn = '[:phase {} [:llm-call {:prompt "x"}]]'
         n = parse(edn, strict=False)
         assert n.tag == ":phase"  # unchanged
+
+
+class TestAliasOriginalTagEscapeHatch:
+    """R3-M3: alias lowering preserves the source tag as ``original-tag``.
+
+    Before R3-M3 two plans that differed only in ``:phase`` vs ``:workstream``
+    (both lowered to ``:seq``) collided under content-addressing — the source
+    tag information was dropped at lowering time. Injecting
+    ``original-tag`` into the rewritten node's attrs makes the lowering
+    lossless-at-rest for ids while still letting the interpreter and spec
+    see a uniform ``:seq``.
+    """
+
+    def test_alias_lowering_preserves_original_tag_in_attrs(self):
+        """R3-M3: aliased tags round-trip via the original-tag escape hatch."""
+        from persistence.plan import parse
+        edn = '[:phase {:prompt "P1"}]'
+        node = parse(edn, lower_aliases={":phase": ":seq"}, strict=False)
+        assert node.tag == ":seq"
+        assert node.attrs.get("original-tag") == ":phase"
+
+    def test_alias_lowering_distinguishes_ids(self):
+        """Two nodes differing only by pre-lowered alias have distinct ids."""
+        from persistence.plan import parse
+        a = parse(
+            '[:phase {:prompt "X"}]',
+            lower_aliases={":phase": ":seq", ":workstream": ":seq"},
+            strict=False,
+        )
+        b = parse(
+            '[:workstream {:prompt "X"}]',
+            lower_aliases={":phase": ":seq", ":workstream": ":seq"},
+            strict=False,
+        )
+        assert a.id != b.id
+
+    def test_alias_lowering_skipped_when_tag_unchanged(self):
+        """A :seq that was never aliased does NOT gain original-tag."""
+        from persistence.plan import parse
+        node = parse(
+            '[:seq {:prompt "X"}]',
+            lower_aliases={":phase": ":seq"},
+            strict=False,
+        )
+        assert "original-tag" not in node.attrs
+
+    def test_alias_lowering_respects_hand_authored_original_tag(self):
+        """If the parsed node already declared :original-tag, it is not clobbered."""
+        from persistence.plan import parse
+        node = parse(
+            '[:phase {:original-tag ":workstream"}]',
+            lower_aliases={":phase": ":seq"},
+            strict=False,
+        )
+        assert node.tag == ":seq"
+        assert node.attrs.get("original-tag") == ":workstream"

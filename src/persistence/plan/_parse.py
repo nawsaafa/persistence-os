@@ -7,25 +7,39 @@ import edn_format
 
 from persistence.plan._ast import Node
 from persistence.plan._errors import ParseError
+from persistence.spec._registry import SpecError
 
 
-class PlanSpecError(Exception):
+class PlanSpecError(SpecError):
     """Raised when a parsed Node fails :persistence.plan/node spec validation.
 
-    Wraps the structured ConformError for programmatic inspection:
+    R3-M2: Inherits from :class:`persistence.spec._registry.SpecError` so a
+    downstream caller that wants to catch "any spec-validation failure from
+    the persistence substrate" can import a single base class and catch
+    both :mod:`persistence.spec.parse` errors and plan-level parse errors
+    uniformly::
+
+        from persistence.spec import SpecError  # or _registry.SpecError
 
         try:
             node = parse(edn, strict=True)
-        except PlanSpecError as exc:
-            print(exc.conform_error.spec_key, exc.conform_error.reason)
+        except SpecError as exc:
+            # Covers both the generic spec parse and plan-specific cases.
+            ...
 
-    The ConformError is also available as ``exc.args[0]`` for generic inspection.
-    The ``spec_key`` property mirrors ``conform_error.spec_key`` for quick access.
+    Back-compat: the original ``conform_error`` attribute is preserved
+    alongside the parent's ``error`` attribute. Both point at the same
+    :class:`ConformError` instance — callers that accessed either keep
+    working.
     """
 
     def __init__(self, conform_error: Any) -> None:
-        self.conform_error = conform_error
+        # SpecError.__init__ sets self.error = conform_error and passes the
+        # rendered form to Exception.__init__.
         super().__init__(conform_error)
+        # Dual-attribute for back-compat: existing callers use
+        # ``exc.conform_error``; parent's ``exc.error`` is the same object.
+        self.conform_error = conform_error
 
     @property
     def spec_key(self) -> Any:
@@ -166,10 +180,26 @@ def parse(
 
 
 def _apply_aliases(node: Node, aliases: Mapping[str, str]) -> Node:
-    """Recursively lower alias tags. Alias children lowered too."""
+    """Recursively lower alias tags. Alias children lowered too.
+
+    R3-M3: when a tag is rewritten, the original tag is preserved as the
+    ``original-tag`` attr so the lowering is lossless-at-rest — the
+    internal AST still hashes differently for nodes that pre-lowered to
+    different aliases. Two plans that differ only in ``:phase`` vs
+    ``:workstream`` now produce distinct ``Node.id`` values, fixing a
+    content-addressing collision that otherwise loses author intent.
+
+    If the node already carries an ``original-tag`` attr (hand-authored),
+    it is NOT overwritten — the author retains control of the escape
+    hatch. If the node's tag is not an alias (the lookup is a no-op),
+    no ``original-tag`` attr is injected.
+    """
     new_tag = aliases.get(node.tag, node.tag)
+    new_attrs = dict(node.attrs)
+    if new_tag != node.tag and "original-tag" not in new_attrs:
+        new_attrs["original-tag"] = node.tag
     new_children = tuple(_apply_aliases(c, aliases) for c in node.children)
-    return Node(tag=new_tag, attrs=dict(node.attrs), children=new_children)
+    return Node(tag=new_tag, attrs=new_attrs, children=new_children)
 
 
 def _validate_spec(node: Node) -> None:

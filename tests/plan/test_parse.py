@@ -160,6 +160,34 @@ class TestSpecValidation:
         assert len(n.id) == 32
 
 
+class TestPlanSpecErrorSharedBase:
+    """R3-M2: PlanSpecError inherits from SpecError so downstream catchers
+    that want to handle 'any persistence-substrate spec-validation failure'
+    can import one symbol, not two.
+    """
+
+    def test_plan_spec_error_is_spec_error(self):
+        """PlanSpecError inherits from SpecError so downstream catchers work uniformly."""
+        from persistence.plan._parse import PlanSpecError
+        from persistence.spec._registry import SpecError
+        assert issubclass(PlanSpecError, SpecError)
+
+    def test_plan_spec_error_caught_as_spec_error(self):
+        """A real plan validation failure is catchable as SpecError and
+        carries both `conform_error` (back-compat) and `error` (from SpecError)."""
+        from persistence.plan import parse
+        from persistence.spec._registry import SpecError
+        # A vector that triggers spec failure (unknown kind).
+        bad = "[:totally-not-a-real-kind {}]"
+        try:
+            parse(bad, strict=True)
+        except SpecError as e:
+            assert hasattr(e, "conform_error")  # back-compat with PlanSpecError pre-R3
+            assert hasattr(e, "error")  # from SpecError parent
+        else:
+            raise AssertionError("parse(..., strict=True) should have raised")
+
+
 class TestUserSuppliedIdStripped:
     """User-supplied :id in EDN must never enter the canonical form.
 

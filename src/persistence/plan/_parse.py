@@ -7,25 +7,39 @@ import edn_format
 
 from persistence.plan._ast import Node
 from persistence.plan._errors import ParseError
+from persistence.spec._registry import SpecError
 
 
-class PlanSpecError(Exception):
+class PlanSpecError(SpecError):
     """Raised when a parsed Node fails :persistence.plan/node spec validation.
 
-    Wraps the structured ConformError for programmatic inspection:
+    R3-M2: Inherits from :class:`persistence.spec._registry.SpecError` so a
+    downstream caller that wants to catch "any spec-validation failure from
+    the persistence substrate" can import a single base class and catch
+    both :mod:`persistence.spec.parse` errors and plan-level parse errors
+    uniformly::
+
+        from persistence.spec import SpecError  # or _registry.SpecError
 
         try:
             node = parse(edn, strict=True)
-        except PlanSpecError as exc:
-            print(exc.conform_error.spec_key, exc.conform_error.reason)
+        except SpecError as exc:
+            # Covers both the generic spec parse and plan-specific cases.
+            ...
 
-    The ConformError is also available as ``exc.args[0]`` for generic inspection.
-    The ``spec_key`` property mirrors ``conform_error.spec_key`` for quick access.
+    Back-compat: the original ``conform_error`` attribute is preserved
+    alongside the parent's ``error`` attribute. Both point at the same
+    :class:`ConformError` instance — callers that accessed either keep
+    working.
     """
 
     def __init__(self, conform_error: Any) -> None:
-        self.conform_error = conform_error
+        # SpecError.__init__ sets self.error = conform_error and passes the
+        # rendered form to Exception.__init__.
         super().__init__(conform_error)
+        # Dual-attribute for back-compat: existing callers use
+        # ``exc.conform_error``; parent's ``exc.error`` is the same object.
+        self.conform_error = conform_error
 
     @property
     def spec_key(self) -> Any:

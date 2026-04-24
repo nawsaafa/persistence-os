@@ -29,13 +29,11 @@ the actual track plan.edn.
 """
 from __future__ import annotations
 
-import re
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from persistence.plan import ParseError, parse, walk
+from persistence.plan import parse, walk
 
 
 TRACK_PLAN_PATH = Path(

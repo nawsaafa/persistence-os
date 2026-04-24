@@ -6,7 +6,6 @@ import pytest
 
 from persistence.plan import Node, parse, ParseError
 from persistence.plan._parse import PlanSpecError
-from persistence.spec import ConformError
 
 
 class TestParseLeaf:
@@ -307,7 +306,7 @@ class TestSpecValidationMalformed:
         ('[:loop {} [:llm-call {:prompt "x"}]]', "loop missing :max-iter"),
         ('[:choice {:selector :x}]', "choice needs at least one case arm"),
     ])
-    def test_per_kind_required_attrs_v02(self, edn: str, reason: str):
+    def test_per_kind_required_attrs_v02(self, edn: str, reason: str):  # noqa: ARG002 — reason doc only
         """Will xfail until v0.2 tightens :persistence.plan/node per-kind."""
         with pytest.raises(PlanSpecError):
             parse(edn, strict=True)

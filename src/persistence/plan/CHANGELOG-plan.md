@@ -1,5 +1,25 @@
 # persistence.plan CHANGELOG
 
+## v0.2.0a2 (2026-04-24) — hardening micro-batch
+
+Closes 3 R3 MAJORs deferred from the v0.2.0a1 gate. No behavior change for the
+happy path; two API-surface refinements for downstream substrate-wide catchers.
+
+- **R3-M2: `PlanSpecError` now inherits from `persistence.spec.SpecError`.**
+  Downstream callers can `except SpecError` to catch spec-validation failures
+  from any substrate module uniformly. `exc.conform_error` is preserved for
+  back-compat; `exc.error` (from `SpecError`) points to the same object.
+  `str(exc)` now routes through `_render_error` — one minor surface change.
+- **R3-M3: `:original-tag` escape hatch for alias lowering.** When
+  `lower_aliases` rewrites a tag (e.g. `:phase → :seq`), the original tag
+  is preserved in `attrs["original-tag"]`. Two nodes that differed only by
+  their pre-lowered alias now hash to distinct `Node.id`s — id-space
+  faithfulness restored. Hand-authored `original-tag` is never clobbered.
+  This is an **id-breaking change** for anyone who persisted ids from
+  `v0.2.0a1` output of alias-lowered plans; no consumers in that state yet.
+- **R3-M5: schema-evolution id-stability contract** documented in a
+  dedicated section at the bottom of this CHANGELOG.
+
 ## v0.1 (2026-04-28) — initial release
 
 First release of the homoiconic plan AST module. Commits to three claims:

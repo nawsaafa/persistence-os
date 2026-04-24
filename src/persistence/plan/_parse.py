@@ -180,10 +180,26 @@ def parse(
 
 
 def _apply_aliases(node: Node, aliases: Mapping[str, str]) -> Node:
-    """Recursively lower alias tags. Alias children lowered too."""
+    """Recursively lower alias tags. Alias children lowered too.
+
+    R3-M3: when a tag is rewritten, the original tag is preserved as the
+    ``original-tag`` attr so the lowering is lossless-at-rest — the
+    internal AST still hashes differently for nodes that pre-lowered to
+    different aliases. Two plans that differ only in ``:phase`` vs
+    ``:workstream`` now produce distinct ``Node.id`` values, fixing a
+    content-addressing collision that otherwise loses author intent.
+
+    If the node already carries an ``original-tag`` attr (hand-authored),
+    it is NOT overwritten — the author retains control of the escape
+    hatch. If the node's tag is not an alias (the lookup is a no-op),
+    no ``original-tag`` attr is injected.
+    """
     new_tag = aliases.get(node.tag, node.tag)
+    new_attrs = dict(node.attrs)
+    if new_tag != node.tag and "original-tag" not in new_attrs:
+        new_attrs["original-tag"] = node.tag
     new_children = tuple(_apply_aliases(c, aliases) for c in node.children)
-    return Node(tag=new_tag, attrs=dict(node.attrs), children=new_children)
+    return Node(tag=new_tag, attrs=new_attrs, children=new_children)
 
 
 def _validate_spec(node: Node) -> None:

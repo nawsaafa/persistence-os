@@ -86,6 +86,18 @@ def _python_to_node(obj: Any) -> Node:
     if not isinstance(attrs_raw, dict):
         raise ParseError(f"node attrs must be map, got {type(attrs_raw).__name__}: {attrs_raw!r}")
 
+    # User-supplied :id is ignored; content-addressing computes :id canonically.
+    # Two attack vectors this closes:
+    #   1. If "id" enters node.attrs, _canonical_dict hashes it → Node.id
+    #      becomes a function of user input, breaking Claim 1 (Merkle DAG).
+    #   2. In _to_vector_form, the computed :id is written first and then
+    #      attrs.items() is iterated — a user "id" key would overwrite the
+    #      computed one, letting the attacker choose the spec-validated hash.
+    # Strip both the keyword-stripped form ("id") and the defensive raw form
+    # (":id") — the former is what _edn_to_python produces, the latter a
+    # belt-and-braces guard.
+    attrs_raw = {k: v for k, v in attrs_raw.items() if k not in ("id", ":id")}
+
     children_raw = obj[2:]
     children = tuple(_python_to_node(c) for c in children_raw)
 

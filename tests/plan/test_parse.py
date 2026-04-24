@@ -161,6 +161,55 @@ class TestSpecValidation:
         assert len(n.id) == 16
 
 
+class TestUserSuppliedIdStripped:
+    """User-supplied :id in EDN must never enter the canonical form.
+
+    Two failure modes both land on a malicious user poisoning the hash:
+      1. :id enters attrs → _canonical_dict includes it → Node.id depends
+         on user input, breaking content-addressing (Claim 1).
+      2. _to_vector_form writes computed :id then loops node.attrs, so
+         a user-supplied id key clobbers the computed one at spec-check
+         time → spec validates the attacker's hash, not ours.
+
+    Fix: drop both "id" and ":id" from attrs_raw at _python_to_node().
+    """
+
+    def test_user_supplied_id_is_stripped_from_attrs(self):
+        edn = '[:seq {:id "malicious"} [:llm-call {:prompt "hi"}]]'
+        n = parse(edn, strict=False)
+        assert "id" not in n.attrs
+        assert ":id" not in n.attrs
+
+    def test_user_supplied_id_does_not_affect_computed_id(self):
+        """Parsing with and without the injected :id yields the same Node.id."""
+        with_id = parse('[:seq {:id "malicious"} [:llm-call {:prompt "hi"}]]', strict=False)
+        without_id = parse('[:seq {} [:llm-call {:prompt "hi"}]]', strict=False)
+        assert with_id.id == without_id.id
+
+    def test_user_supplied_id_does_not_clobber_spec_validation(self):
+        """Strict parse must succeed and the :id in the vector form
+        must be the computed Node.id, not the attacker-supplied one."""
+        from persistence.plan._parse import _to_vector_form
+
+        n = parse('[:seq {:id "malicious"} [:llm-call {:prompt "hi"}]]', strict=True)
+        vec = _to_vector_form(n)
+        # vector form: [tag, attrs_dict, *children]
+        attrs = vec[1]
+        assert attrs[":id"] == f"sha256:{n.id}"
+        assert "malicious" not in attrs[":id"]
+
+    def test_user_supplied_id_both_keyword_and_string_form_stripped(self):
+        """Parser sees ':id' as the key after keyword-stripping. A raw string
+        "id" key in Python-constructed input (via lower_aliases reprocessing,
+        etc.) must also be stripped if it sneaks in through _edn_to_python."""
+        # Only :id is reachable via EDN, but be defensive.
+        edn = '[:seq {:id "x" :name "n"} [:llm-call {:prompt "hi"}]]'
+        n = parse(edn, strict=False)
+        assert "id" not in n.attrs
+        assert ":id" not in n.attrs
+        assert n.attrs.get("name") == "n"
+
+
 class TestSpecValidationMalformed:
     """Each node kind has malformed shapes spec should catch.
 

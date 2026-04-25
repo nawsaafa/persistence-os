@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Mapping
 
+from persistence.plan._coerce import lookup_coercion
+
 
 def _freeze_attrs(attrs: Mapping[str, Any] | None) -> Mapping[str, Any]:
     """Return a read-only view of attrs. Does not deep-freeze values."""
@@ -19,6 +21,14 @@ def _freeze_attrs(attrs: Mapping[str, Any] | None) -> Mapping[str, Any]:
 #: sha256 truncation width (hex chars). 32 = 128 bits. Exposed as a module
 #: constant so callers can assert against it rather than hard-coding.
 ID_HEX_WIDTH: int = 32
+
+#: Canonical-form version. Bumped only when the default coercion registry
+#: changes in a canonical-form-altering way (e.g. switching ``datetime``
+#: from ``isoformat()`` to ``timestamp()``, or adding a default that newly
+#: catches a previously-errored type). Bumping invalidates every persisted
+#: ``Node.id`` produced under the old version. See R3-M5 schema-evolution
+#: contract in CHANGELOG-plan.md and §6 of the R3-M4 design doc.
+PLAN_CANONICAL_VERSION: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,16 +148,49 @@ class Node:
         return digest[:ID_HEX_WIDTH]
 
 
+def _coerce_value(v: Any) -> Any:
+    """Recursively reduce a value to JSON-native types via the registry.
+
+    Walking rules:
+    - JSON-native scalars (str, int, float, bool, None) pass through.
+    - dict / list / tuple recurse element-wise; tuple becomes list (JSON
+      has no tuple, and tuple/list distinctions don't affect hashing).
+    - Anything else looks up ``lookup_coercion(type(v))`` and applies the
+      coercion, then recurses on the result (the result may itself
+      contain non-JSON-native types — e.g. ``frozenset`` coerces to a
+      list of elements that may need their own coercion).
+    - On registry miss, raises ``TypeError`` pointing at
+      ``register_coercion``.
+    """
+    if isinstance(v, bool) or v is None or isinstance(v, (str, int, float)):
+        return v
+    if isinstance(v, dict):
+        return {str(k): _coerce_value(item) for k, item in v.items()}
+    if isinstance(v, (list, tuple)):
+        return [_coerce_value(item) for item in v]
+    fn = lookup_coercion(type(v))
+    if fn is None:
+        raise TypeError(
+            f"persistence.plan canonical form: no coercion registered for "
+            f"type {type(v).__name__!r}. Register one via "
+            f"persistence.plan.register_coercion (test harness only) or "
+            f"convert the value to a JSON-native form before constructing "
+            f"the Node."
+        )
+    return _coerce_value(fn(v))
+
+
 def _canonical_dict(node: Node) -> dict[str, Any]:
     """Convert Node to a dict for canonical hashing.
 
-    Attrs are kept as-is (sorting happens at json.dumps with sort_keys=True).
-    Nested Node values in attrs would be a misuse — attrs hold EDN scalars
-    and containers only. If a child-shaped value appears in attrs, we leave
-    it; canonical serialization will still be deterministic via sort_keys.
+    Attrs are recursively reduced via ``_coerce_value`` so that authors
+    can put ``datetime`` / ``Decimal`` / ``bytes`` / ``UUID`` /
+    ``frozenset`` / ``edn_format.Symbol`` directly in attrs without
+    surfacing ``TypeError`` from ``json.dumps``. The original ``node.attrs``
+    is unchanged — coercion is id-time only (see Q1 of the R3-M4 design).
     """
     return {
         "tag": node.tag,
-        "attrs": dict(node.attrs),
+        "attrs": _coerce_value(dict(node.attrs)),
         "children": [_canonical_dict(c) for c in node.children],
     }

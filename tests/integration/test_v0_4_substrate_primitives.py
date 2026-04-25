@@ -8,14 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-import pytest
-
 
 def test_v0_4_full_integration_phase_a_c_d_together():
     """Cohesive smoke test: Dispatcher + fork() + Provenance/causal_history."""
-    from persistence.fact import (
-        DB, Datom, InMemoryStore, Provenance, CausalDAG,
-    )
+    from persistence.fact import DB, InMemoryStore, Provenance
     from persistence.fact.projection import DictProjection, rebuild
     from persistence.plan import Dispatcher, Node
 
@@ -29,13 +25,13 @@ def test_v0_4_full_integration_phase_a_c_d_together():
     # ---- Phase A: Dispatcher dispatches by tag --------------------------
     dispatched_msgs: list[str] = []
     d = Dispatcher()
-    d.register(":record", lambda n, env: dispatched_msgs.append(n.attrs.get("msg", "")))
+    d.register(":record", lambda n, _env: dispatched_msgs.append(n.attrs.get("msg", "")))
     plan = Node(
         tag=":seq",
-        children=[
+        children=(
             Node(tag=":record", attrs={"msg": "hello"}),
             Node(tag=":record", attrs={"msg": "world"}),
-        ],
+        ),
     )
     d.dispatch(plan, env={})
     assert dispatched_msgs == ["hello", "world"]
@@ -50,7 +46,7 @@ def test_v0_4_full_integration_phase_a_c_d_together():
     db = DB(InMemoryStore(), clock=lambda: ts_frozen)
     db = db.transact(
         [{"e": "p-1", "a": "x", "v": 42}],
-        provenance=p,
+        provenance=p,  # type: ignore[arg-type]  # mirrors db.transact() D2-ripple
     )
     dag = db.causal_history("p-1")
     assert len(dag.seeds) == 1

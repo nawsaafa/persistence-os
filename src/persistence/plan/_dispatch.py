@@ -68,6 +68,10 @@ class Dispatcher:
         existing semantics are preserved — :code/:branch still raise
         UnimplementedNodeKindError if encountered as leaves.
 
+        ``env`` is passed by reference; handler mutations to ``env`` are
+        visible to later handlers in the same walk. This is the implicit
+        shared-state thread between handlers — by design, not by accident.
+
         Returns:
             List of handler return values in walk order. Length equals the
             number of nodes whose tag had a registered handler.

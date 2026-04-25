@@ -28,18 +28,25 @@ from persistence.fact.db import DB, DBView
 class ProjectionAdapter(Protocol):
     """Any sink that can materialize datoms into a queryable projection.
 
-    Implementations only need two methods. Contract:
+    Implementations need three methods. Contract:
 
-      reset()          — clear the projection; subsequent apply() calls
-                         rebuild it from scratch.
-      apply(datom)     — stream a single datom into the projection. Called
-                         in log insertion order. Implementations are free to
-                         discard retracts, build indexes, call out to Kuzu /
-                         mem0, etc.
+      reset()                  — clear the projection; subsequent apply()
+                                 calls rebuild it from scratch.
+      apply(datom)             — stream a single datom into the projection.
+                                 Called in log insertion order.
+      fork(branch_id)          — return a NEW empty adapter pointing at a
+                                 fresh sink (new collection, new dict, etc.).
+                                 Caller is responsible for calling
+                                 rebuild(branched_db, forked_adapter) to
+                                 populate the fork. The fresh sink's name
+                                 SHOULD encode branch_id for traceability.
+                                 Adapters that do not support branching
+                                 should raise NotImplementedError.
     """
 
     def reset(self) -> None: ...
     def apply(self, datom: Datom) -> None: ...
+    def fork(self, branch_id: str) -> "ProjectionAdapter": ...
 
 
 class DictProjection:
@@ -95,6 +102,17 @@ class DictProjection:
         if cur is None or (d.valid_from, d.tx) > cur:
             attrs[d.a] = d.v
             self._winning[(d.e, d.a)] = (d.valid_from, d.tx)
+
+    def fork(self, branch_id: str) -> "DictProjection":
+        """Return a fresh empty DictProjection.
+
+        The branch_id is accepted for Protocol parity but not used by
+        DictProjection — the in-memory dict has no physical naming.
+        Backend adapters (Qdrant, Kuzu) use branch_id to derive
+        collision-free physical target names.
+        """
+        del branch_id  # unused by in-memory impl; documented contract
+        return DictProjection()
 
     # ---- Query surface ---------------------------------------------------
     def get(self, e: str) -> dict:

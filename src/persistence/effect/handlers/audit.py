@@ -608,6 +608,7 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
         ":confidence": 1.0,
         ":signature": entry.id,
         ":prev-hash": entry.prev_hash,
+        "parent_provenance_hash": entry.prev_hash,  # D4: typed-Provenance alias for :prev-hash
         ":handler-chain": list(entry.handler_chain),
         ":policy-id": entry.policy_id,
         ":principal": _principal_to_keyword_map(entry.principal),

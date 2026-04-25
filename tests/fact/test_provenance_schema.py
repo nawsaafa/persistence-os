@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from persistence.effect.handlers.audit import AuditEntry, audit_entry_to_datom
 from persistence.fact import Datom, Provenance
 from persistence.fact.datom import provenance_from_dict
 from persistence.fact.wire import (
@@ -131,3 +132,26 @@ def test_provenance_wire_roundtrip_preserves_canonical_hash():
 
     # Wire round-trip is the identity on canonical content
     assert d_before == d_after
+
+
+def test_audit_provenance_carries_parent_provenance_hash_alias():
+    """The audit handler's emitted datom carries both :prev-hash and
+    parent_provenance_hash with the same value, so D2 typed Provenance
+    readers find the chain pointer alongside legacy :prev-hash readers.
+    """
+    entry = AuditEntry(
+        id="sha256:" + "a" * 64,
+        prev_hash="parent-hash-abc",
+        op=":raw",
+        args_hash="arg-h",
+        verdict="ok",
+        latency_ms=0,
+        recorded_at=1745539200.0,  # 2026-04-25 00:00:00 UTC as float
+    )
+    datom = audit_entry_to_datom(entry)
+    prov = datom[":datom/provenance"]
+
+    # Legacy reader (audit.verify_chain) keeps working
+    assert prov.get(":prev-hash") == "parent-hash-abc"
+    # Typed-Provenance reader (D2 readers, D5 causal_history) sees the same value
+    assert prov.get("parent_provenance_hash") == "parent-hash-abc"

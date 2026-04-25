@@ -1,5 +1,26 @@
 # persistence.plan CHANGELOG
 
+## v0.4.0a1 (2026-04-25) — substrate-primitives: Dispatcher + walk rename
+
+### Added
+
+- **`_interpret.py` → `_walk.py` rename.** `_interpret.py` becomes a
+  back-compat shim that re-exports `walk` from `_walk.py`. Existing
+  imports from `_interpret` continue to work without change.
+- **`Dispatcher` class** (`persistence.plan._dispatch`) — new module with
+  `register(tag, handler)` / `has_handler(tag)` / `dispatch(node, env)`
+  API. Handler-per-tag registration replaces match-on-tag conditional
+  cascades inside the walker. Walk-order property test added under
+  Hypothesis covering round-trip tag dispatch.
+- **New public exports:** `Dispatcher`, `Handler` re-exported from
+  `persistence.plan.__init__`.
+
+### Preserving changes (id-stability)
+
+`_walk.py` contains only visitor/walker logic. No changes to
+`_canonical_dict`, coercion registry, or serialization. `PLAN_CANONICAL_VERSION`
+stays at 1 — zero canonical-form changes in this release.
+
 ## v0.3.0a1 (2026-04-25) — R3-M4 coercion registry
 
 Closes the last R3 MAJOR deferred from the v0.2.0a1 ARIS gate. Plan authors

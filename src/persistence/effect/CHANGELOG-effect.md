@@ -2,6 +2,19 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## [0.4.0a1] — 2026-04-25 — audit handler `parent_provenance_hash` alias
+
+### Changed
+
+- **Audit handler provenance bridge**
+  (`persistence.effect.handlers.audit.audit_entry_to_datom`) — the
+  function now writes a `parent_provenance_hash` bare-snake_case key
+  alongside the existing `:prev-hash` provenance entry. Both keys point
+  to the same value. The alias bridges audit chain hashes to the new typed
+  `Provenance` schema in `persistence.fact` so `DB.causal_history()` can
+  walk the chain transparently using either key. No behavioral change for
+  callers that read `:prev-hash`; the extra key is additive only.
+
 ## [0.1.0] — 2026-04-20 — Initial cut (Workstream B Phase 1)
 
 First ship of the algebraic effect handler stack described in

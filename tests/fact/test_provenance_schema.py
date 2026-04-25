@@ -5,6 +5,12 @@ from datetime import datetime, timezone
 
 from persistence.fact import Datom, Provenance
 from persistence.fact.datom import provenance_from_dict
+from persistence.fact.wire import (
+    _provenance_from_wire,
+    _provenance_to_wire,
+    datom_to_wire,
+    wire_to_datom,
+)
 
 
 def test_provenance_typeddict_exposed_from_persistence_fact():
@@ -88,3 +94,36 @@ def test_datom_accepts_typed_provenance_construction():
     )
     assert d.provenance["source"] == "test"
     assert d.provenance["handler_id"] == "h-1"
+
+
+def test_provenance_wire_roundtrip_preserves_typed_shape():
+    """Provenance survives wire-out / wire-in roundtrip without losing keys."""
+    p = {
+        "source": "test",
+        "handler_id": "h-1",
+        "extra": {"custom_field": 42},
+    }
+    wire = _provenance_to_wire(p)
+    back = _provenance_from_wire(wire)
+    # Every key on the way in is on the way out
+    assert back.get("source") == "test"
+    assert back.get("handler_id") == "h-1"
+    # Custom field preserved (either at top level or in extra)
+    custom_value = back.get("custom_field") or back.get("extra", {}).get("custom_field")
+    assert custom_value == 42
+
+
+def test_provenance_wire_roundtrip_preserves_canonical_hash():
+    """A Datom hashes to the same id before and after wire roundtrip."""
+    ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    d_before = Datom(
+        e="550e8400-e29b-41d4-a716-446655440000", a="x", v=42,
+        tx=1, tx_time=ts, valid_from=ts, valid_to=None, op="assert",
+        provenance={"source": "test", "handler_id": "h-1", "extra": {"k": "v"}},
+    )
+
+    wire = datom_to_wire(d_before)
+    d_after = wire_to_datom(wire)
+
+    # Wire round-trip is the identity on canonical content
+    assert d_before == d_after

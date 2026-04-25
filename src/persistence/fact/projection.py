@@ -15,6 +15,27 @@ rebuild from the log. This module ships:
 Real Kuzu / mem0 adapters are a separate concern — see
 ``docs/memory-palace-integration.md`` for the wiring pattern. This module
 provides the seam and a working in-memory reference.
+
+Backend conformance contract for ``fork()`` (v0.4.0a1):
+
+    Backend implementers (e.g. ai-box-vault QdrantProjectionAdapter,
+    KuzuProjectionAdapter) MUST satisfy these properties to claim
+    ProjectionAdapter conformance:
+
+    1. fork(branch_id) MUST allocate a fresh physical target (new
+       collection, new DB path) — never share state with the parent.
+    2. The fresh target's name SHOULD encode branch_id for traceability
+       (e.g. ``qdrant_collection_<branch_id>``).
+    3. apply(datom) on the forked adapter MUST write to the new physical
+       target, NOT the parent's.
+    4. Re-projection upgrades (new embedding model) use the same pattern:
+       allocate fresh target, rebuild(db, fresh_adapter), atomically swap
+       (Qdrant update_aliases or equivalent), drop old.
+
+    Conformance is verified in the backend's own test suite via
+    integration tests against real Qdrant / Kuzu / etc. The substrate
+    test suite (tests/fact/test_projector_fork.py) only verifies the
+    in-memory DictProjection.
 """
 
 from __future__ import annotations

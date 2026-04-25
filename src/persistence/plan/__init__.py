@@ -24,7 +24,7 @@ from persistence.plan._coerce import (
     unregister_coercion,
 )
 from persistence.plan._errors import ParseError, UnimplementedNodeKindError
-from persistence.plan._interpret import walk
+from persistence.plan._walk import walk
 from persistence.plan._parse import parse, unparse
 
 __all__ = [

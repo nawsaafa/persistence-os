@@ -78,8 +78,8 @@ def test_dispatcher_skips_unregistered_tags_silently():
     assert results == ["a-result"]
 
 
-def test_dispatcher_passes_env_unchanged():
-    """The env dict is passed by reference to every handler call."""
+def test_dispatcher_passes_env_by_reference():
+    """The env dict is passed by reference (same object id to every handler)."""
     from persistence.plan import Dispatcher, Node
 
     tree = Node(tag=":x", children=(Node(tag=":x"),))
@@ -90,6 +90,24 @@ def test_dispatcher_passes_env_unchanged():
     d.dispatch(tree, env=env)
     assert len(seen_envs) == 2
     assert seen_envs[0] == seen_envs[1] == id(env)
+
+
+def test_dispatcher_env_mutation_propagates_to_later_handlers():
+    """Handler mutations to env are visible to subsequent handlers in the same walk.
+
+    Pins the documented design guarantee in Dispatcher.dispatch docstring:
+    env is the implicit shared-state thread between handlers.
+    """
+    from persistence.plan import Dispatcher, Node
+
+    tree = Node(tag=":seq", children=(Node(tag=":a"), Node(tag=":b")))
+    d = Dispatcher()
+    d.register(":seq", lambda n, env: env.setdefault("touched_by", []).append(":seq"))
+    d.register(":a", lambda n, env: env["touched_by"].append(":a"))
+    d.register(":b", lambda n, env: env["touched_by"].append(":b"))
+    env: dict = {}
+    d.dispatch(tree, env=env)
+    assert env["touched_by"] == [":seq", ":a", ":b"]
 
 
 def test_dispatcher_replace_handler_takes_effect():
@@ -120,7 +138,7 @@ def test_dispatcher_property_dispatch_order_equals_walk_order():
     Property: if all node tags have a registered echo handler, the
     list of (id, tag) pairs from dispatch matches the walker's trace.
     """
-    from hypothesis import given, settings, strategies as st
+    from hypothesis import HealthCheck, given, settings, strategies as st
     from persistence.plan import Dispatcher, Node, walk
 
     # Keep tag space small to ensure handler coverage.
@@ -136,7 +154,11 @@ def test_dispatcher_property_dispatch_order_equals_walk_order():
         return Node(tag=tag, children=children)
 
     @given(small_tree())
-    @settings(max_examples=50, deadline=None)
+    @settings(
+        max_examples=50,
+        deadline=None,
+        suppress_health_check=[HealthCheck.too_slow],
+    )
     def _check(tree):
         d = Dispatcher()
         for tag in (":a", ":b", ":c", ":seq"):

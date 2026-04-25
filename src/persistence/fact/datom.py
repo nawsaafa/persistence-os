@@ -91,7 +91,7 @@ def provenance_from_dict(raw: dict) -> Provenance:
         if k == "extra":
             continue
         if k in _PROVENANCE_KNOWN_KEYS:
-            out[k] = v   # type: ignore[literal-required]
+            out[k] = v
         else:
             extra[k] = v
 

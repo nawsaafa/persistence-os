@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import cast
 
 from persistence.fact import Datom, Provenance
 from persistence.fact.datom import provenance_from_dict
@@ -51,7 +50,7 @@ def test_provenance_from_dict_lifts_known_keys():
         "my_custom_key": 42,                # unknown
         "another_extra": "value",            # unknown
     }
-    p = cast(dict, provenance_from_dict(raw))
+    p = provenance_from_dict(raw)
     assert p["source"] == "test"
     assert p["handler_id"] == "h-1"
     assert "extra" in p
@@ -66,7 +65,7 @@ def test_provenance_from_dict_preserves_existing_extra():
         "extra": {"pre_existing": "yes"},
         "uncategorized_top_level": "lifted",
     }
-    p = cast(dict, provenance_from_dict(raw))
+    p = provenance_from_dict(raw)
     assert p["source"] == "test"
     assert p["extra"]["pre_existing"] == "yes"
     assert p["extra"]["uncategorized_top_level"] == "lifted"
@@ -87,6 +86,5 @@ def test_datom_accepts_typed_provenance_construction():
         tx=1, tx_time=ts, valid_from=ts, valid_to=None, op="assert",
         provenance=p,
     )
-    prov = cast(dict, d.provenance)
-    assert prov["source"] == "test"
-    assert prov["handler_id"] == "h-1"
+    assert d.provenance["source"] == "test"
+    assert d.provenance["handler_id"] == "h-1"

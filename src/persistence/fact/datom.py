@@ -57,6 +57,49 @@ class Provenance(TypedDict, total=False):
     extra: dict[str, Any]
 
 
+#: Set of keys lifted to top-level Provenance fields by `provenance_from_dict`.
+#: Adding a key here also requires extending the Provenance TypedDict.
+_PROVENANCE_KNOWN_KEYS = frozenset({
+    "source",
+    "tx_time",
+    "handler_id",
+    "canonical_call",
+    "parent_provenance_hash",
+    "superseded_by_tx",
+})
+
+
+def provenance_from_dict(raw: dict) -> Provenance:
+    """Coerce a free-form dict to a Provenance TypedDict.
+
+    Known keys (see _PROVENANCE_KNOWN_KEYS) lift to top-level fields;
+    everything else lands in ``extra``. Pre-existing ``extra`` keys are
+    preserved and merged with newly-uncategorized top-level keys.
+
+    The wire format and canonical hash are unchanged because this only
+    rearranges where keys live in the dict — Provenance is a dict at
+    runtime, and the canonical form serializes both shapes identically
+    (sort_keys=True flattens any structural difference).
+    """
+    if not raw:
+        return {}
+
+    out: Provenance = {}
+    extra: dict = dict(raw.get("extra", {}))
+
+    for k, v in raw.items():
+        if k == "extra":
+            continue
+        if k in _PROVENANCE_KNOWN_KEYS:
+            out[k] = v   # type: ignore[literal-required]
+        else:
+            extra[k] = v
+
+    if extra:
+        out["extra"] = extra
+    return out
+
+
 @dataclass(frozen=True, slots=True)
 class Datom:
     """An immutable 8-tuple datom with provenance and invalidation pointer.
@@ -82,7 +125,7 @@ class Datom:
     valid_from: datetime
     valid_to: Optional[datetime]
     op: Op
-    provenance: dict = field(default_factory=dict)
+    provenance: Provenance = field(default_factory=dict)  # type: ignore[assignment]
     invalidated_by: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -134,4 +177,4 @@ class Datom:
                     self.provenance["source"] = stripped_src
 
 
-__all__ = ["Datom", "Op", "Provenance"]
+__all__ = ["Datom", "Op", "Provenance", "provenance_from_dict"]

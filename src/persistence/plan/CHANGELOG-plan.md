@@ -1,5 +1,84 @@
 # persistence.plan CHANGELOG
 
+## v0.3.0a1 (2026-04-25) — R3-M4 coercion registry
+
+Closes the last R3 MAJOR deferred from the v0.2.0a1 ARIS gate. Plan authors
+can now put `datetime`, `date`, `bytes`, `Decimal`, `UUID`, `frozenset`, and
+`edn_format.Symbol` directly inside `Node.attrs` without `Node.id` raising
+`TypeError`. The registry is **static + manifest** (per §6 of the design
+doc): the default coercion table is frozen at module import time, runtime
+registration is gated behind a test-only env-var sentinel, and a new
+`PLAN_CANONICAL_VERSION = 1` constant marks the canonical form for
+schema-evolution callers.
+
+- **New module.** `persistence.plan._coerce` — `register_coercion`,
+  `unregister_coercion`, `lookup_coercion`, `Coercion` type alias, and 7
+  default coercions (datetime/date → `.isoformat()`, bytes → `.hex()`,
+  Decimal/UUID → `str(...)`, frozenset → `sorted(...)`, edn_format.Symbol →
+  `str(...)`). All re-exported from `persistence.plan.__init__`.
+- **Walker.** `_canonical_dict` now passes `node.attrs` through
+  `_coerce_value`, which recursively reduces non-JSON-native values via
+  the registry. **Coercion is id-time only**: `node.attrs` keeps the
+  author-provided values; only the canonical form (and therefore
+  `Node.id`) sees the coerced shape. Two Nodes — one with a `datetime`,
+  one with the equivalent ISO string — share `Node.id` but compare
+  unequal via dataclass `__eq__` (the intended Q1 trade-off — see §4 of
+  the design doc).
+- **Strict on miss.** Unregistered types raise
+  `TypeError("persistence.plan canonical form: no coercion registered
+  for type 'X'. Register one via persistence.plan.register_coercion ...")`.
+  No silent `repr()` fallback, no quiet truncation; canonical-form
+  determinism is non-negotiable for content addressing.
+- **Static + manifest.** `register_coercion` raises `RuntimeError` unless
+  `PERSISTENCE_PLAN_ALLOW_RUNTIME_REGISTRATION=1`. This closes the
+  cross-host divergence hole: two hosts that compute `Node.id` for the
+  same logical tree must agree on the registry, and the only way to
+  guarantee that is to forbid runtime mutation. `PLAN_CANONICAL_VERSION`
+  bumps signal canonical-form-altering changes; consumers persisting
+  ids should pin against this constant in their storage layer (extends
+  the `~= 0.Y` contract documented at the bottom of this file).
+- **Migration.** Parallel registries + `recompute_ids` helper —
+  **deferred to v0.4+** per §9 scope cut. v0.3.0a1 ships with
+  break-on-change as the only migration path; acceptable because no
+  consumers persist ids yet.
+- **Symbol coercion now layered.** The v0.1 `_edn_to_python` Symbol →
+  `str` workaround is **kept** as parse-boundary defense-in-depth (same
+  pattern as the `:id`/`id` strip + reject from v0.2.0a3). The registry
+  absorbs direct-construct cases (`Node(attrs={"sig": Symbol("x")})`)
+  while parse continues to clean attrs for downstream emit/round-trip.
+  Future cleanup (registry-only) deferred to v0.4 per §10 of the design.
+
+### Forward id-stability note
+
+This release introduces `PLAN_CANONICAL_VERSION = 1` and the registry
+walker. Adding the walker is **not** an id-breaking change for any Node
+that previously had only JSON-native attrs — `_coerce_value` is a
+pass-through for `str`/`int`/`float`/`bool`/`None`/`dict`/`list`/`tuple`,
+and the canonical bytes are byte-identical to v0.2.0a3 for those nodes.
+For nodes that previously raised `TypeError` at id-time (any `datetime`,
+`bytes`, etc. in attrs), there were no persisted ids — they couldn't be
+computed before — so v0.3.0a1 expands the addressable space without
+moving any existing id.
+
+### Tests
+
+`tests/plan/test_coerce.py` (14 tests) — covers all 10 from the design
+doc §8 plus 4 bonuses: lookup default for datetime, lookup None for
+unregistered, `PLAN_CANONICAL_VERSION == 1`, and runtime registration
+rejected outside the sentinel. Full plan suite: **172 passed + 7
+xfailed**, up from 158 at v0.2.0a3.
+
+### Public API additions
+
+- `register_coercion(target_type, fn=None, *, replace=False)` — gated
+  on `PERSISTENCE_PLAN_ALLOW_RUNTIME_REGISTRATION` env-var sentinel.
+  Usable as decorator or function.
+- `unregister_coercion(target_type)` — gated, test-only.
+- `lookup_coercion(target_type) -> Coercion | None` — exact-type then
+  MRO walk; returns `None` (does not raise) on miss.
+- `Coercion` — type alias `Callable[[Any], Any]`.
+- `PLAN_CANONICAL_VERSION: int = 1` — manifest version constant.
+
 ## v0.2.0a3 (2026-04-24) — Prop 5 round-trip falsifier closed
 
 Closes a Hypothesis-found falsifier for Claim 2 (round-trip preserves

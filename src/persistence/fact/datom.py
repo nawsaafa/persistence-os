@@ -22,9 +22,39 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, TypedDict
 
 Op = Literal["assert", "retract"]
+
+
+class Provenance(TypedDict, total=False):
+    """Typed provenance schema for Datom.provenance (v0.4.0a1).
+
+    All keys are optional (total=False) so existing free-form dict
+    callers remain valid at runtime; the TypedDict purely documents
+    the conventional schema for static type checkers and code readers.
+
+    Required by convention (enforced at the few sites that read these):
+      source                   — origin descriptor (e.g. "test", "audit:bankability-v3")
+
+    Optional named keys (lifted from the formerly-free-form dict):
+      tx_time                  — ISO-8601 timestamp; redundant with Datom.tx_time but appears in wire form
+      handler_id               — registered effect-handler name (Ferrari/brains pin: model-pluggable)
+      canonical_call           — sha256 hex of canonical EDN of {model, prompt, tools, params}
+      parent_provenance_hash   — equivalent to audit handler's :prev-hash; walks the causal DAG backwards
+      superseded_by_tx         — Phase-1 companion-retract sentinel
+
+    Backend-specific overflow:
+      extra                    — dict of any additional keys not lifted into the schema
+    """
+
+    source: str
+    tx_time: str
+    handler_id: Optional[str]
+    canonical_call: Optional[str]
+    parent_provenance_hash: Optional[str]
+    superseded_by_tx: Optional[int]
+    extra: dict
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,4 +134,4 @@ class Datom:
                     self.provenance["source"] = stripped_src
 
 
-__all__ = ["Datom", "Op"]
+__all__ = ["Datom", "Op", "Provenance"]

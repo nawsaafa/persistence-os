@@ -12,6 +12,10 @@ from persistence.fact.wire import (
     wire_to_datom,
 )
 
+#: Canonical example UUID (RFC 4122) for tests that construct a Datom and
+#: invoke datom_to_wire — the wire boundary enforces a UUID-shaped entity id.
+_TEST_ENTITY_UUID = "550e8400-e29b-41d4-a716-446655440000"
+
 
 def test_provenance_typeddict_exposed_from_persistence_fact():
     """Provenance is exported from persistence.fact and is a dict at runtime."""
@@ -108,16 +112,16 @@ def test_provenance_wire_roundtrip_preserves_typed_shape():
     # Every key on the way in is on the way out
     assert back.get("source") == "test"
     assert back.get("handler_id") == "h-1"
-    # Custom field preserved (either at top level or in extra)
-    custom_value = back.get("custom_field") or back.get("extra", {}).get("custom_field")
-    assert custom_value == 42
+    # Custom field stays nested under "extra" — the wire roundtrip must not
+    # hoist it to top-level (which would silently re-shape future Provenance).
+    assert back.get("extra", {}).get("custom_field") == 42
 
 
 def test_provenance_wire_roundtrip_preserves_canonical_hash():
     """A Datom hashes to the same id before and after wire roundtrip."""
     ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
     d_before = Datom(
-        e="550e8400-e29b-41d4-a716-446655440000", a="x", v=42,
+        e=_TEST_ENTITY_UUID, a="x", v=42,
         tx=1, tx_time=ts, valid_from=ts, valid_to=None, op="assert",
         provenance={"source": "test", "handler_id": "h-1", "extra": {"k": "v"}},
     )

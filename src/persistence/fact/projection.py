@@ -4,8 +4,8 @@ Per paper §5.1: the projection is a *disposable* cache. Burn it down,
 rebuild from the log. This module ships:
 
 - :class:`ProjectionAdapter` — a Protocol any backend (Kuzu, mem0, Postgres
-  materialized view, in-process dict) can satisfy with two methods, ``reset``
-  and ``apply``.
+  materialized view, in-process dict) can satisfy with three methods,
+  ``reset``, ``apply``, and ``fork``.
 - :class:`DictProjection`    — the simplest imaginable adapter, an
   entity → attrs dict, used by the CLI demo and the Memory Palace
   integration plan as the initial seed.

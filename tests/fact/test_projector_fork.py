@@ -1,27 +1,24 @@
 """Phase C — ProjectionAdapter.fork(): one method on existing Protocol."""
 from __future__ import annotations
 
-import pytest
+import inspect
+from datetime import datetime, timezone
+
+from persistence.fact import Datom
+from persistence.fact.projection import DictProjection, ProjectionAdapter
 
 
 def test_projection_adapter_protocol_includes_fork():
     """ProjectionAdapter Protocol declares fork(branch_id) -> ProjectionAdapter."""
-    from persistence.fact.projection import ProjectionAdapter
-
     # Protocol method signature is exposed via __annotations__ or callable check
     assert hasattr(ProjectionAdapter, "fork")
     # Caller-shape: takes self + branch_id (str)
-    import inspect
     sig = inspect.signature(ProjectionAdapter.fork)
     assert "branch_id" in sig.parameters
 
 
 def test_dict_projection_fork_returns_fresh_adapter():
     """DictProjection.fork(branch_id) returns a NEW empty DictProjection."""
-    from persistence.fact import Datom
-    from persistence.fact.projection import DictProjection
-    from datetime import datetime, timezone
-
     parent = DictProjection()
     parent.apply(
         Datom(

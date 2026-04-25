@@ -5,9 +5,11 @@ from persistence.fact import Provenance
 
 
 def test_provenance_typeddict_exposed_from_persistence_fact():
-    """Provenance is exported from persistence.fact (or a submodule)."""
-    # TypedDict at runtime is a dict subclass via typing; both shapes accepted
-    assert Provenance is not None
+    """Provenance is exported from persistence.fact and is a dict at runtime."""
+    # The import at module level already proves exposure; this assertion
+    # pins the load-bearing TypedDict-is-a-dict-subclass property at runtime
+    # so existing free-form callers remain valid (the docstring's claim).
+    assert issubclass(Provenance, dict)
 
 
 def test_provenance_typeddict_accepts_known_keys():

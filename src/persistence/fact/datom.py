@@ -54,7 +54,7 @@ class Provenance(TypedDict, total=False):
     canonical_call: Optional[str]
     parent_provenance_hash: Optional[str]
     superseded_by_tx: Optional[int]
-    extra: dict
+    extra: dict[str, Any]
 
 
 @dataclass(frozen=True, slots=True)

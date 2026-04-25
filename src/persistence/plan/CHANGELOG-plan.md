@@ -281,7 +281,7 @@ Downstream stores that key off `Node.id` must re-hash:
 
 **Preserving changes** — safe, will NOT move `Node.id`:
 
-- Visitor / walker logic (`_interpret.py`).
+- Visitor / walker logic (`_walk.py`; `_interpret.py` is a back-compat shim as of v0.4).
 - Error-message text on `ParseError` / `PlanSpecError`.
 - Parser whitespace / comment handling (EDN input-side only).
 - CHANGELOG / docstring edits.

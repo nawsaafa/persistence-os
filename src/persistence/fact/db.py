@@ -240,7 +240,15 @@ class DB:
                     valid_from=vf,
                     valid_to=vt,
                     op=op,
-                    provenance=prov,
+                    # type: ignore[arg-type] — parallel to the field-default
+                    # ignore in datom.py: prov is a free-form dict by
+                    # construction (caller-supplied prov_base + prompt_hash),
+                    # structurally compatible with Provenance at runtime but
+                    # not statically typed as such. D2's typed schema is a
+                    # documentation/typecheck aid; transact() does not coerce
+                    # via provenance_from_dict because that rearranges
+                    # prompt_hash into extra and changes the persisted shape.
+                    provenance=prov,  # type: ignore[arg-type]
                 )
             )
 

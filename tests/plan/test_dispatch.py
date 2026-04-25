@@ -44,10 +44,10 @@ def test_dispatcher_dispatch_calls_handlers_in_walk_order():
     # Build a small tree:  :seq [ :a, :b [ :c ] ]
     tree = Node(
         tag=":seq",
-        children=[
+        children=(
             Node(tag=":a"),
-            Node(tag=":b", children=[Node(tag=":c")]),
-        ],
+            Node(tag=":b", children=(Node(tag=":c"),)),
+        ),
     )
 
     d = Dispatcher()
@@ -70,7 +70,7 @@ def test_dispatcher_skips_unregistered_tags_silently():
 
     tree = Node(
         tag=":seq",
-        children=[Node(tag=":a"), Node(tag=":b")],
+        children=(Node(tag=":a"), Node(tag=":b")),
     )
     d = Dispatcher()
     d.register(":a", lambda n, env: "a-result")  # only :a registered
@@ -82,7 +82,7 @@ def test_dispatcher_passes_env_unchanged():
     """The env dict is passed by reference to every handler call."""
     from persistence.plan import Dispatcher, Node
 
-    tree = Node(tag=":x", children=[Node(tag=":x")])
+    tree = Node(tag=":x", children=(Node(tag=":x"),))
     seen_envs: list[int] = []
     d = Dispatcher()
     d.register(":x", lambda n, env: seen_envs.append(id(env)))
@@ -132,7 +132,7 @@ def test_dispatcher_property_dispatch_order_equals_walk_order():
         if depth >= 3 or draw(st.booleans()):
             return Node(tag=tag)
         n_children = draw(st.integers(min_value=0, max_value=3))
-        children = [draw(small_tree(depth=depth + 1)) for _ in range(n_children)]
+        children = tuple(draw(small_tree(depth=depth + 1)) for _ in range(n_children))
         return Node(tag=tag, children=children)
 
     @given(small_tree())

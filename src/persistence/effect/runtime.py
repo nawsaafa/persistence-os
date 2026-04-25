@@ -14,6 +14,13 @@ Koka-style additions:
 
 No hidden globals across threads: the active runtime lives in a ``ContextVar``,
 and each ``Runtime`` owns its handler list plus its own mask set.
+
+v0.4 seam: ``persistence.plan.Dispatcher`` provides a handler-per-tag
+registry over the plan AST walker. Effect handlers can be exposed to
+plans by registering ``Dispatcher`` handlers that delegate to
+``Runtime.perform``. The Runtime itself does NOT depend on
+``plan.Dispatcher`` — the integration is opt-in at the call site.
+See ``tests/effect/test_runtime_dispatcher_seam.py`` for the pattern.
 """
 from __future__ import annotations
 

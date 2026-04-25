@@ -45,11 +45,10 @@ def test_causal_history_walks_explicit_parent_provenance_hash():
     )
     dag = db.causal_history("p-1")
     assert len(dag.seeds) == 1
-    # parents dict records the parent hash via the seed's canonical id.
-    parent_hashes: list[str] = []
-    for parent_list in dag.parents.values():
-        parent_hashes.extend(parent_list)
-    assert "parent-hash-A" in parent_hashes
+    # parents dict records the parent hash via the seed's canonical id (e|a|tx).
+    seed = dag.seeds[0]
+    expected_cid = f"{seed.e}|{seed.a}|{seed.tx}"
+    assert dag.parents.get(expected_cid) == ["parent-hash-A"]
 
 
 def test_causal_history_max_depth_bounds_walk():

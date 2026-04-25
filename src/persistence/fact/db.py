@@ -327,6 +327,11 @@ class DB:
             return CausalDAG(seeds=seeds, parents=parents)
         for d in seeds:
             cid = _datom_canonical_id(d)
+            # Read both keys: the typed-Provenance schema (D2) uses
+            # parent_provenance_hash; legacy raw provenance dicts emitted
+            # before D2 coercion (e.g. by transact() and the audit handler
+            # via D4 aliasing) carry the same value at top-level under
+            # the colon-keyword form ":prev-hash". They are the same chain.
             parent_hash = d.provenance.get("parent_provenance_hash") \
                 or d.provenance.get(":prev-hash")
             if parent_hash:

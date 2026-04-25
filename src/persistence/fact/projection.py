@@ -72,36 +72,36 @@ class DictProjection:
         self._retracts.clear()
         self._winning.clear()
 
-    def apply(self, d: Datom) -> None:
+    def apply(self, datom: Datom) -> None:
         from persistence.fact.db import _freeze  # avoid import cycle at top
 
-        key = (d.a, _freeze(d.v), d.valid_from)
-        if d.op == "retract":
-            self._retracts.add((d.e,) + key)
-            attrs = self._entities.get(d.e)
-            if attrs and attrs.get(d.a) == d.v:
+        key = (datom.a, _freeze(datom.v), datom.valid_from)
+        if datom.op == "retract":
+            self._retracts.add((datom.e,) + key)
+            attrs = self._entities.get(datom.e)
+            if attrs and attrs.get(datom.a) == datom.v:
                 # Drop the attribute if the retract closes the currently
                 # winning assert. The rebuild pass re-plays from the start
                 # so later asserts can still overwrite.
-                winning = self._winning.get((d.e, d.a))
-                if winning == (d.valid_from, d.tx):
-                    attrs.pop(d.a, None)
-                    self._winning.pop((d.e, d.a), None)
+                winning = self._winning.get((datom.e, datom.a))
+                if winning == (datom.valid_from, datom.tx):
+                    attrs.pop(datom.a, None)
+                    self._winning.pop((datom.e, datom.a), None)
             return
 
         # op == "assert"
-        if (d.e,) + key in self._retracts:
+        if (datom.e,) + key in self._retracts:
             # The log emitted the retract after this assert in a rebuild
             # that streams forward — but for in-order streaming, retracts
             # appear *after* their assert only when a later transaction
             # emits them. Safe to skip here because the retract handler
             # will drop the entry.
             pass
-        attrs = self._entities.setdefault(d.e, {})
-        cur = self._winning.get((d.e, d.a))
-        if cur is None or (d.valid_from, d.tx) > cur:
-            attrs[d.a] = d.v
-            self._winning[(d.e, d.a)] = (d.valid_from, d.tx)
+        attrs = self._entities.setdefault(datom.e, {})
+        cur = self._winning.get((datom.e, datom.a))
+        if cur is None or (datom.valid_from, datom.tx) > cur:
+            attrs[datom.a] = datom.v
+            self._winning[(datom.e, datom.a)] = (datom.valid_from, datom.tx)
 
     def fork(self, branch_id: str) -> "DictProjection":
         """Return a fresh empty DictProjection.
@@ -131,14 +131,14 @@ def rebuild(db: DB, adapter: ProjectionAdapter) -> None:
     calling ``rebuild_view`` on ``db.since(t)`` manually.
     """
     adapter.reset()
-    for d in db.log():
-        adapter.apply(d)
+    for datom in db.log():
+        adapter.apply(datom)
 
 
 def rebuild_view(view: DBView, adapter: ProjectionAdapter) -> None:
     """Feed a pre-filtered view into the adapter. Does NOT call reset()."""
-    for d in view.datoms:
-        adapter.apply(d)
+    for datom in view.datoms:
+        adapter.apply(datom)
 
 
 __all__ = ["DictProjection", "ProjectionAdapter", "rebuild", "rebuild_view"]

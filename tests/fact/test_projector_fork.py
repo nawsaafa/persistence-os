@@ -88,8 +88,8 @@ def test_dict_projection_fork_then_rebuild_reproduces_parent():
     assert fork.as_dict() == {}
     rebuild(db, fork)
 
-    # Now fork should match parent
-    assert fork.get("p-1") == parent.get("p-1")
+    # Now fork should match parent — full snapshot equality, not just one entity
+    assert fork.as_dict() == parent.as_dict()
 
 
 def test_dict_projection_fork_isolation_property():

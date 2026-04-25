@@ -70,6 +70,37 @@ def _hash_fact(fact: dict) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+@dataclass(frozen=True, slots=True)
+class CausalDAG:
+    """Result of DB.causal_history: seeds + immediate-parent map.
+
+    seeds:    list of Datoms returned by history(e), the entry points.
+    parents:  dict mapping a datom's substrate-internal canonical id
+              (f"{d.e}|{d.a}|{d.tx}") to the list of parent hashes
+              pulled from provenance.parent_provenance_hash (or its
+              alias :prev-hash). Empty for seeds that have no parent.
+
+    The parent hashes are opaque strings — typically AuditEntry ids
+    from the effect handler's Merkle chain. Resolving them to actual
+    AuditEntries (or further datoms) is the caller's responsibility:
+    the substrate does NOT maintain a hash → entry index in v0.4.0a1.
+    """
+    seeds: list[Datom]
+    parents: dict[str, list[str]]
+
+
+def _datom_canonical_id(d: Datom) -> str:
+    """Stable identifier for a Datom in the causal DAG bookkeeping.
+
+    Returns f"{e}|{a}|{tx}". This is a substrate-internal identity for
+    walker bookkeeping ONLY — it is NOT the same as
+    `audit.AuditEntry.id` (which is content-hashed) and is NOT the
+    target of `provenance.parent_provenance_hash` (which references
+    AuditEntry ids).
+    """
+    return f"{d.e}|{d.a}|{d.tx}"
+
+
 @dataclass
 class DB:
     """An append-only datom log, read through the bitemporal query API.
@@ -262,6 +293,38 @@ class DB:
             key=lambda d: d.tx,
         )
 
+    def causal_history(self, e: str, max_depth: int = 16) -> CausalDAG:
+        """Return seeds + immediate parent hashes from provenance.
+
+        For each datom in ``history(e)``, extract
+        ``provenance.parent_provenance_hash`` (or its alias
+        ``:prev-hash`` from the audit handler) and record it in the
+        parents map keyed by the datom's substrate-internal canonical
+        id (e|a|tx).
+
+        The walk is **single-level** in v0.4.0a1: parent hashes
+        reference AuditEntry ids from the effect handler's Merkle
+        chain, which the substrate does not index. Multi-level walks
+        require AuditEntry resolution and are out of substrate scope
+        until v0.5 (or downstream callers like ai-box-vault's
+        ``/vault/why`` endpoint).
+
+        ``max_depth`` is accepted for forward-compatibility with
+        future multi-level walking; in v0.4.0a1 any value >= 1 yields
+        the same result. ``max_depth=0`` yields no parents at all.
+        """
+        seeds = self.history(e)
+        parents: dict[str, list[str]] = {}
+        if max_depth < 1:
+            return CausalDAG(seeds=seeds, parents=parents)
+        for d in seeds:
+            cid = _datom_canonical_id(d)
+            parent_hash = d.provenance.get("parent_provenance_hash") \
+                or d.provenance.get(":prev-hash")
+            if parent_hash:
+                parents.setdefault(cid, []).append(parent_hash)
+        return CausalDAG(seeds=seeds, parents=parents)
+
     def since(self, t: datetime) -> "DBView":
         """Transaction-time delta — feeds incremental sync / replication."""
         t = _coerce_dt(t)
@@ -406,4 +469,4 @@ def _find_prior_assert(
     return None
 
 
-__all__ = ["DB", "DBView", "RetroactiveCorrectionError"]
+__all__ = ["CausalDAG", "DB", "DBView", "RetroactiveCorrectionError"]

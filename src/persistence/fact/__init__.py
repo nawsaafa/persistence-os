@@ -5,6 +5,7 @@ full architectural spec and the paper §4.1 for formal definitions.
 
 Public surface:
 
+- :class:`CausalDAG`  — result of DB.causal_history (seeds + parents map)
 - :class:`Datom`      — the 8-tuple immutable fact
 - :class:`DB`         — append-only log + query API
 - :class:`DBView`  — snapshot view + entity projection
@@ -15,7 +16,7 @@ Public surface:
 """
 
 from persistence.fact.datom import Datom, Op, Provenance
-from persistence.fact.db import DB, DBView
+from persistence.fact.db import CausalDAG, DB, DBView
 from persistence.fact.projection import (
     DictProjection,
     ProjectionAdapter,
@@ -26,6 +27,7 @@ from persistence.fact.store import InMemoryStore, SQLiteStore, Store, load_migra
 from persistence.fact.wire import datom_to_wire, wire_to_datom
 
 __all__ = [
+    "CausalDAG",
     "DB",
     "DBView",
     "Datom",

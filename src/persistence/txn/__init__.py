@@ -29,3 +29,13 @@ __all__ = [
     "TxnRetryExhausted",
     "__version__",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Spec registration runs at import time so any module that imports
+# persistence.txn picks up the boundary contracts without needing a
+# separate setup call. Re-registration is idempotent.
+# ---------------------------------------------------------------------------
+from persistence.txn._specs import register_txn_specs as _register_txn_specs  # noqa: E402
+
+_register_txn_specs()

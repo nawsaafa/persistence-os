@@ -92,53 +92,53 @@ def test_dict_projection_fork_then_rebuild_reproduces_parent():
     assert fork.as_dict() == parent.as_dict()
 
 
-def test_dict_projection_fork_isolation_property():
+_FORK_ISOLATION_TS = datetime(2026, 4, 25, tzinfo=timezone.utc)
+
+
+from hypothesis import given, settings, strategies as st  # noqa: E402
+
+
+@given(
+    parent_writes=st.lists(
+        st.tuples(
+            st.text(min_size=1, max_size=8),
+            st.text(min_size=1, max_size=8),
+            st.integers(),
+        ),
+        max_size=5,
+    ),
+    fork_writes=st.lists(
+        st.tuples(
+            st.text(min_size=1, max_size=8),
+            st.text(min_size=1, max_size=8),
+            st.integers(),
+        ),
+        max_size=5,
+    ),
+)
+@settings(max_examples=50, deadline=None)
+def test_dict_projection_fork_isolation_property(parent_writes, fork_writes):
     """Property: for any sequence of writes to fork, parent unchanged.
 
     Hypothesis-driven; max_examples=50.
     """
-    from hypothesis import given, settings, strategies as st
+    ts = _FORK_ISOLATION_TS
+    parent = DictProjection()
+    for i, (e, a, v) in enumerate(parent_writes):
+        parent.apply(Datom(
+            e=e, a=a, v=v,
+            tx=i + 1, tx_time=ts, valid_from=ts,
+            valid_to=None, op="assert",
+        ))
+    parent_snapshot_before_fork = parent.as_dict()
 
-    ts = datetime(2026, 4, 25, tzinfo=timezone.utc)
+    fork = parent.fork(branch_id="b-1")
+    for i, (e, a, v) in enumerate(fork_writes):
+        fork.apply(Datom(
+            e=e, a=a, v=v,
+            tx=100 + i, tx_time=ts, valid_from=ts,
+            valid_to=None, op="assert",
+        ))
 
-    @given(
-        parent_writes=st.lists(
-            st.tuples(
-                st.text(min_size=1, max_size=8),
-                st.text(min_size=1, max_size=8),
-                st.integers(),
-            ),
-            max_size=5,
-        ),
-        fork_writes=st.lists(
-            st.tuples(
-                st.text(min_size=1, max_size=8),
-                st.text(min_size=1, max_size=8),
-                st.integers(),
-            ),
-            max_size=5,
-        ),
-    )
-    @settings(max_examples=50, deadline=None)
-    def _check(parent_writes, fork_writes):
-        parent = DictProjection()
-        for i, (e, a, v) in enumerate(parent_writes):
-            parent.apply(Datom(
-                e=e, a=a, v=v,
-                tx=i + 1, tx_time=ts, valid_from=ts,
-                valid_to=None, op="assert",
-            ))
-        parent_snapshot_before_fork = parent.as_dict()
-
-        fork = parent.fork(branch_id="b-1")
-        for i, (e, a, v) in enumerate(fork_writes):
-            fork.apply(Datom(
-                e=e, a=a, v=v,
-                tx=100 + i, tx_time=ts, valid_from=ts,
-                valid_to=None, op="assert",
-            ))
-
-        # Parent snapshot UNCHANGED after fork writes
-        assert parent.as_dict() == parent_snapshot_before_fork
-
-    _check()
+    # Parent snapshot UNCHANGED after fork writes
+    assert parent.as_dict() == parent_snapshot_before_fork

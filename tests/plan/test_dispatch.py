@@ -132,40 +132,39 @@ def test_dispatcher_propagates_unimplemented_kind_from_walker():
         d.dispatch(tree, env={})
 
 
-def test_dispatcher_property_dispatch_order_equals_walk_order():
+from hypothesis import HealthCheck, given, settings, strategies as st  # noqa: E402
+from persistence.plan import Dispatcher, Node, walk  # noqa: E402
+
+# Keep tag space small to ensure handler coverage across all property runs.
+_DISPATCH_TAG_ST = st.sampled_from([":a", ":b", ":c", ":seq"])
+
+
+@st.composite
+def _small_tree(draw, depth=0):
+    tag = draw(_DISPATCH_TAG_ST)
+    if depth >= 3 or draw(st.booleans()):
+        return Node(tag=tag)
+    n_children = draw(st.integers(min_value=0, max_value=3))
+    children = tuple(draw(_small_tree(depth=depth + 1)) for _ in range(n_children))
+    return Node(tag=tag, children=children)
+
+
+@given(_small_tree())
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+def test_dispatcher_property_dispatch_order_equals_walk_order(tree):
     """For arbitrary (small) trees, dispatch order matches walk order.
 
     Property: if all node tags have a registered echo handler, the
     list of (id, tag) pairs from dispatch matches the walker's trace.
     """
-    from hypothesis import HealthCheck, given, settings, strategies as st
-    from persistence.plan import Dispatcher, Node, walk
-
-    # Keep tag space small to ensure handler coverage.
-    tag_st = st.sampled_from([":a", ":b", ":c", ":seq"])
-
-    @st.composite
-    def small_tree(draw, depth=0):
-        tag = draw(tag_st)
-        if depth >= 3 or draw(st.booleans()):
-            return Node(tag=tag)
-        n_children = draw(st.integers(min_value=0, max_value=3))
-        children = tuple(draw(small_tree(depth=depth + 1)) for _ in range(n_children))
-        return Node(tag=tag, children=children)
-
-    @given(small_tree())
-    @settings(
-        max_examples=50,
-        deadline=None,
-        suppress_health_check=[HealthCheck.too_slow],
-    )
-    def _check(tree):
-        d = Dispatcher()
-        for tag in (":a", ":b", ":c", ":seq"):
-            d.register(tag, lambda n, env: (n.id, n.tag), replace=True)
-        results = d.dispatch(tree, env={})
-        # Compare against walker trace
-        trace = walk(tree)
-        assert [r[0] for r in results] == trace
-
-    _check()
+    d = Dispatcher()
+    for tag in (":a", ":b", ":c", ":seq"):
+        d.register(tag, lambda n, env: (n.id, n.tag), replace=True)
+    results = d.dispatch(tree, env={})
+    # Compare against walker trace
+    trace = walk(tree)
+    assert [r[0] for r in results] == trace

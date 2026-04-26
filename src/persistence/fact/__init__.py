@@ -13,9 +13,10 @@ Public surface:
 - :class:`InMemoryStore` / :class:`SQLiteStore` — reference backends
 - :func:`load_migrations` — list of ``(name, sql)`` DDL blobs
 - :class:`Provenance`  — typed schema for ``Datom.provenance``
+- :func:`provenance_from_dict` — coerce a free-form dict to :class:`Provenance`
 """
 
-from persistence.fact.datom import Datom, Op, Provenance
+from persistence.fact.datom import Datom, Op, Provenance, provenance_from_dict
 from persistence.fact.db import CausalDAG, DB, DBView
 from persistence.fact.projection import (
     DictProjection,
@@ -36,6 +37,7 @@ __all__ = [
     "Op",
     "ProjectionAdapter",
     "Provenance",
+    "provenance_from_dict",
     "SQLiteStore",
     "Store",
     "datom_to_wire",

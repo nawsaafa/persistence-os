@@ -62,11 +62,11 @@ def test_provenance_from_dict_lifts_known_keys():
         "another_extra": "value",            # unknown
     }
     p = provenance_from_dict(raw)
-    assert p["source"] == "test"
-    assert p["handler_id"] == "h-1"
+    assert p.get("source") == "test"
+    assert p.get("handler_id") == "h-1"
     assert "extra" in p
-    assert p["extra"]["my_custom_key"] == 42
-    assert p["extra"]["another_extra"] == "value"
+    assert p.get("extra", {})["my_custom_key"] == 42
+    assert p.get("extra", {})["another_extra"] == "value"
 
 
 def test_provenance_from_dict_preserves_existing_extra():
@@ -77,9 +77,9 @@ def test_provenance_from_dict_preserves_existing_extra():
         "uncategorized_top_level": "lifted",
     }
     p = provenance_from_dict(raw)
-    assert p["source"] == "test"
-    assert p["extra"]["pre_existing"] == "yes"
-    assert p["extra"]["uncategorized_top_level"] == "lifted"
+    assert p.get("source") == "test"
+    assert p.get("extra", {})["pre_existing"] == "yes"
+    assert p.get("extra", {})["uncategorized_top_level"] == "lifted"
 
 
 def test_provenance_from_dict_empty_input():
@@ -97,8 +97,8 @@ def test_datom_accepts_typed_provenance_construction():
         tx=1, tx_time=ts, valid_from=ts, valid_to=None, op="assert",
         provenance=p,
     )
-    assert d.provenance["source"] == "test"
-    assert d.provenance["handler_id"] == "h-1"
+    assert d.provenance.get("source") == "test"
+    assert d.provenance.get("handler_id") == "h-1"
 
 
 def test_provenance_wire_roundtrip_preserves_typed_shape():

@@ -84,6 +84,13 @@ class CausalDAG:
     from the effect handler's Merkle chain. Resolving them to actual
     AuditEntries (or further datoms) is the caller's responsibility:
     the substrate does NOT maintain a hash → entry index in v0.4.0a1.
+
+    Mutability note: ``seeds`` and ``parents`` are exposed as their natural
+    mutable types (``list``, ``dict``) for ergonomic consumption. The
+    dataclass is ``frozen=True, slots=True`` for attribute-assignment
+    protection but does NOT recursively freeze the containers — treat as
+    read-only by convention. v0.5 may switch to ``tuple`` + ``Mapping`` if
+    multi-level walking surfaces a need.
     """
     seeds: list[Datom]
     parents: dict[str, list[str]]

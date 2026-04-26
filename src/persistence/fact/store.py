@@ -409,7 +409,7 @@ def _with_tx(d: Datom, tx: int) -> Datom:
         valid_from=d.valid_from,
         valid_to=d.valid_to,
         op=d.op,
-        provenance=prov,
+        provenance=prov,  # type: ignore[arg-type]  # D2 ripple — see db.py:251
         invalidated_by=d.invalidated_by,
     )
 

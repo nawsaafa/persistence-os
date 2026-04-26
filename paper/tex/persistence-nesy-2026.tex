@@ -1,0 +1,43 @@
+% !TEX program = tectonic
+\documentclass[anon]{nesy2026}   % submission: [anon]; camera-ready: [final]
+
+% --- light extras the class does NOT auto-load ---
+\usepackage{booktabs}              % nicer tabular rules
+\usepackage{makecell}              % multi-line table cells (§2.6 capability matrix)
+
+% --- propositions: JMLR class predefines proposition, theorem, lemma,
+% --- remark, example. No \newtheorem needed. Use \begin{proposition}...
+% --- \end{proposition} directly with \label{prop:...} for \theoremref.
+
+% --- inline code-span macro ---
+\newcommand{\C}[1]{\texttt{#1}}
+
+% --- title + author (JMLR-style) ---
+\title[Persistence OS]{Toward Accountable Neurosymbolic Runtimes: The Persistence OS Substrate}
+
+% Author block — class option [anon] auto-suppresses names in submission PDF.
+% For camera-ready, flip the documentclass option to [final] and the same author
+% block renders with names.
+\clearauthor{%
+  \Name{Author Name}                       % TODO: real name pre-camera-ready
+  \Email{anonymous@example.com}            % TODO: real email pre-camera-ready
+  \\\addr Affiliation                      % TODO: real affiliation pre-camera-ready
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+% Abstract goes here — Task 13.
+\end{abstract}
+
+% Body sections go here — Tasks 14-22.
+
+% Acknowledgements — \acks{} is JMLR-native; auto-suppressed under [anon].
+\acks{% Set under [final] before camera-ready.
+}
+
+\bibliography{references}   % no \bibliographystyle — class controls it
+
+\end{document}

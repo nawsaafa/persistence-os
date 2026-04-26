@@ -4,6 +4,8 @@ from __future__ import annotations
 import inspect
 from datetime import datetime, timezone
 
+from hypothesis import given, settings, strategies as st
+
 from persistence.fact import DB, Datom, InMemoryStore
 from persistence.fact.projection import DictProjection, ProjectionAdapter, rebuild
 
@@ -93,9 +95,6 @@ def test_dict_projection_fork_then_rebuild_reproduces_parent():
 
 
 _FORK_ISOLATION_TS = datetime(2026, 4, 25, tzinfo=timezone.utc)
-
-
-from hypothesis import given, settings, strategies as st  # noqa: E402
 
 
 @given(

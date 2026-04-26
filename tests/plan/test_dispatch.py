@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
+
+from persistence.plan import Dispatcher, Node, walk
 
 
 def test_dispatcher_register_stores_handler():
@@ -131,9 +134,6 @@ def test_dispatcher_propagates_unimplemented_kind_from_walker():
     with pytest.raises(UnimplementedNodeKindError):
         d.dispatch(tree, env={})
 
-
-from hypothesis import HealthCheck, given, settings, strategies as st  # noqa: E402
-from persistence.plan import Dispatcher, Node, walk  # noqa: E402
 
 # Keep tag space small to ensure handler coverage across all property runs.
 _DISPATCH_TAG_ST = st.sampled_from([":a", ":b", ":c", ":seq"])

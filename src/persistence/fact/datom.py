@@ -81,7 +81,7 @@ def provenance_from_dict(raw: dict) -> Provenance:
     runtime, and the canonical form serializes both shapes identically
     (sort_keys=True flattens any structural difference).
 
-    Not used by ``DB.transact()`` — see explanation at ``db.py:243-249`` re:
+    Not used by ``DB.transact()`` — see explanation at ``db.py:250-260`` re:
     preserving the persisted wire shape. Provided as a convenience for callers
     who construct a :class:`Datom` directly with caller-shaped provenance dicts
     and want to canonicalize the layout to the typed schema.
@@ -137,7 +137,7 @@ class Datom:
     # produces a valid empty Provenance.  The wire-roundtrip canonical-hash test
     # (`tests/fact/test_provenance_schema.py::test_wire_roundtrip_preserves_canonical_hash`)
     # pins this identity end-to-end.  See the parallel suppression at
-    # `src/persistence/fact/db.py:243-251` for the same pattern at the call site.
+    # `src/persistence/fact/db.py:250-260` for the same pattern at the call site.
     provenance: Provenance = field(default_factory=dict)  # type: ignore[assignment]
     invalidated_by: Optional[int] = None
 

@@ -34,7 +34,7 @@ class _UuidStringSpec(Spec):
                 hint="provide a UUID string in canonical 8-4-4-4-12 hex form",
             )
         try:
-            uuid.UUID(value)
+            parsed = uuid.UUID(value)
         except (ValueError, AttributeError):
             return ConformError(
                 spec_key=self.spec_name,
@@ -42,7 +42,11 @@ class _UuidStringSpec(Spec):
                 reason="not a valid UUID string",
                 hint="provide a UUID string in canonical 8-4-4-4-12 hex form",
             )
-        return Conformed(value=value, spec_key=self.spec_name)
+        # Normalise to canonical lowercase 8-4-4-4-12 form. uuid.UUID()
+        # accepts uppercase and braced inputs; if we passed those through
+        # they would fail the outer :persistence.fact/datom spec which
+        # uses the strict uuid_() primitive.
+        return Conformed(value=str(parsed), spec_key=self.spec_name)
 
     def _generate(self):
         return str(uuid.uuid4())  # noqa: wall-clock

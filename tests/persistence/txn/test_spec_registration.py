@@ -39,3 +39,17 @@ def test_retry_count_spec_conforms_non_negative_int():
     assert conform(":persistence.txn/retry-count", 5).is_ok
     assert not conform(":persistence.txn/retry-count", -1).is_ok
     assert not conform(":persistence.txn/retry-count", "5").is_ok
+    # Python `isinstance(True, int) is True`; guard must reject bools.
+    assert not conform(":persistence.txn/retry-count", True).is_ok
+    assert not conform(":persistence.txn/retry-count", False).is_ok
+
+
+def test_commit_id_spec_normalises_braced_and_uppercase_uuid():
+    from persistence.spec import Conformed, conform
+    canonical = "550e8400-e29b-41d4-a716-446655440000"
+    # uuid.UUID() accepts uppercase and braced; the spec must canonicalise
+    # so downstream :persistence.fact/datom (strict uuid_()) doesn't fail.
+    upper = conform(":persistence.txn/commit-id", canonical.upper())
+    braced = conform(":persistence.txn/commit-id", "{" + canonical + "}")
+    assert isinstance(upper, Conformed) and upper.value == canonical
+    assert isinstance(braced, Conformed) and braced.value == canonical

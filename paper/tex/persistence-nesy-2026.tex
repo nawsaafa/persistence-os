@@ -136,7 +136,19 @@ Regulator-replay fidelity                      &           &           &        
 $^*$Byte-identical NO-OP replay in Phase 1 is verified for toy agents with fixed rng-consumption; the per-step-rng-recording extension for LLM leaves is Phase 2 (\sectionref{sec:replay}, \S6.2).
 
 \section{The Persistence Thesis}\label{sec:thesis}
-% Task 21 (Pandoc prose)
+
+We state six substrate invariants. Invariants 1, 2, and 5 are fully realized in Phase 1; invariant 3 is realized at the \emph{shape + parse + validate} layer by Phase 2.B (with the execution runtime in Phase 2.C); invariants 4 and 6 remain frozen at the spec-registry boundary with runtime implementation scheduled for Phase 2.
+
+\begin{enumerate}
+\item \textbf{Every fact is immutable, temporal, content-addressed.} Memory, audit, plan, skill, transaction --- all datoms. Provenance, counterfactual branching, and audit trails are derived, not engineered. \emph{[Phase 1: shipped --- \C{persistence.fact}.]}
+\item \textbf{Every action is an effect.} LLM calls, tool calls, memory writes, and side effects pass through a composable handler stack. Policy, safety, caching, dry-run, and retry are handler instances. \emph{[Phase 1: shipped --- \C{persistence.effect}, 15-op catalog.]}
+\item \textbf{Every plan is an EDN AST.} Agents read, edit, and evolve their own plans. Skills are named AST subtrees promoted under statistical evidence. Plan optimization is structural search. \emph{[Phase 1: \C{:persistence.plan/node} and \C{:persistence.plan/skill} specs registered (\C{src/persistence/spec/\_canonical.py}). Phase 2.B (shipped, v0.2.0a1): \C{persistence.plan} module with parse / unparse / walk / spec-validation over a uniform \C{[tag \{attrs\} *children]} AST across all 16 node kinds; 128-bit content-addressing via \C{sha256(canonical(node))[:32]}; byte-identical parse/unparse round-trip pinned by hypothesis property at \C{max\_examples=200}. Execution runtime (effect dispatch, optimizer ladder, 4-gate skill promotion) is Phase 2.C.]}
+\item \textbf{Every shared state change is a transaction.} STM coordinates multi-agent belief updates without locks or message passing. \emph{[Phase 1: design frozen in \C{docs/agent*-spec.md}; Txn-module runtime is Phase 2.]}
+\item \textbf{Every LLM boundary has a spec.} Parse-don't-validate at trust boundaries. Generative testing from specs. Self-healing via spec-error feedback. \emph{[Phase 1: shipped --- \C{persistence.spec}, 186 tests.]}
+\item \textbf{Everything is REPL-live.} Inspection, editing, rewind, and speculative branching apply to running production agents, not only development loops. \emph{[Phase 1: rewind semantics subsumed by \C{as\_of} on the shipped Fact module; REPL-module runtime is Phase 2.]}
+\end{enumerate}
+
+\textbf{Thesis.} These six invariants, implemented together as a single runtime with a shared substrate, produce a system where accountability, replay, counterfactuals, composable safety, compositional skill promotion, coordinated multi-agency, and live production steering are \emph{properties of the substrate} --- not features engineered separately per agent. Phase 1 and the first Phase-2 increment together demonstrate five of these as shipped properties: accountability via the Merkle-hashed audit chain on the Fact log; replay via byte-identical NO-OP on the Replay engine; counterfactual branching via \C{branch()} on the Fact store; composable safety via the Effect handler stack with a machine-checkable well-formedness property; and homoiconic plan-as-data via the Phase 2.B Plan module's content-addressed parse/walk/spec-validation surface. Phase 2.C ships the remaining two capabilities (multi-agent coordination via Txn, live production steering via REPL) plus Plan-execution (optimizer ladder and 4-gate skill promotion) on top of the same substrate, with no substrate schema changes required --- that non-requirement is the testable form of the thesis.
 
 \section{Formalization}\label{sec:formal}
 

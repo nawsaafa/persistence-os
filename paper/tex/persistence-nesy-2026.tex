@@ -46,7 +46,139 @@ Pangolin's algebraic-effect handlers~\citep{cheng2025pangolin}.
 % Task 21 (Pandoc prose)
 
 \section{Formalization}\label{sec:formal}
-% Task 14 (5 propositions hand-port across §4.1-§4.7)
+
+The formalization below tracks the Phase 1 reference implementation. Where a claim depends on Phase 2 work, we mark it explicitly.
+
+\subsection{Datoms and bitemporal queries}\label{sec:datoms}
+
+A \textbf{datom} is an eight-tuple:
+
+\begin{equation}\label{eq:datom}
+d = \langle e,\ a,\ v,\ \tau,\ \tau_{sys},\ \nu_{from},\ \nu_{to},\ \omega \rangle
+\end{equation}
+
+where $e$ is an entity identifier, $a$ a namespaced attribute, $v$ an EDN value, $\tau$ a monotonic transaction id, $\tau_{sys}$ the ingestion (system) time, $\nu_{from}$ and $\nu_{to}$ the valid-time interval, and $\omega \in \{\text{assert}, \text{retract}\}$. A provenance record $\pi$ accompanies each datom; v0.4.0a1 ships its typed schema as the \C{Provenance} \C{TypedDict} (\C{total=False}) over seven known keys --- \C{source}, \C{tx\_time}, \C{handler\_id}, \C{canonical\_call}, \C{parent\_provenance\_hash}, \C{superseded\_by\_tx}, and a free-form \C{extra} map for caller-defined fields. The schema is deliberately model-pluggable: \C{handler\_id} names the registered effect handler that produced the datom, \C{canonical\_call} is a content hash of the call site (model + prompt + tools + params), and there is no \C{:provider} field --- the neural model is a plug-in, not embedded in the substrate's shape. An optional pointer \C{invalidated-by} links a superseded datom to the transaction that superseded it. Phase 1 seals provenance with a SHA-256 content hash. Cryptographic per-transaction signatures (ed25519) are Phase 2 work and are discussed as a privacy-posture extension in \S7.2.
+
+The database $D$ is a finite set of datoms. We define the core queries:
+
+\begin{itemize}
+\item $\text{asOf}(D, t) = \{d \in D \mid \tau_{sys}(d) \leq t\}$
+\item $\text{validAsOf}(D, t) = \{d \in D \mid \omega(d) = \text{assert} \land \nu_{from}(d) \leq t < \nu_{to}(d)\}$
+\item $\text{history}(D, e) = \{d \in D \mid \text{entity}(d) = e\}$, sorted by $\tau$
+\item $\text{branch}(D, t, \Delta) = \text{asOf}(D, t) \cup \Delta$, where $\Delta$ is a set of hypothetical datoms
+\end{itemize}
+
+Projection-layer counterfactuals are supported via \C{ProjectionAdapter.fork(branch\_id)} (v0.4.0a1; \C{DictProjection.fork()} reference impl) --- a Protocol method returning a fresh empty adapter that the caller populates by driving \C{rebuild()} against a branched DB. This closes a previously-implicit assumption that a counterfactual run could observe ordinary \C{apply()} writes from its parent's projection.
+
+\begin{proposition}[Branch is a logical operation over the shipped store]\label{prop:branch}
+\C{branch(D, t, $\Delta$)} returns a new \C{DB} value backed by a fresh in-memory store seeded with \C{asOf(D, t)} and extended with $\Delta$; writes to the branched value cannot leak back into the parent store. \emph{Complexity:} on the Phase 1 \C{InMemoryStore} reference implementation (\C{src/persistence/fact/db.py}), materialization is $O(|D|)$ in the seed snapshot plus $O(|\Delta|)$ in the hypothetical additions. \emph{Phase 2 upgrade:} under a persistent hash-array-mapped-trie (HAMT) backing store, the seed step reduces to $O(|\Delta| \log |D|)$ via structural path-copy; the \C{Store} Protocol boundary makes this a drop-in replacement requiring no change to \C{branch}'s interface.
+\end{proposition}
+
+\emph{Remark.} The Phase 1 complexity is honest rather than ideal: Python lists and dicts are not persistent data structures, and we chose to ship a correct list-backed implementation rather than pull in \C{pyrsistent} / \C{immutables.Map} for Phase 1. The \emph{isolation} property --- branched writes do not mutate the parent --- holds unconditionally on the shipped code and is the load-bearing property for counterfactual reasoning.
+
+\subsection{Effects, handlers, and well-formedness}\label{sec:effects}
+
+An effect signature is a typed pair $\langle \text{op}: \kappa,\ \text{args}: \sigma_{in} \rightharpoonup \sigma_{out} \rangle$. The minimum catalog $K$ is:
+
+\begin{align*}
+K = \{ & \C{llm/call},\ \C{tool/call},\ \C{mem/read},\ \C{mem/write},\ \C{decide},\ \C{ask-user}, \\
+       & \C{emit-artifact},\ \C{sleep},\ \C{random},\ \C{env/read},\ \C{net/fetch},\ \C{secret/use}, \\
+       & \C{cost/charge},\ \C{clock/now},\ \C{audit/emit} \}
+\end{align*}
+
+A \textbf{handler} $h$ is a partial function on operations with continuation semantics:
+
+\begin{equation}\label{eq:handler}
+h : (\kappa,\ \sigma_{in},\ k : \sigma_{out} \to \alpha,\ \mathrm{ctx}) \to \alpha
+\end{equation}
+
+A handler stack $H = [h_1, h_2, \dots, h_n]$ with $h_1$ outermost dispatches operation $\kappa$ to the outermost handler whose domain contains $\kappa$; that handler invokes the continuation $k$, which delegates to the remaining stack.
+
+\begin{proposition}[Well-formedness; machine-checkable on the shipped runtime]\label{prop:wellformed}
+A stack $H$ over catalog $K$ is well-formed iff for every $\kappa \in K$, at least one handler above the raw base handles $\kappa$. The shipped \C{Runtime.is\_well\_formed(catalog)} (\C{src/persistence/effect/runtime.py}) decides this property in $O(|H| \cdot |K|)$ time; \C{Runtime.uncovered\_ops(catalog)} returns the witness set. At runtime, \C{Runtime.perform(op, \dots)} raises \C{Unhandled} when no handler covers $\kappa$ --- the property is not merely asserted but \emph{enforced on every call}.
+\end{proposition}
+
+This is the paper's strongest formal contribution on the Phase-1 artifact: a decidable, linear-time, machine-checked completeness property over the runtime's neurosymbolic interface, with runtime enforcement via \C{Unhandled}. The check is exercised in the Phase 1 test suite. Properties above the effect layer (audit chain integrity \sectionref{sec:audit}, replay determinism \sectionref{sec:replay}) build on well-formedness of the deployed stack; policy composition is \emph{convenient} to express once well-formedness holds but is not itself a substrate invariant (\sectionref{sec:audit} treats audit-universality as a stack-configuration contract, not a substrate property).
+
+Handlers compose \emph{masked} (following Koka's named/masked semantics): $\text{mask}_a(h)$ prevents $h$ from intercepting operations of attribute $a$ within its own body, eliminating re-entrant loops when, e.g., a policy handler itself needs to call the LLM.
+
+\subsection{The Merkle-hashed audit chain}\label{sec:audit}
+
+When the \C{audit} handler wraps a set of operations $W \subseteq K$, each effect on $\kappa \in W$ emits a datom recording (op, args, verdict, provenance, \C{prev\_hash}) before the continuation fires. The chain is built by taking \C{sha256(canonical\_serialize(entry) || prev\_hash)} at each link. Phase 1 ships:
+
+\begin{itemize}
+\item \C{make\_audit\_handler(wraps, \dots)} with configurable $W$ and a default of \C{("llm/call",)}.
+\item \C{verify\_chain(entries) $\to$ bool}, which re-derives each \C{prev\_hash} from the canonical serialization and detects field-mutation tamper.
+\item \C{audit\_entry\_to\_datom(entry) $\to$ datom-shaped record} that flows the audit entry into the Fact log.
+\item \emph{(v0.4.0a1)} \C{audit\_entry\_to\_datom} additionally writes a \C{parent\_provenance\_hash} alias alongside the existing \C{:prev-hash} keyword --- both keys point to the same chain hash. This bridges audit-entry datoms into the typed \C{Provenance} schema (\sectionref{sec:datoms}) so that \C{DB.causal\_history(e)} walks audit chains and ordinary fact-log derivation chains under one query primitive. Tamper-evidence (Proposition~\ref{prop:tamper}) is preserved by construction: \C{verify\_chain} reads \C{:prev-hash} unchanged, and the new alias is an additional emitted field, not a replacement.
+\end{itemize}
+
+\textbf{Integrity contract.} \C{verify\_chain} detects any single-field mutation inside an entry (tested). Deletion/reorder coverage is flagged in the Round-1 rigor review and is a hardening target for Round 2. Authenticity --- proving \emph{who} signed --- is distinct from integrity and is not claimed for Phase 1: the current \C{signature} slot stores a SHA-256 content hash, and per-transaction ed25519 signing is Phase 2 work (\S7.2).
+
+\begin{proposition}[Audit-chain immutability]\label{prop:tamper}
+For any audit-chain $C = \langle e_0, e_1, \dots, e_n \rangle$ produced by \C{make\_audit\_handler}'s Merkle-hashed chain-append clause, \C{verify\_chain(C) = True} iff for all $i$, $e_i.\text{id} = \text{sha256}(\text{canonical}(e_i.\text{fields} \setminus \{\text{id}\}))$ and $e_i.\text{prev\_hash} = e_{i-1}.\text{id}$ --- i.e. no entry has been mutated, deleted, reordered, or truncated from the middle. This is exercised end-to-end by \C{tests/effect/test\_audit.py::test\_tampering\_an\_entry\_breaks\_the\_chain}, \C{test\_deleting\_an\_audit\_entry\_breaks\_the\_chain}, and \C{test\_reordering\_audit\_entries\_breaks\_the\_chain}; tail-truncation is allowed by construction (\C{test\_truncating\_audit\_entries\_from\_tail\_preserves\_chain}) and must be detected by regulators comparing a separately-recorded expected length.
+\end{proposition}
+
+\textbf{Universality contract.} ``Every effect emits a datom'' is an invariant of the deployed stack, not the substrate: it holds when and only when the audit handler's $W$ covers the full catalog. Phase 1 exposes \C{Runtime.is\_well\_formed(catalog)} to check coverage of $W$ against $K$; a \C{Runtime.assert\_universal\_audit} hardening is scheduled for Round 2. For regulated deployments (Case A in \S6.5), the configured stack wraps all 15 ops.
+
+\subsection{Plans (Phase 2.B shipped: parse/walk/spec-validation; execution Phase 2.C)}\label{sec:plans}
+
+A plan is a labeled tree where internal nodes are \emph{control operators} ($\text{seq}$, $\text{par}$, $\text{choice}$, $\text{loop}$, $\text{race}$, $\text{let}$, $\text{branch}$) and leaves are \emph{effect invocations} ($\text{tool-call}$, $\text{llm-call}$, $\text{code}$, $\text{checkpoint}$) or \emph{cognitive operators} ($\text{reflect}$, $\text{verify}$, $\text{call-skill}$). Every node $n$ carries a content identity $\text{id}(n) = \text{sha256}(\text{canonical}(n))[:32]$ used as its Merkle-DAG handle. The \C{:persistence.plan/node} spec is registered in \C{src/persistence/spec/\_canonical.py} (Phase 1); the Phase 2.B \C{persistence.plan} module (v0.2.0a1, merged 2026-04-24) ships parse, unparse, depth-first walk, and spec validation against this shape. The shipped spec encodes each node as an EDN vector \C{[:tag \{attrs\} \& children]} rather than a map --- a deliberate Lisp-style choice that makes plan ASTs \emph{homoiconic}: a plan literal is indistinguishable from the EDN data that describes it, and the homoiconicity contract's allowed self-edits (read / splice / compose / rewrite / fork / promote) reduce to list-splicing operations over well-typed vectors rather than reflective key-dispatch on a \C{:node/kind} field. This is what makes the parse-don't-validate methodology (\sectionref{sec:specs}) first-class rather than cosmetic.
+
+\begin{proposition}[Plan content-addressing with descendant propagation]\label{prop:plan}
+For any plan node $n = \langle \text{tag}, \text{attrs}, \text{children} \rangle$ constructed through the shipped \C{Node} constructor, the identity $\text{id}(n) = \text{sha256}(\text{canonical}(n))[:32]$ is a 128-bit prefix of a cryptographic hash over the canonical JSON serialization of $n$'s tag, its alphabetically-sorted attr map (with non-finite floats rejected at construction, non-string / colon-prefixed / empty / reserved (\C{id}, \C{:id}) attr keys rejected at construction, and user-supplied top-level \C{:id} additionally stripped at parse as defense-in-depth against external EDN hash-poisoning), and its children's ids recursively. Consequently, for any descendant modification of a tree $T$ at depth $d$ producing $T'$, every ancestor id on the root-to-leaf path differs between $T$ and $T'$. Property-checked at \C{max\_examples=200} on two headline properties (round-trip id preservation and descendant-mutation propagation) and \C{max\_examples=50} on four supporting properties by \C{tests/plan/test\_property.py}, with hypothesis strategies spanning all 16 node kinds, nested attr maps to depth 2, and float32 numeric values. \emph{Byte-identity of the canonical form under round-trip} is pinned by \C{test\_round\_trip\_preserves\_id}: for any hypothesis-generated $n$, $\text{id}(\text{parse}(\text{unparse}(n))) = \text{id}(n)$ --- a property that, before v0.2.0a3, was falsified by \C{Node}-constructed nodes carrying a user-supplied \C{id} attr that the parser silently stripped; the construct-vs-parse asymmetry is now closed by rejecting reserved keys at both sides. Spec conformance against \C{:persistence.plan/node} is enforced at parse time when \C{strict=True} and is exercised by 32 per-kind malformed parametrize cases (8 leaf-kinds $\times$ non-dict-attrs + 8 container-kinds $\times$ malformed-child + 16 kinds $\times$ wrong-tag-case); the 7 remaining \C{xfail} cases scope the Phase-2.C per-kind required-attr tightening and do \emph{not} mask the shipped claim. Birthday-collision probability at 1\% reaches $\approx 2.6 \times 10^{18}$ plans at the 128-bit width --- a width argued explicitly in the \C{CHANGELOG-plan.md} entry for commit \C{190668a} rather than left unstated.
+\end{proposition}
+
+v0.4.0a1 layers a handler-per-tag dispatch seam over the existing AST walker. The \C{Dispatcher} class (\C{persistence.plan.\_dispatch}) registers a handler per tag with raise-on-duplicate semantics by default and dispatches by walking the tree once --- walk order $\equiv$ dispatch order, property-tested with hypothesis at \C{max\_examples=50}. The walker module itself is renamed \C{\_walk.py} (was \C{\_interpret.py}; back-compat shim retained). This is the seam Phase 2.C will bind effect handlers into without requiring AST shape changes --- \C{PLAN\_CANONICAL\_VERSION} stays at 1.
+
+\emph{Neurosymbolic reading.} Proposition~\ref{prop:plan} is the formal identity law for a \textbf{homoiconic neurosymbolic AST}. The skeleton (tag, attrs, children) is symbolic --- editable, optimizable, regulator-readable; the leaves (\C{:llm-call}, \C{:code}, \C{:reflect}) are neural. Descendant propagation means every structural edit of the symbolic layer produces a new ancestor-id path --- a verifiable identity surface that Phase-2.C plan optimizers (MIPROv2, MCTS-over-Plan) walk over the symbolic scaffold while leaves remain neural. To our knowledge, this is the first content-addressing identity law stated and property-checked for an LLM-leaf-bearing plan AST; the symmetric construct-and-parse rejection of reserved-id keys makes the identity a \emph{substrate} property rather than a parser contract.
+
+The homoiconicity contract defines the agent's allowed self-edits: $\text{read}$, $\text{splice}$, $\text{compose}$, $\text{rewrite}$, $\text{fork}$, $\text{promote}$. Forbidden without explicit capability: editing $\text{verify}$ nodes (which would defeat any future proof-of-thought guarantees, per Proof-of-Thought~\citep{fan2024proofofthought}), modifying ancestors of the currently-executing frame (prevents self-suicide), introducing unbounded $\text{loop}$.
+
+A \textbf{skill} is a quadruple $\langle \text{name},\ \text{version},\ \text{ast},\ \text{stats} \rangle$ with stats $\{\text{uses}, \text{success}, \text{cost}\}$, encoded by the \C{:persistence.plan/skill} spec. A subtree $T$ of plan $P$ is to be promoted to a named skill iff all four gates hold (Phase 2 runtime):
+
+\begin{enumerate}
+\item $\text{uses}(T) \geq 3$
+\item $T$ appears in $\geq 2$ distinct parent plans
+\item Rolling success rate of $T$ $\geq 0.8$
+\item The LLM-generated docstring of $T$ retrieves $T$ as top-1 over the existing skill library.
+\end{enumerate}
+
+Gate (4) is the cheapest way to enforce semantic non-collision: if an LLM-written description of the skill cannot retrieve the skill itself from the library, the skill's function is not well-defined in the context of its peers.
+
+\subsection{Trajectories and replay}\label{sec:replay}
+
+A \textbf{trajectory} is an ordered sequence of effect datoms sharing a run-id, plus a seed vector $\sigma = \langle \sigma_{llm}, \sigma_{tool}, \sigma_{env} \rangle$. An \textbf{intervention set} is $I = [\langle \text{step},\ \text{field},\ \text{new-value} \rangle, \dots]$ --- a (possibly empty) list of per-step modifications to the counterfactual, sorted by \C{step}. The single-triple case is the Phase-1 default; the shipped replay engine and the \C{:trajectory/intervention} slot (registered as \C{seq\_of(:persistence.replay/intervention)}) both accept the multi-entry form.
+
+The replay operator is:
+
+\begin{align*}
+\text{replay}(T, I) = T' \text{ where } & T'_i = T_i \quad \forall i < I.\text{step} \quad \text{(verbatim prefix)} \\
+& T'_{I.\text{step}} = T_{I.\text{step}} \oplus I \quad \text{(intervention applied)} \\
+& T'_i = \text{execute}(T_{i-1}, \sigma) \quad \forall i > I.\text{step} \quad \text{(re-executed suffix)}
+\end{align*}
+
+with effect calls in the suffix routed through a \emph{replay handler} that returns cached responses from the audit log, keyed by args-hash.
+
+\begin{proposition}[Replay determinism --- stronger NO-OP form]\label{prop:noop}
+If all non-determinism in the agent routes through effects in catalog $K$, \textbf{and} the per-step rng-consumption pattern is recorded, then $\text{replay}(T, I)$ produces a deterministic counterfactual trajectory that diverges from $T$ exactly at $I.\text{step}$. Phase 1 specializes and \emph{strengthens} this for the NO-OP case (an intervention that applies but does not change any value): \emph{(NO-OP byte-identity; tested.)} For a NO-OP intervention on a toy agent instrumented via the shipped replay engine, $\text{trajectory\_hash}(\text{replay}(T, I_{\text{noop}})) = \text{trajectory\_hash}(T)$ --- \emph{byte-identical} on the canonical serialization, not merely statistically close. Verified by \C{tests/replay/test\_determinism.py::test\_noop\_intervention\_produces\_byte\_identical\_trajectory}.
+\end{proposition}
+
+This strengthens CAMO's aspirational aligned-randomness claim in the direction NeSy reviewers will care about: the guarantee is a \emph{structural} property of the canonical-serialization hash, decidable byte-wise, not a statistical claim about outcome-delta distributions. Extending the property from a toy agent (whose per-step rng-consumption is fixed by construction in \C{conftest.py}) to real LLM trajectories requires replacing the current \C{\_advance\_rngs\_to\_match} heuristic with a recorded per-step rng-state vector. This is Phase 2 work and a prerequisite for the \S6.2 CAMO-style evaluation numbers in the camera-ready.
+
+\subsection{Transactions}\label{sec:transactions}
+
+A \textbf{ref} is a pair $\langle \iota, \tau_{\text{current}} \rangle$ where $\iota$ is an identity and $\tau_{\text{current}}$ the most recent transaction id. A transaction body is a thunk that reads and writes refs; commit emits an atomic set of datoms, CAS-ing on all read refs' $\tau$. On conflict, the transaction is retried. Composition is automatic: a transaction that calls another transaction inherits the outer's write set. The Txn-module runtime is Phase 2.
+
+\subsection{Specs and the self-healing LLM contract}\label{sec:specs}
+
+A \textbf{spec} $s$ is a predicate-generator pair $\langle p : \sigma \to \text{bool},\ g : \emptyset \to \sigma \rangle$. Parsing (conforming) a value $x$ against $s$ yields either a refined value or $\bot$ --- a true discriminated union in the shipped \C{\_conform} (\C{Conformed} \textbar{} \C{ConformError}, not silent coercion). The boundary contract is: business logic is typed against conformed values; raw inputs cannot reach it. Specs are first-class EDN data --- composable, diffable, versionable.
+
+\textbf{Self-healing contract (shipped).} When conform fails, \C{spec.explain\_for\_llm(err)} returns a structured message containing the field path, the failure reason, and a Fix-clause-annotated hint. This is the agent-facing surface of the spec module: when an LLM produces a structurally-malformed tool call or plan node, the spec layer does not simply reject it but returns a prompt-ready correction hint that the agent can retry against. This formalizes a \textbf{conform $\to$ explain $\to$ retry} contract that turns spec violations into structured neurosymbolic self-correction, and is tested at \C{tests/spec/test\_llm\_errors.py}. We claim this as a concrete neurosymbolic contribution --- the symbolic layer emits hints that the neural layer can consume --- distinct from post-hoc error logging.
+
+\textbf{Self-conforming producers (shipped).} Phase 1 specs are bidirectional contracts, not merely input guards. Every load-bearing producer --- \C{audit\_entry\_to\_datom}, \C{AuditEntry.to\_edn}, \C{Trajectory.to\_edn}, \C{datom\_to\_wire}, \C{wire\_to\_datom} --- calls \C{spec.conform(\dots)} against its own return value and raises \C{ValueError} on mismatch. A defect in a producer fails loudly at the producer's site, not later inside a consumer that read the bad wire form. This is a stronger invariant than consumer-side validation: the boundary contract is machine-checked at emission time, which means a paper-stated property about a wire shape is enforced by the code that emits it, not by downstream discipline.
+
+\textbf{Forward-compatible spec-first commitment.} In Phase 1 we register \C{:persistence.plan/node} and \C{:persistence.plan/skill} in the spec registry \emph{before} the Plan module exists. This is a deliberate parse-don't-validate methodology choice: the data shape is locked before code depends on it, which lets Phase 1 and Phase 2 workers agree on the plan AST's structure without blocking on implementation order. The \C{:persistence.plan/node} spec is the commitment device; it enforces the paper's \sectionref{sec:plans} contract without requiring the runtime to exist.
 
 \section{Implementation}\label{sec:impl}
 % Task 22 (§5.1-§5.7 mostly Pandoc; §5.8 hand-port in Task 16)

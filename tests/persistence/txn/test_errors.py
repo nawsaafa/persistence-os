@@ -1,6 +1,4 @@
 """Error hierarchy for persistence.txn — Phase A."""
-import pytest
-
 from persistence.txn.errors import (
     TxnError,
     TxnRetryExhausted,

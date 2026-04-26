@@ -1,3 +1,7 @@
+> **ARCHIVED.** This is the frozen Markdown source of paper v0.7 (2026-04-26). The live source as of v0.8 is `paper/tex/persistence-nesy-2026.tex`. Future edits go to the LaTeX file, not here. This file is preserved for diff reference and ARIS-review history.
+
+---
+
 # Toward Accountable Neurosymbolic Runtimes: The Persistence OS Substrate
 
 **Target venue:** NeSy 2026 — 20th International Conference on Neurosymbolic Learning and Reasoning, Faculty of Sciences of the University of Lisbon (FCUL), 1–4 September 2026.

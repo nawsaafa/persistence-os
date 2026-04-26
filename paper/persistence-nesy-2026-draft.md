@@ -177,6 +177,7 @@ When the `audit` handler wraps a set of operations $W \subseteq K$, each effect 
 - `make_audit_handler(wraps, …)` with configurable $W$ and a default of `("llm/call",)`.
 - `verify_chain(entries) → bool`, which re-derives each `prev_hash` from the canonical serialization and detects field-mutation tamper.
 - `audit_entry_to_datom(entry) → datom-shaped record` that flows the audit entry into the Fact log.
+- *(v0.4.0a1)* `audit_entry_to_datom` additionally writes a `parent_provenance_hash` alias alongside the existing `:prev-hash` keyword — both keys point to the same chain hash. This bridges audit-entry datoms into the typed `Provenance` schema (§4.1) so that `DB.causal_history(e)` walks audit chains and ordinary fact-log derivation chains under one query primitive. Tamper-evidence (Proposition 4) is preserved by construction: `verify_chain` reads `:prev-hash` unchanged, and the new alias is an additional emitted field, not a replacement.
 
 **Integrity contract.** `verify_chain` detects any single-field mutation inside an entry (tested). Deletion/reorder coverage is flagged in the Round-1 rigor review and is a hardening target for Round 2. Authenticity — proving *who* signed — is distinct from integrity and is not claimed for Phase 1: the current `signature` slot stores a SHA-256 content hash, and per-transaction ed25519 signing is Phase 2 work (§7.2).
 

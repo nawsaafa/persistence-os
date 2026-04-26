@@ -213,7 +213,43 @@ A \textbf{spec} $s$ is a predicate-generator pair $\langle p : \sigma \to \text{
 \textbf{Forward-compatible spec-first commitment.} In Phase 1 we register \C{:persistence.plan/node} and \C{:persistence.plan/skill} in the spec registry \emph{before} the Plan module exists. This is a deliberate parse-don't-validate methodology choice: the data shape is locked before code depends on it, which lets Phase 1 and Phase 2 workers agree on the plan AST's structure without blocking on implementation order. The \C{:persistence.plan/node} spec is the commitment device; it enforces the paper's \sectionref{sec:plans} contract without requiring the runtime to exist.
 
 \section{Implementation}\label{sec:impl}
-% Task 22 (§5.1-§5.7 mostly Pandoc; §5.8 hand-port in Task 16)
+% Task 22 will fill in §5.1-§5.7 prose via Pandoc.
+
+\subsection{System diagram}\label{sec:diagram}
+
+\begin{figure}[ht]
+\centering
+\begin{verbatim}
+  ┌─────────────────────────────────────────────────────────┐
+  │  AGENT (business logic, domain-specific)                │
+  └───────────────────────┬─────────────────────────────────┘
+                          │ (perform :op args)
+                          ▼
+  ┌─── Effect ─── Spec ──┤ Txn [Phase 2] ├─────────────────┐
+  │   handler stack, boundary contracts, STM commits        │
+  └───────────────────────┬─────────────────────────────────┘
+                          │ (emit datoms)
+                          ▼
+  ┌─── Fact ────────────────────────────────────────────────┐
+  │   InMemory / SQLite log  ·  DictProjection              │
+  │   [Phase 2: Postgres + Kuzu + mem0]                     │
+  └─── ▲ ────────────────────────────────── ▲ ──────────────┘
+       │ as-of / branch / history           │
+       │                                    │
+  ┌─── Replay ──────┐             ┌─── Plan [Phase 2] ──────┐
+  │  trajectories   │             │  EDN AST + skills       │
+  │  counterfactual │             │  MIPROv2 / MCTS / evo   │
+  │  NO-OP identity │ ──evidence→ │  4-gate promotion       │
+  └─────────────────┘             └─────────────────────────┘
+                          ▲
+                          │
+  ┌─── REPL [Phase 2] ─────┴────────────────────────────────┐
+  │   inspect / edit / rewind / branch (capability-gated)   │
+  └─────────────────────────────────────────────────────────┘
+\end{verbatim}
+\caption{Persistence runtime stack. Phase 1 ships Fact / Effect / Spec / Replay; Phase 2 ships Plan execution / Txn / REPL.}
+\label{fig:system-diagram}
+\end{figure}
 
 \section{Evaluation --- Reproduction Plan}\label{sec:eval}
 % Task 23 (Pandoc prose with [TBD] cells preserved)

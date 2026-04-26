@@ -27,13 +27,10 @@ def _get_db_id(db: Any) -> str:
         # process-local and stable for the lifetime of the DB; sufficient
         # for ref-branch-mismatch detection within one process.
         db_id = f"db-{id(db):x}"
-        try:
-            setattr(db, _DB_ID_ATTR, db_id)
-        except AttributeError:
-            # frozen dataclass without slots accepting setattr — fall back
-            # to a hash-keyed dict (not implemented for v0.5.0a1 since DB
-            # is a regular @dataclass and accepts setattr).
-            raise
+        # DB is a regular @dataclass and accepts setattr. If a future
+        # variant is frozen/slotted this will raise AttributeError; the
+        # fix at that point is a WeakKeyDictionary side table.
+        setattr(db, _DB_ID_ATTR, db_id)
     return db_id
 
 
@@ -45,14 +42,19 @@ def _ref(self: Any, eid: str) -> Ref:
 
 
 def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
-    """DB.new_ref(initial=...) — allocate a fresh uuid7 entity-id.
+    """DB.new_ref(initial=...) — allocate a fresh UUID4 entity-id.
 
-    If ``initial`` is provided, it must be an immutable value
-    (pyrsistent / frozen built-in / frozen dataclass). The substrate
-    does NOT eagerly materialize the initial value — that happens on
-    first ``tx.assoc(ref, ...)`` inside a dosync. (Phase B wires this.)
-    Storing the pending initial on the Ref is intentionally avoided to
-    keep Ref a pure handle.
+    The ``initial`` parameter is validated as immutable and then
+    DISCARDED in v0.5.0a1 — the Ref returned does NOT carry the
+    initial value forward. To set a starting value, follow up with
+    ``tx.assoc(ref, value)`` inside a dosync (Phase B).
+
+    The parameter is accepted now so callers can write API-stable code
+    against the Phase A surface; a future revision may persist it
+    through a side table without breaking signatures.
+
+    Accepted ``initial`` types (when provided): pyrsistent.PMap /
+    PVector / PSet, frozen built-in, or frozen dataclass instance.
     """
     if initial is not None and not is_immutable_value(initial):
         raise RefValueNotImmutable(
@@ -61,23 +63,15 @@ def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
             f"or wrap in pyrsistent.pmap/pvector/pset."
         )
     eid = str(uuid.uuid4())  # uuid4; uuid7 not in stdlib until 3.13+  # noqa: wall-clock
-    ref = Ref(eid=eid, db_id=_get_db_id(self))
-    # The initial value is not stored on the Ref. Phase B's
-    # _attach_initial_value sentinel may carry it forward via a weak
-    # registry if/when needed; for now, callers do:
-    #     r = db.new_ref(initial=pmap({...}))
-    #     with db.dosync() as tx: tx.assoc(r, pmap({...}))
-    # which is the explicit form. We keep the parameter so the API
-    # matches the design doc and so a future improvement can persist
-    # the initial without breaking callers.
-    return ref
+    return Ref(eid=eid, db_id=_get_db_id(self))
 
 
 def _attach_txn_methods(db_cls: type) -> None:
-    """Attach the four DB-level txn methods to ``db_cls``.
+    """Attach the txn DB-level methods to ``db_cls``.
 
-    Idempotent — safe to call multiple times. Test code may reset the
-    methods via ``del db_cls.ref`` if needed.
+    Re-entrant safe — repeated calls overwrite the attributes with the
+    same module-level functions, so the result is unchanged. Test code
+    may reset via ``del db_cls.ref`` to force re-attach.
     """
     db_cls.ref = _ref            # type: ignore[attr-defined]
     db_cls.new_ref = _new_ref    # type: ignore[attr-defined]

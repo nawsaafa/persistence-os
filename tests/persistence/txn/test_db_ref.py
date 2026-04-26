@@ -31,13 +31,13 @@ def test_two_dbs_have_different_db_ids():
     assert r1 != r2  # different db_id
 
 
-def test_new_ref_allocates_uuid7_eid():
+def test_new_ref_allocates_uuid4_eid():
     db = DB()
     r1 = db.new_ref()
     r2 = db.new_ref()
     assert r1 != r2
     assert isinstance(r1.eid, str)
-    # UUID7 strings are 36 chars with 4 hyphens
+    # UUID4 strings are 36 chars with 4 hyphens (8-4-4-4-12)
     assert len(r1.eid) == 36
     assert r1.eid.count("-") == 4
 

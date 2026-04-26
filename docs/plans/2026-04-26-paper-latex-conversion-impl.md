@@ -12,11 +12,11 @@
 >
 > Coderabbit + context7 not applicable (no production code, no library API surface).
 
-**Goal:** Convert `paper/persistence-nesy-2026-draft.md` (Markdown v0.7, 521 lines) → `paper/tex/persistence-nesy-2026.tex` (LaTeX v0.8) using the official NeSy 2026 PMLR template, anonymized for double-blind review with `\ifanonymous` toggle.
+**Goal:** Convert `paper/persistence-nesy-2026.md` (Markdown v0.7, 521 lines) → `paper/tex/persistence-nesy-2026.tex` (LaTeX v0.8) using the official NeSy 2026 template, anonymized for double-blind review via the class-native `\documentclass[anon]{nesy2026}` option (camera-ready: `[final]`).
 
 **Architecture:** Hybrid Pandoc-plus-hand-port. Pandoc on prose-heavy sections (§1, §3, §6, §7); hand-port on structured/math sections (abstract, §2.6 capability matrix, §4 propositions, §5.8 ASCII diagram, revision history). Single output `.tex` file in new `paper/tex/` subdirectory; original `.md` archived to `paper/archive/`.
 
-**Tech Stack:** Tectonic (single-binary LaTeX engine, ~50 MB), Pandoc (markdown→tex translator), GNU Make (build interface), `amsthm` + `cleveref` + `natbib` (LaTeX packages), official NeSy 2026 template (`jmlr.cls`-based, downloaded as ZIP).
+**Tech Stack:** Tectonic (single-binary LaTeX engine, ~50 MB), Pandoc (markdown→tex translator), GNU Make (build interface), official NeSy 2026 template (`nesy2026.cls` + JMLR class bundle, downloaded as ZIP). Class auto-loads `amsmath`, `amssymb`, `natbib`, `graphicx`, `url`, `algorithm2e`, `hyperref`. JMLR-native cross-ref macros (`\sectionref`, `\theoremref`, `\equationref`, `\figureref`, `\tableref`) replace `cleveref`.
 
 **Branch strategy:** Continue on `feat/v0.4-substrate-primitives` (where v0.7 markdown landed) or create `feat/paper-v0.8-latex-conversion`. Recommendation: new branch off current HEAD (`0e8b88f`) so the conversion is reviewable as a coherent unit. First task creates the branch.
 
@@ -342,12 +342,12 @@ cameraready: check-real $(PDF)
 	@echo "→ cameraready-final.pdf ready"
 
 check-anon:
-	@grep -qE '^\\anonymoustrue' $(TEX) \
-	  || (echo "ABORT: $(TEX) is not anonymous — submission requires \\anonymoustrue"; exit 1)
+	@grep -qE '^\\documentclass\[anon\]\{nesy2026\}' $(TEX) \
+	  || (echo "ABORT: $(TEX) is not anonymous — submission requires \\documentclass[anon]{nesy2026}"; exit 1)
 
 check-real:
-	@grep -qE '^\\anonymousfalse' $(TEX) \
-	  || (echo "ABORT: $(TEX) is anonymous — camera-ready requires \\anonymousfalse"; exit 1)
+	@grep -qE '^\\documentclass\[final\]\{nesy2026\}' $(TEX) \
+	  || (echo "ABORT: $(TEX) is anonymous — camera-ready requires \\documentclass[final]{nesy2026}"; exit 1)
 
 clean:
 	rm -f *.aux *.bbl *.blg *.log *.out *.toc *.fls *.fdb_latexmk *.synctex.gz
@@ -392,46 +392,36 @@ ls paper/tex/
 
 Expected: at least one `.cls` file copied; possibly `.sty` / `.bst` companions. If the template ZIP put files in a subdirectory, adjust the source path.
 
-**Step 2: Write the skeleton `.tex`**
+**Step 2: Write the skeleton `.tex` (JMLR-native syntax)**
 
-Create `paper/tex/persistence-nesy-2026.tex`. Use the template's exact `\documentclass` line (recorded in Task 3 Step 4). Below is a TARGET shape — the *actual* `\documentclass` and `\author` macros come from the template:
+Create `paper/tex/persistence-nesy-2026.tex`. The official `nesy2026.cls` is JMLR-derived and natively supports `[anon]` / `[final]` document-class options that handle author suppression automatically. We do NOT need a custom `\ifanonymous` toggle. Class auto-loads `amsmath, amssymb, natbib, graphicx, url, algorithm2e, hyperref` — do NOT re-`\usepackage` these.
 
 ```latex
 % !TEX program = tectonic
-\documentclass[anon]{nesy2026}   % REPLACE with exact line from template sample
+\documentclass[anon]{nesy2026}   % submission: [anon]; camera-ready: [final]
 
-% --- math + theorems ---
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{amsthm}
+% --- light extras the class does NOT auto-load ---
+\usepackage{booktabs}              % nicer tabular rules (\toprule, \midrule, \bottomrule)
+\usepackage{makecell}              % \makecell{...} for multi-line cells in §2.6 capability matrix
 
-% --- cross-references (must load after hyperref if hyperref is present) ---
-\usepackage[capitalise]{cleveref}
-
-% --- citations (template may already load natbib/biblatex; comment out if so) ---
-% \usepackage{natbib}
-
-% --- theorem environments ---
+% --- propositions: JMLR-native theorem mechanism ---
+% (theorem and example are predefined by the class; we add proposition.)
 \newtheorem{proposition}{Proposition}
-\crefname{proposition}{Proposition}{Propositions}
 
 % --- inline code-span macro ---
 \newcommand{\C}[1]{\texttt{#1}}
 
-% --- anonymization toggle ---
-\newif\ifanonymous
-\anonymoustrue   % <-- flip to \anonymousfalse for camera-ready
+% --- title + author (JMLR-style) ---
+\title[Persistence OS]{Toward Accountable Neurosymbolic Runtimes: The Persistence OS Substrate}
 
-% --- title + author ---
-\title{Toward Accountable Neurosymbolic Runtimes: The Persistence OS Substrate}
-
-\ifanonymous
-  \author{Anonymous}
-\else
-  \author{% TODO: real author block — set before camera-ready
-    Nawfal Saadi%
-  }
-\fi
+% Author block — class option [anon] auto-suppresses names in submission PDF,
+% so we keep the real \clearauthor here. For camera-ready, flip the documentclass
+% option to [final] and the same author block renders with names.
+\clearauthor{%
+  \Name{Author Name}                       % TODO: real name pre-camera-ready
+  \Email{anonymous@example.com}            % TODO: real email pre-camera-ready
+  \\\addr Affiliation                      % TODO: real affiliation pre-camera-ready
+}
 
 \begin{document}
 \maketitle
@@ -442,11 +432,20 @@ Create `paper/tex/persistence-nesy-2026.tex`. Use the template's exact `\documen
 
 % Body sections go here — Tasks 14-22.
 
-\bibliographystyle{plainnat}   % adjust per template
-\bibliography{references}
+% Acknowledgements — \acks{} is a JMLR macro; auto-suppressed under [anon].
+\acks{% Set under [final] before camera-ready.
+}
+
+\bibliography{references}   % no \bibliographystyle — class controls it
 
 \end{document}
 ```
+
+Notes for the implementer:
+- **Cross-references**: use JMLR-native `\sectionref{}`, `\equationref{}`, `\theoremref{}`, `\figureref{}`, `\tableref{}` — do NOT load `cleveref`.
+- **Citations**: `natbib` is auto-loaded; use `\citep{}` / `\citet{}` directly. Do NOT add `\usepackage{natbib}`.
+- **No `\bibliographystyle`** line — the class sets the style.
+- **`\acks{}`** under `[anon]` renders as empty; under `[final]` renders as a section.
 
 **Step 3: Verify the skeleton builds (empty body OK)**
 
@@ -459,7 +458,7 @@ ls persistence-nesy-2026.pdf
 cd - >/dev/null
 ```
 
-Expected: PDF produced (1-2 pages, just title + Anonymous author + empty abstract). If the build fails, debug `\documentclass` options against the template sample before continuing.
+Expected: PDF produced (1-2 pages, title + suppressed-author placeholder + empty abstract). If the build fails, diff the template sample's preamble vs ours.
 
 **Step 4: Verify the make target works**
 
@@ -469,51 +468,56 @@ Expected: PDF rebuilt cleanly.
 **Step 5: Verify anonymization gate**
 
 Run: `cd paper/tex && make submission 2>&1 | tail -3 && cd - >/dev/null`
-Expected: succeeds (skeleton has `\anonymoustrue`); produces `submission-anonymized.pdf`.
+Expected: succeeds (skeleton has `\documentclass[anon]{nesy2026}`); produces `submission-anonymized.pdf`.
 
 Run: `cd paper/tex && make cameraready 2>&1 | tail -3 && cd - >/dev/null`
-Expected: ABORTs with "anonymous — camera-ready requires \\anonymousfalse" (and exits non-zero).
+Expected: ABORTs with `requires \documentclass[final]{nesy2026}` (and exits non-zero).
 
 **Step 6: Commit**
 
 ```bash
-git add paper/tex/*.cls paper/tex/*.sty paper/tex/*.bst paper/tex/persistence-nesy-2026.tex paper/tex/references.bib 2>&1 | grep -v "did not match" | head
+git add paper/tex/*.cls paper/tex/*.sty paper/tex/*.bst paper/tex/*.dtx paper/tex/*.ins paper/tex/persistence-nesy-2026.tex paper/tex/references.bib 2>&1 | grep -v "did not match" | head
 git status --short
 git commit -m "paper(v0.8): skeleton .tex + NeSy class file + empty references.bib
 
-Template files copied from official NeSy_2026_template.zip. Skeleton
-builds clean PDF with title + anonymous author. \\ifanonymous toggle
-gates submission vs cameraready Makefile targets."
+Template files copied from official NeSy_2026_template.zip (nesy2026.cls
+plus jmlr.dtx/jmlr.ins). Skeleton uses [anon] document-class option
+(class natively suppresses author names). Makefile submission target
+greps for [anon]; cameraready greps for [final]."
 ```
 
 ---
 
-### Task 9: Add labels for §-cross-references
+### Task 9: Smoke-test JMLR-native cross-reference macros
 
 **Files:**
-- Modify: `paper/tex/persistence-nesy-2026.tex` (preamble only — section labels added in Task 14+)
+- Modify: `paper/tex/persistence-nesy-2026.tex` (insert/remove a temporary `\sectionref` test)
 
-**Step 1: Add `\crefname` declarations for sections, equations, tables, figures**
+JMLR's `nesy2026.cls` provides `\sectionref{}`, `\equationref{}`, `\theoremref{}`, `\figureref{}`, `\tableref{}` — superior to `\ref` for typeset output (auto-prefixes "Section", "Equation", etc.). This task confirms they work end-to-end. No preamble changes needed.
 
-Insert in preamble (above `\begin{document}`):
+**Step 1: Insert a temporary `\sectionref` test**
+
+In `\begin{abstract}...\end{abstract}` (since the body is empty), add a single line:
 ```latex
-\crefname{section}{\S}{\S\S}
-\crefname{equation}{Eq.}{Eqs.}
-\crefname{table}{Table}{Tables}
-\crefname{figure}{Figure}{Figures}
+\begin{abstract}
+This is a smoke test referencing \sectionref{sec:intro}.
+\end{abstract}
 ```
 
-**Step 2: Verify build still passes**
+(`sec:intro` will be defined in Task 10's stub — which doesn't yet exist, so `\sectionref` will produce a `??` placeholder. That's the expected output for this smoke test — we're checking that the *macro is callable*, not that it resolves.)
 
-Run: `cd paper/tex && make 2>&1 | tail -3 && cd - >/dev/null`
-Expected: clean rebuild.
+**Step 2: Build and verify the macro is callable (not undefined)**
 
-**Step 3: Commit**
+Run: `cd paper/tex && make 2>&1 | grep -iE 'undefined control sequence|sectionref' | head && cd - >/dev/null`
+Expected: NO `undefined control sequence \sectionref` errors. A `LaTeX Warning: Reference 'sec:intro' on page 1 undefined` is fine — that's the un-resolved label, not an undefined macro.
 
-```bash
-git add paper/tex/persistence-nesy-2026.tex
-git commit -m "paper(v0.8): cleveref names for section/equation/table/figure refs"
-```
+**Step 3: Remove the smoke test**
+
+Delete the `\sectionref{sec:intro}` line from the abstract.
+
+**Step 4: No commit** — smoke test only; the abstract is back to placeholder. Section refs become live in Task 10 when the section labels exist.
+
+---
 
 ---
 
@@ -560,10 +564,8 @@ Insert section stubs with `% TODO Task N` markers between `\maketitle` and `\bib
 \section{Conclusion}\label{sec:conclusion}
 % Task 22 (short, Pandoc)
 
-\ifanonymous\else
-\section*{Acknowledgements}
-% Task 25 (camera-ready only)
-\fi
+% Acknowledgements use \acks{} (set in Task 24); JMLR class auto-suppresses
+% under [anon], so no manual \ifanonymous wrap is needed.
 ```
 
 **Step 2: Verify build**
@@ -575,7 +577,7 @@ Expected: clean build, PDF now shows section headings (with empty bodies).
 
 ```bash
 git add paper/tex/persistence-nesy-2026.tex
-git commit -m "paper(v0.8): section stubs + \\label markers for cleveref"
+git commit -m "paper(v0.8): section stubs + \\label markers for JMLR-native refs"
 ```
 
 ---
@@ -973,7 +975,7 @@ A stack $H$ over catalog $K$ is well-formed iff for every $\kappa \in K$, at lea
 \item \C{make\_audit\_handler} ...
 \item \C{verify\_chain} ...
 \item \C{audit\_entry\_to\_datom} ...
-\item \emph{(v0.4.0a1)} \C{audit\_entry\_to\_datom} additionally writes a \C{parent\_provenance\_hash} alias alongside the existing \C{:prev-hash} keyword --- both keys point to the same chain hash. This bridges audit-entry datoms into the typed \C{Provenance} schema (\cref{sec:datoms}) so that \C{DB.causal\_history(e)} walks audit chains and ordinary fact-log derivation chains under one query primitive.
+\item \emph{(v0.4.0a1)} \C{audit\_entry\_to\_datom} additionally writes a \C{parent\_provenance\_hash} alias alongside the existing \C{:prev-hash} keyword --- both keys point to the same chain hash. This bridges audit-entry datoms into the typed \C{Provenance} schema (\sectionref{sec:datoms}) so that \C{DB.causal\_history(e)} walks audit chains and ordinary fact-log derivation chains under one query primitive.
 \end{itemize}
 
 \begin{proposition}[Tamper-evidence]\label{prop:tamper}
@@ -1015,12 +1017,12 @@ Expected:
 - No undefined refs
 - 5 lines: `Proposition 1`, `Proposition 2`, `Proposition 3`, `Proposition 4`, `Proposition 5` (numbered automatically)
 
-**Step 9: Verify cleveref**
+**Step 9: Verify JMLR-native `\theoremref`**
 
-Insert one test cross-reference somewhere in §4.5: `As shown in \cref{prop:branch} ...`
-Run: `cd paper/tex && make && pdftotext persistence-nesy-2026.pdf - | grep -i "as shown in proposition" && cd - >/dev/null`
-Expected: PDF text shows "As shown in Proposition 1" — `\cref` resolved.
-Then remove the test sentence (it was just a smoke test).
+Insert one test cross-reference somewhere in §4.5: `As shown in \theoremref{prop:branch} ...`
+Run: `cd paper/tex && make && pdftotext persistence-nesy-2026.pdf - | grep -i "as shown in" && cd - >/dev/null`
+Expected: PDF text shows the macro-resolved reference (typically "Proposition 1" prefixed). `\theoremref` resolved.
+Then remove the test sentence (smoke test only).
 
 **Step 10: Commit**
 
@@ -1070,10 +1072,10 @@ Plan-AST optimization                          &           &           & partial
 Skill library (4-gate promotion)               &           &           &           & $\bullet$ &           &           & $\circ$    \\
 Multi-agent STM                                &           &           &           &           &           &           & $\circ$    \\
 Live production REPL                           &           &           &           &           &           &           & $\circ$    \\
-Regulator-replay fidelity                      &           &           &           &           &           & \multicolumn{2}{c}{[designed --- see \cref{sec:eval}]} \\
+Regulator-replay fidelity                      &           &           &           &           &           & \multicolumn{2}{c}{[designed --- see \sectionref{sec:eval}]} \\
 \bottomrule
 \end{tabular}
-\caption{Capability coverage across related systems vs.\ Persistence (Phase 1 shipped, Phase 2 designed). $\bullet$ = supported; $\circ$ = designed-but-not-shipped; ``partial'' = covered with caveats. The asterisk on Persistence Phase-1 NO-OP replay denotes the toy-agent-vs-LLM-leaf footnote (see \cref{sec:replay}).}
+\caption{Capability coverage across related systems vs.\ Persistence (Phase 1 shipped, Phase 2 designed). $\bullet$ = supported; $\circ$ = designed-but-not-shipped; ``partial'' = covered with caveats. The asterisk on Persistence Phase-1 NO-OP replay denotes the toy-agent-vs-LLM-leaf footnote (see \sectionref{sec:replay}).}
 \label{tab:capability-matrix}
 \end{table>
 ```
@@ -1194,7 +1196,7 @@ Follow-up task scheduled to upgrade to TikZ before 9 June abstract deadline."
 The revision history is internal-development context — NOT something a NeSy reviewer needs in a 10-page submission. Two options:
 
 - **Option A:** Drop it from the submission `.tex` entirely. The history lives in git + the archived markdown. Simplest, saves page budget.
-- **Option B:** Keep it in `\ifanonymous\else ... \fi` (camera-ready only) as an appendix — gives reviewers context post-acceptance.
+- **Option B:** Keep it as a `\appendix` section that we add only when flipping to `\documentclass[final]{nesy2026}` for camera-ready — gives reviewers context post-acceptance.
 
 **Recommendation:** Option A. The 10-page limit is tight; 9 versions of revision-history bullets cost ~1 page. Keep the history in git/markdown archive only.
 
@@ -1205,7 +1207,8 @@ In the section between `\maketitle` and `\begin{abstract}`, insert:
 % --- Revision history ---
 % Intentionally NOT included in submission .tex. The v0.1-v0.7 history is
 % preserved in paper/archive/persistence-nesy-2026-v0.7.md (lines 10-19).
-% If a future reviewer requests it, it can be re-added under \ifanonymous\else.
+% If a future reviewer requests it, re-add as a \appendix section in the
+% camera-ready (\documentclass[final]{nesy2026}) build only.
 ```
 
 **Step 3: No PDF change** — skip build verification. Comment-only change.
@@ -1482,14 +1485,22 @@ pandoc -f markdown -t latex --wrap=preserve /tmp/section-07-discussion.md -o /tm
 
 **Step 2: Clean + insert**
 
-§7 covers Limitations, Privacy architecture, Adoption path, NeSy framing. §8 is Conclusion (short). Acknowledgements wrap in `\ifanonymous\else ... \fi`.
+§7 covers Limitations, Privacy architecture, Adoption path, NeSy framing. §8 is Conclusion (short). Acknowledgements use the JMLR-native `\acks{}` macro — class auto-suppresses content under `[anon]`, no manual `\ifanonymous` wrap needed:
+
+```latex
+\acks{% Populated under \documentclass[final]{nesy2026} before camera-ready.
+% TODO: real acknowledgements text here pre-camera-ready.
+}
+```
+
+Place the `\acks{}` call after §8 Conclusion and before `\bibliography{references}`.
 
 **Step 3: Build + commit**
 
 ```bash
 cd paper/tex && make && cd - >/dev/null
 git add paper/tex/persistence-nesy-2026.tex
-git commit -m "paper(v0.8): port §7 Discussion + §8 Conclusion + Acknowledgements (anon-gated)"
+git commit -m "paper(v0.8): port §7 Discussion + §8 Conclusion + \\acks{} placeholder"
 ```
 
 ---
@@ -1686,13 +1697,13 @@ cd - >/dev/null
 
 Expected:
 - `make submission` → "→ submission-anonymized.pdf ready"
-- `make cameraready` → "ABORT: ... requires \\anonymousfalse" (exit non-zero)
+- `make cameraready` → "ABORT: ... requires \\documentclass[final]{nesy2026}" (exit non-zero)
 
 **Step 5: No commit** — read-only.
 
 ---
 
-### Task 29: Verify all 5 propositions render with cleveref resolution
+### Task 29: Verify all 5 propositions render with `\theoremref` resolution
 
 **Files:** none
 
@@ -1714,11 +1725,11 @@ Proposition 4 (Tamper-evidence).
 Proposition 5 (Plan content-addressing with descendant propagation).
 ```
 
-**Step 2: Confirm `\cref{prop:...}` references resolve in body text**
+**Step 2: Confirm `\theoremref{prop:...}` references resolve in body text**
 
 Run:
 ```bash
-cd paper/tex && grep -c '\\cref{prop:' persistence-nesy-2026.tex && cd - >/dev/null
+cd paper/tex && grep -c '\\theoremref{prop:' persistence-nesy-2026.tex && cd - >/dev/null
 ```
 
 Expected: ≥ 1 (probably 3-5 cross-references).
@@ -1727,7 +1738,7 @@ Run:
 ```bash
 cd paper/tex && pdftotext persistence-nesy-2026.pdf - | grep -E '(see|under|by)\s+Proposition\s+[1-5]' | head && cd - >/dev/null
 ```
-Expected: matches — meaning `\cref{prop:branch}` rendered as "Proposition 1" in body text.
+Expected: matches — meaning `\theoremref{prop:branch}` rendered as "Proposition 1" in body text.
 
 **Step 3: No commit** — read-only.
 
@@ -1809,7 +1820,7 @@ cd - >/dev/null
 
 Run:
 ```bash
-vault remember "Persistence OS — Paper v0.8 LaTeX conversion SHIPPED <date>. Branch <branch> final commit <sha>. Single-file paper/tex/persistence-nesy-2026.tex (~600 lines) using official NeSy 2026 PMLR template (jmlr.cls-based). 26-entry references.bib. 5 amsthm propositions with \\cref cross-refs. \\ifanonymous toggle gates Makefile submission/cameraready. Anonymization scrub redacted N commit SHAs / 1 branch name / 'Adaptive Trader v2' (all tagged with % RESTORE: for July 8-20 restoration pass). PDF page count: <pages> (≤ 14 limit). v0.7 markdown archived to paper/archive/. Follow-ups: §5.8 TikZ upgrade before 9 June abstract deadline; full ARIS R1+R2+R3 on v0.6→v0.8 cumulative diff. Vault memory_id: <id>." --user-id=nawfal-dev --tier=L1
+vault remember "Persistence OS — Paper v0.8 LaTeX conversion SHIPPED <date>. Branch <branch> final commit <sha>. Single-file paper/tex/persistence-nesy-2026.tex (~600 lines) using official NeSy 2026 template (nesy2026.cls + JMLR class bundle, PMLR proceedings). 26-entry references.bib. 5 propositions via JMLR-native \\newtheorem with \\theoremref cross-refs. Anonymization via native \\documentclass[anon]{nesy2026} — Makefile submission target greps for [anon], cameraready greps for [final]. Anonymization scrub redacted N commit SHAs / 1 branch name / 'Adaptive Trader v2' (all tagged with % RESTORE: for July 8-20 restoration pass). PDF page count: <pages> (≤ 14 limit). v0.7 markdown archived to paper/archive/. Follow-ups: §5.8 TikZ upgrade before 9 June abstract deadline; full ARIS R1+R2+R3 on v0.6→v0.8 cumulative diff. Vault memory_id: <id>." --user-id=nawfal-dev --tier=L1
 ```
 
 **Step 2: Serena memory**
@@ -1821,7 +1832,7 @@ Use `mcp__plugin_serena_serena__write_memory` to write a memory at name `paper-v
 Edit `~/.claude-nawfal-2/projects/-Users-nawfalsaadi-Projects/memory/MEMORY.md` to add a new bullet under the Persistence OS section:
 
 ```markdown
-- **Paper v0.8 LaTeX conversion SHIPPED <date>**. Branch `<branch>` final `<sha>`. Single-file `paper/tex/persistence-nesy-2026.tex` from official NeSy 2026 PMLR template (jmlr.cls-based, double-blind, anonymized). 26-entry `references.bib`. 5 `amsthm` propositions with `\cref`. `\ifanonymous` toggle gates Makefile `submission`/`cameraready`. Anonymization redacted commit SHAs / branch / "Adaptive Trader v2" (all tagged `% RESTORE:`). PDF <N> pages (≤ 14 limit; NeSy 10-page body excl. refs). v0.7 markdown archived to `paper/archive/`. Follow-ups: §5.8 TikZ before 9 June abstract; full ARIS R1+R2+R3 on v0.6→v0.8 cumulative diff. Vault tx=<n>.
+- **Paper v0.8 LaTeX conversion SHIPPED <date>**. Branch `<branch>` final `<sha>`. Single-file `paper/tex/persistence-nesy-2026.tex` from official NeSy 2026 template (`nesy2026.cls` + JMLR class bundle; PMLR proceedings; double-blind, anonymized). 26-entry `references.bib`. 5 propositions via JMLR-native `\newtheorem` + `\theoremref`. Anonymization is native `\documentclass[anon]{nesy2026}` (Makefile `submission`/`cameraready` targets grep for `[anon]`/`[final]`). Anonymization scrub redacted commit SHAs / branch / "Adaptive Trader v2" (all tagged `% RESTORE:`). PDF <N> pages (≤ 14 limit; NeSy 10-page body excl. refs). v0.7 markdown archived to `paper/archive/`. Follow-ups: §5.8 TikZ before 9 June abstract; full ARIS R1+R2+R3 on v0.6→v0.8 cumulative diff. Vault tx=<n>.
 ```
 
 **Step 4: Verify**
@@ -1865,4 +1876,4 @@ Branch ready to merge to `main` (or stay on the feat branch — user choice).
 Three named follow-up tasks queued:
 1. **§5.8 TikZ upgrade** — before 9 June 2026 abstract deadline
 2. **Full ARIS R1+R2+R3 on v0.6→v0.8 diff** — open-ended, recommended hygiene
-3. **Camera-ready restoration pass** — between 8 July 2026 notification and 20 July 2026 camera-ready: flip `\anonymoustrue` → `\anonymousfalse`, restore every `% RESTORE:` cookie, restore "Adaptive Trader v2", populate real author block, populate Acknowledgements section.
+3. **Camera-ready restoration pass** — between 8 July 2026 notification and 20 July 2026 camera-ready: flip `\documentclass[anon]{nesy2026}` → `\documentclass[final]{nesy2026}`, restore every `% RESTORE:` cookie, restore "Adaptive Trader v2", populate real `\clearauthor{\Name{...} \Email{...}\\\addr ...}`, populate `\acks{...}` section.

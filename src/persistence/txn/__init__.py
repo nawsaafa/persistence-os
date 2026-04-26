@@ -14,10 +14,11 @@ from persistence.txn.errors import (
     TxnError,
     TxnRetryExhausted,
 )
-from persistence.txn.ref import Ref
+from persistence.txn.ref import Ref, freeze
 
 __all__ = [
     "EffectInIoBlock",
+    "freeze",
     "NestedDosyncNotSupported",
     "Ref",
     "RefBranchMismatch",

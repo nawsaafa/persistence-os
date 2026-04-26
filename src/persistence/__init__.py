@@ -5,7 +5,7 @@ Modules:
     effect   — algebraic effect handler stack              [v0.4.0a1 substrate-primitives]
     plan     — EDN plan AST + skill library                [v0.4.0a1 substrate-primitives]
     replay   — counterfactual trajectory engine            [v0.1.0a1 shipped]
-    txn      — software transactional memory               [stub]
+    txn      — atomic multi-datom commit + snapshot isolation [v0.5.0a1 in progress]
     spec     — parse-don't-validate boundary contracts     [v0.1.0a1 shipped]
     repl     — live production inspection                  [stub]
 """

@@ -40,7 +40,39 @@ Pangolin's algebraic-effect handlers~\citep{cheng2025pangolin}.
 % Smoke test (Task 12) — replaced by Task 19 Pandoc output.
 
 \section{Related Work}\label{sec:related}
-% Task 20 (six §2.x subsections — mostly Pandoc, §2.6 hand-port in Task 15)
+% Task 20 will fill in §2.1-§2.5 prose via Pandoc.
+
+\subsection{Positioning}\label{sec:positioning}
+
+Table~\ref{tab:capability-matrix} places Persistence relative to the beachheads. Shipped Phase-1 capabilities are marked $\bullet$; Phase-2-designed capabilities are marked $\circ$.
+
+\begin{table}[ht]
+\centering
+\resizebox{\textwidth}{!}{%
+\scriptsize
+\begin{tabular}{lccccccc}
+\toprule
+Capability & Zep/Graphiti & Pangolin & DSPy & Voyager & CAMO & \makecell{Persistence \\ (Phase 1 shipped)} & \makecell{Persistence \\ (Phase 2 designed)} \\
+\midrule
+Bitemporal memory                              & $\bullet$ &           &           &           &           & $\bullet$ &            \\
+Effect handler stack                           &           & $\bullet$ &           &           &           & $\bullet$ &            \\
+Merkle-hashed audit chain                      & partial   &           &           &           &           & $\bullet$ &            \\
+Counterfactual replay (byte-identical NO-OP)   &           &           &           &           & partial   & $\bullet^*$ &          \\
+Boundary specs + LLM self-healing hints        &           &           & partial   &           &           & $\bullet$ &            \\
+Declarative plan AST                           &           &           & $\bullet$ &           &           &           & $\circ$    \\
+Plan-AST optimization                          &           &           & partial   &           &           &           & $\circ$    \\
+Skill library (4-gate promotion)               &           &           &           & $\bullet$ &           &           & $\circ$    \\
+Multi-agent STM                                &           &           &           &           &           &           & $\circ$    \\
+Live production REPL                           &           &           &           &           &           &           & $\circ$    \\
+Regulator-replay fidelity                      &           &           &           &           &           & \multicolumn{2}{c}{[designed --- see \sectionref{sec:eval}]} \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Capability coverage across related systems vs.\ Persistence (Phase 1 shipped, Phase 2 designed). $\bullet$ = supported; $\circ$ = designed-but-not-shipped; ``partial'' = covered with caveats. The asterisk on Persistence Phase-1 NO-OP replay denotes the toy-agent-vs-LLM-leaf footnote (see \sectionref{sec:replay}).}
+\label{tab:capability-matrix}
+\end{table}
+
+$^*$Byte-identical NO-OP replay in Phase 1 is verified for toy agents with fixed rng-consumption; the per-step-rng-recording extension for LLM leaves is Phase 2 (\sectionref{sec:replay}, \S6.2).
 
 \section{The Persistence Thesis}\label{sec:thesis}
 % Task 21 (Pandoc prose)

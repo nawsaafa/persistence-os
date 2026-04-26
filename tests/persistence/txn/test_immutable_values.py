@@ -1,5 +1,5 @@
 """Immutable-value validation — rev M of design doc."""
-from dataclasses import dataclass, FrozenInstanceError
+from dataclasses import dataclass
 from decimal import Decimal
 
 import pytest
@@ -82,3 +82,16 @@ def test_freeze_nested_dict_recurses():
     assert is_immutable_value(inner)
     inner_list = inner["inner"]
     assert is_immutable_value(inner_list)
+
+
+def test_freeze_set_raises_RefValueNotImmutable():
+    with pytest.raises(RefValueNotImmutable, match="set"):
+        freeze({1, 2, 3})
+
+
+def test_freeze_unknown_type_raises_RefValueNotImmutable():
+    class Custom:
+        pass
+
+    with pytest.raises(RefValueNotImmutable, match="Custom"):
+        freeze(Custom())

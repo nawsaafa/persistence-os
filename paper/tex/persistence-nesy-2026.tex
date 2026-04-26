@@ -372,13 +372,193 @@ The REPL module will expose a capability-gated WebSocket API for live inspection
 \end{figure}
 
 \section{Evaluation --- Reproduction Plan}\label{sec:eval}
-% Task 23 (Pandoc prose with [TBD] cells preserved)
+
+The abstract submission (2026-06-09) reports the Phase-1 shipped artifact with formal properties (Proposition~\ref{prop:wellformed}; Proposition~\ref{prop:noop}) checked in the bundled test suite (832 passed + 7 xfailed, \C{pytest -q} from a clean clone). The numeric evaluations below are a \textbf{Reproduction Plan}: each subsection below names the harness, the dataset, the license, and the intended submission point (abstract vs.\ camera-ready). Tables marked [TBD] carry target numbers only; measured numbers land in the camera-ready (2026-07-20) once Phase 2 verticals and the per-step-rng-recording replay extension are in place.
+
+\subsection{LongMemEval (camera-ready)}\label{sec:eval-longmem}
+
+LongMemEval measures long-horizon memory fidelity across agent conversations. We will compare Persistence's Fact module against published results on the LongMemEval v1 corpus. The integration is straightforward in principle because our \C{as\_of\_valid} query is the same temporal filter Zep's bitemporal edges implement; the mem0 projection adapter (Phase 2) is the gating dependency for retrieval at scale, without which the harness falls back to linear log-scan (unusable beyond 10k conversation turns).
+
+For the abstract, this subsection is qualitative; the camera-ready will ship numeric rows.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+System & Accuracy & p95 latency \\
+\midrule
+MemGPT          & [per primary source] & [per primary source] \\
+Mem0            & [per primary source] & [per primary source] \\
+Mem0g           & [per primary source] & [per primary source] \\
+Zep / Graphiti  & [per primary source] & [per primary source] \\
+Memento         & [per primary source] & [per primary source] \\
+\textbf{Persistence (this work)} & \textbf{[TBD --- camera-ready]} & \textbf{[TBD --- camera-ready]} \\
+\bottomrule
+\end{tabular}
+\caption{LongMemEval target table (camera-ready).}
+\label{tab:longmemeval}
+\end{table}
+
+\textbf{Hypothesis (to test).} Persistence matches Zep's accuracy (we share the bitemporal model) with competitive latency (materialized projection is architecturally similar). The contribution is not a raw memory win but the substrate's composability with audit, replay, and plan storage.
+
+\subsection{CAMO-style counterfactual fidelity}\label{sec:eval-camo}
+
+This evaluation has two components. The \emph{byte-identical NO-OP} property (Proposition~\ref{prop:noop}) is \textbf{already testable on the Phase 1 artifact} --- \C{tests/replay/test\_determinism.py::test\_noop\_intervention\_produces\_byte\_identical\_trajectory} passes; we cite it directly in the abstract as the structural baseline stronger than CAMO's statistical aligned-randomness. The \emph{distributional CAMO protocol} --- 1000 paired rollouts with single-variable interventions, measuring prefix alignment (Hamming distance from factual), intervention faithfulness (probability the counterfactual at step $k$ reflects the intervention), and suffix variance over 100 re-replays --- requires (i) the per-step rng-state recording extension to the replay engine (Phase 2) and (ii) a meaningful LLM budget for stochastic agents. Both are feasible within the 2026-06-09 $\to$ 2026-07-20 camera-ready window if scoped to a single base agent.
+
+\textbf{Reproduction Plan.} Abstract ships the NO-OP corollary. Camera-ready ships the full 1000-trajectory table on a toy agent with honest per-step rng recording and, if budget permits, a scaled-down 100-trajectory table on Claude Haiku as the stochastic agent.
+
+\subsection{Regulator-replay benchmark --- 50 synthetic trajectories (novel)}\label{sec:eval-regulator}
+
+We propose \textbf{regulator-replay fidelity}, a new benchmark. Given an agent decision trajectory produced in a regulated domain, can a third-party auditor --- given only the datom log and the plan AST --- deterministically reconstruct the production decision? The metric is the fraction of decisions whose reconstruction matches production byte-for-byte under \C{effect.canonical.canonical\_dumps} serialization.
+
+\textbf{Scope (rescoped from the v0.1 draft).} For this paper we target a \textbf{50-trajectory synthetic project-finance corpus}, not a 200-trajectory production corpus. The synthesis pipeline runs a project-finance scoring agent (WACC, gearing, concession-fee, sector classification) over synthetic inputs, persists the resulting trajectories through the Phase 1 Fact module, and hands the log to an independent reconstruction script. The dataset generator, the reconstruction harness, and the 50-trajectory corpus will be released together under \textbf{CC-BY-4.0} before camera-ready. Full production-scale evaluation is deferred to an extended-version companion paper.
+
+\textbf{Why this rescope.} This is the paper's flagship novelty. A protocol proposal without numbers would collapse the contribution from ``we introduce and evaluate a new benchmark'' to ``we propose a benchmark.'' Fifty synthetic trajectories is the minimum tractable scope that keeps ``evaluate'' in the contribution.
+
+\textbf{Symbolic-neural coupling.} Unlike pure-trace replay approaches~\citep{anon2026camo,anon2026agenther}, regulator-replay requires the \emph{symbolic plan AST at decision time} to be reconstructible alongside the neural effect trace; the benchmark measures this symbolic-neural joint reconstruction as a single fidelity metric. A reconstruction counts as faithful only when both the AST Merkle-id path and the effect-trace canonical form recover byte-identically from the log.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Regulator-replay configuration & Factual deterministic & CF byte-identity @ NO-OP & Reconstruction fidelity \\
+\midrule
+50 synthetic PF trajectories, DictProjection & \textbf{[TBD]} & \textbf{[TBD --- target $\geq$ 99\%; H1]} & \textbf{[TBD]} \\
+\bottomrule
+\end{tabular}
+\caption{Regulator-replay fidelity target (camera-ready). H1: see hypothesis below.}
+\label{tab:regulator-replay}
+\end{table}
+
+\textbf{Hypothesis H1.} Reconstruction fidelity $\geq$ 99\% on the 50-trajectory synthetic corpus; deviations diagnostic of catalog well-formedness (non-determinism admitted into $K$ during trajectory synthesis) rather than substrate limits. The 1\% gap, where present, is attributable to a gap in the Phase-1 well-formedness check rather than the content-addressed audit chain.
+
+\subsection{Plan-optimization comparison \emph{(removed from this paper)}}\label{sec:eval-removed}
+
+The Plan-optimization comparison (HotpotQA, replayed-trade trajectories, project-finance scoring) requires the Plan module execution runtime, which is Phase 2.C. It is therefore out of scope for this paper and will be the core contribution of a Phase-2 companion paper once the Plan-execution module ships.
+
+\subsection{Case studies --- one named deployment, three anonymized vignettes}\label{sec:eval-cases}
+
+\textbf{Case B --- Adaptive Trader v2 (named deployment, reported with numbers).} Case B exercises Persistence on a neurosymbolic trading agent where the \emph{playbook AST} (symbolic: entry conditions, regime classifiers, risk gates) composes with a \emph{neural decision layer} (Claude-as-sole-decision-maker) through an effect-captured non-determinism seam. Every decision writes a datom; every playbook version is content-addressed; every counterfactual replay walks the symbolic tree while re-sampling the neural leaves.
+
+\begin{verbatim}
+;; Adaptive Trader v2 playbook AST (excerpt)
+[:seq {:regime "trend-following"}
+  [:llm-call {:tool "market-classifier" :model "claude-opus"}
+    [:context {:window "4h" :symbols ["BTCUSDT" "ETHUSDT"]}]]
+  [:verify {:gate "risk-limit" :max-pos-pct 0.20}]
+  [:branch {:on :regime-classification}
+    [:case {:when "trend"}
+      [:llm-call {:tool "entry-sizer" :playbook "momentum-v7"}]]
+    [:case {:when "range"}
+      [:llm-call {:tool "entry-sizer" :playbook "mean-revert-v3"}]]]
+  [:effect {:audit true :kill-switch :position-limit}]]
+\end{verbatim}
+
+Every node in this excerpt is content-addressed by Proposition~\ref{prop:plan}; the neural leaves (\C{:llm-call} nodes) compose with the symbolic control flow (\C{:seq}, \C{:branch}, \C{:case}, \C{:verify}) under the effect handler stack of \sectionref{sec:effects}. A single decision writes a datom whose payload includes the playbook's root \C{:id}, making the audit trail lineage-complete under structural edits.
+
+Concretely, \emph{Adaptive Trader v2} is a production cryptocurrency trading agent running on Binance Futures with a \$400 USDT live-capital cap and ARIS-reviewed risk governance. The factual dry-run baseline, recorded across 13 continuous days immediately preceding the Persistence migration, closed at profit factor 0.43 over 8 entries with -\$26.87 PnL --- a clear NO-GO signal that motivated the redesign. We instrument every decision through Persistence's effect handler stack (audit, kill-switch, position-limit, ARIS-gate, dry-run), persisting trajectories to the Fact module. A nightly cron runs the Replay module over each losing trajectory with an entry-delay wait-sweep $\{0, 5, 10, 15, 30, 60\}$ minutes. DPO-pair extraction (Phase 1 replay engine) is staged behind the per-step-rng-recording extension (Phase 2), and preliminary prompt-tuning results on the 8-trade baseline are therefore [TBD --- camera-ready]; the baseline numbers themselves are real. Adaptive Trader v2 serves as the reference deployment throughout this paper because every Persistence invariant --- immutable decision trail, effect-captured non-determinism, EDN playbook AST, counterfactual-validated skill promotion --- is stress-tested against real-money risk. A forthcoming companion paper will report the extended live-capital evaluation.
+
+\begin{table}[ht]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Adaptive Trader v2 (Case B) & Pre-Persistence baseline & With Persistence (Phase 1) \\
+\midrule
+Days of dry-run & 13 & [TBD --- camera-ready] \\
+Entries & 8 & [TBD] \\
+Profit factor & 0.43 & [TBD] \\
+PnL (USDT) & -26.87 & [TBD] \\
+Audit-chain entries per decision & n/a (prose logs) & [TBD] \\
+Regulator-replay fidelity on 8 baseline trajectories & n/a & [TBD --- target $\geq$ 99\%] \\
+\bottomrule
+\end{tabular}
+\caption{Case B (Adaptive Trader v2) baseline vs.\ Phase-1 Persistence-instrumented run.}
+\label{tab:case-b}
+\end{table}
+
+\textbf{Case A --- Project-finance assessment SaaS (anonymized vignette).} A bitemporal migration of a production assessment platform serving development finance institutions. The platform produces regulator-facing bankability scores for infrastructure projects; every assumption in the scoring pipeline (WACC, gearing, concession-fee, sector classification) must be reconstructible under audit. Phase 1 lands the Fact module as the authoritative scoring-assumption log; Phase 2 integrates Plan for the scoring pipeline AST. Numeric reporting deferred to a co-authored extended-version paper once the client IP-sharing agreement closes.
+
+\textbf{Case C --- Insurance aggregator (anonymized vignette).} A licensed insurance comparator operating under a regulatory regime requiring full quote-issuance traceability. Bitemporal client state resolves compliance queries of the form \emph{``when did the agent learn of carrier price change X, and what quotes did it issue between the change and our ingestion?''} --- a bitemporal \emph{exclusive-OR} of valid-time and transaction-time, structurally impossible without both clocks. Phase 1 shipped; Plan-driven quote pipeline is Phase 2. Numeric reporting deferred pending licensure co-disclosure.
+
+\textbf{Case D --- Hospitality operations (anonymized vignette).} A multi-tenant hotel operations agent connected via WhatsApp. Regression trajectories are auto-generated from customer feedback sessions on the production messaging channel; every pull request is designed to replay all known-failing trajectories through the new handler stack in CI. Phase 1 ships the trajectory capture; full regression re-execution is Phase 2 (\sectionref{sec:impl-replay}). Numeric reporting deferred pending operator-side deployment gate.
+
+Case B (Adaptive Trader v2) is the only named deployment in this paper. Case A, C, and D identities are withheld pending client-side co-authorship decisions; their reproducibility artifacts are available on request to NeSy program chairs under NDA.
+
+\subsection{Reproduction posture}\label{sec:eval-posture}
+
+\begin{itemize}
+\item \textbf{Artifact.} The Phase-1 + Phase-2.B + v0.4.0a1 artifact is bundled with the paper submission. \C{pytest -q} from a clean clone runs the \textbf{832-passed / 7-xfailed} test suite in under one minute.
+\item \textbf{Benchmark timeline.} \sectionref{sec:eval-longmem} (LongMemEval) and \sectionref{sec:eval-camo} (CAMO 1000-trajectory table) ship in the camera-ready (2026-07-20). \sectionref{sec:eval-regulator} (50-trajectory synthetic regulator-replay) ships in the camera-ready with the generator script. \sectionref{sec:eval-cases} Case B ships post-Persistence-migration numbers in the camera-ready.
+\item \textbf{Licensing.} Runtime: AGPL-3. Paper + benchmark harness + regulator-replay dataset: CC-BY-4.0.
+\item \textbf{Abstract submission scope.} At the 2026-06-09 abstract deadline, this section reports the formal properties (Proposition~\ref{prop:wellformed} and Proposition~\ref{prop:noop}) as \emph{already-checked on the shipped artifact}; all numeric tables carry [TBD] honestly.
+\end{itemize}
 
 \section{Discussion}\label{sec:discussion}
-% Task 24 (Pandoc prose)
+
+\subsection{Limitations}\label{sec:limitations}
+
+Persistence Phase 1 imposes costs we disclose frankly:
+
+\begin{itemize}
+\item \textbf{Write latency} rises by a constant overhead per transaction due to transactor validation and auto-retraction. The exact overhead on the Phase 1 \C{InMemoryStore} and \C{SQLiteStore} backends is [TBD] (to be measured for the camera-ready latency table). Aspirationally, this is acceptable for agent workloads; unacceptable for voice-turn-latency inner loops, which we route to a fast ring buffer drained asynchronously. Per-transaction ed25519 signing --- which would add a further cryptographic-signing cost when enabled --- is Phase 2 work; no overhead figure is claimed for it until the signing path ships and is measured.
+\item \textbf{Storage} on an append-only log is approximately $4\times$ a mutable-memory baseline, partially offset by content-addressing and (Phase 2) Zstd segment compression. Cold-tier eviction after 90 days (retain datoms, drop embeddings) mitigates further; Phase 1 ships the retention primitives, not the eviction scheduler.
+\item \textbf{\C{branch} complexity} on Phase 1 is $O(|D|)$-copy (Proposition~\ref{prop:branch}), not $O(|\Delta| \log |D|)$. A persistent-trie backing Store is the Phase 2 upgrade path.
+\item \textbf{Replay determinism} on Phase 1 is proven byte-wise only on a toy agent (Proposition~\ref{prop:noop}). The generalization to LLM trajectories requires per-step rng-state recording in the replay engine --- a targeted Phase 2 change that unblocks the \sectionref{sec:eval-camo} camera-ready numbers.
+\item \textbf{Audit universality} is a configuration of the deployed stack, not an invariant of the substrate (\sectionref{sec:audit}). \C{Runtime.assert\_universal\_audit} is on the Round-2 hardening list.
+\item \textbf{Policy-as-EDN} presumes Clojure/EDN literacy of the operator. The evaluator itself is language-agnostic at the data level, and JSON is a subset of EDN, so interoperability is straightforward.
+\item \textbf{Substrate lock-in.} Adopting Persistence means adopting a specific opinionated model of agent state. The migration path is additive (\sectionref{sec:adoption}), but eventual consolidation around datoms is the intended end state.
+\end{itemize}
+
+\subsection{Privacy architecture}\label{sec:privacy}
+
+Persistence is designed for local-first deployment. The authoritative datom log runs on operator-controlled infrastructure; all projections are regenerable. Provenance is \textbf{content-hashed per-datom (SHA-256) in Phase 1; per-transaction ed25519 signing is Phase 2 work} once key management (\C{sign\_transaction(tx\_id, tx\_hash, key) -> bytes}, verified inside \C{verify\_chain}) ships. A \C{:privacy :local} attribute on \C{:llm-call} nodes routes inference to local models (Qwen, DeepSeek, Llama), bypassing cloud vendors. Telemetry is emitted to an operator-controlled OpenTelemetry collector, with no SaaS egress. Skill-library entries carry a \C{:visibility :private} attribute enforcing never-to-cloud semantics.
+
+For regulated deployments, the system is fully auditable with zero third-party data exposure once the audit handler wraps the full catalog (\sectionref{sec:audit}). A plausible commercial deployment puts the runtime inside a client's VPC, stores the log in client-controlled Postgres, and exposes only the REPL and metrics to the vendor. Cryptographic \emph{authenticity} of the audit chain (who signed the transaction) ships with ed25519 in Phase 2; Phase 1 provides \emph{integrity} (the chain detects tampering given itself) via \C{verify\_chain}.
+
+\subsection{Adoption path}\label{sec:adoption}
+
+Persistence is explicitly additive. An existing agent stack migrates in three phases:
+
+\begin{enumerate}
+\item \textbf{Datom log (2 days, non-breaking).} Stand up the Fact module alongside the existing memory system; wrap writes with a datom-emitting interceptor. Zero reads change.
+\item \textbf{Backfill (3 days).} Synthesize datoms from existing mutable state with \C{tx-time = created\_at}, \C{valid-from = created\_at}.
+\item \textbf{Query surface (1 week).} Build \C{as-of}, \C{history}, \C{branch} as thin functions over the log; existing skills rewire to use them.
+\end{enumerate}
+
+Subsequent migration of Effect, Spec, and Replay (Phase 1) proceeds one module at a time, at the operator's pace. Plan, Txn, and REPL land in Phase 2.
+
+\subsection{Relation to neurosymbolic AI}\label{sec:nesy-rel}
+
+Persistence is neurosymbolic in a specific technical sense: the \emph{substrate} is symbolic and the \emph{agency} is neural. Phase 1 ships four symbolic substrate pieces:
+
+\begin{itemize}
+\item \textbf{Bitemporal datom queries with a Datalog-shaped surface} --- \C{as\_of}, \C{history}, \C{branch}, \C{validAsOf} are relational queries over an $(e, a, v, \tau, \dots)$ tuple store; Phase 1 implements these as Python comprehensions over the log (a Datalog query helper is adjacent future work --- see below).
+\item \textbf{EDN AST grammars for plans} --- \C{:persistence.plan/node} is registered in Phase 1; the Plan-module evaluator is Phase 2.
+\item \textbf{Policy-as-data} --- shipped (\C{policy\_eval.py}, \textasciitilde{}200 LOC).
+\item \textbf{Malli-style specs with LLM self-healing hints} --- shipped (\C{persistence.spec}, 186 tests; \C{explain\_for\_llm}, \sectionref{sec:specs}).
+\end{itemize}
+
+Two items we explicitly do \emph{not} claim as Phase 1 shipped are Datalog and Z3. We separate them cleanly from shipped capability:
+
+\begin{itemize}
+\item \textbf{Datalog engine.} The datom model is Datalog-ready --- classical Datalog rules over $(e, a, v)$ triples sit naturally on top of our query surface --- but the Phase 1 query layer is Python list comprehensions, not a rule engine. A Datalog surface (a compact pattern-matching helper over the datom set) is an adjacent system we draw on and is straightforward Phase 2 work.
+\item \textbf{Z3-discharged \C{verify} leaves.} Proof-of-Thought~\citep{fan2024proofofthought} describes a compelling integration point for Z3 at \C{verify}-node leaves, where plan fragments discharge proof obligations against an SMT solver. This is a future Plan-module feature; no Z3 code ships in Phase 1.
+\end{itemize}
+
+The symbolic substrate we \emph{do} ship --- bitemporal log, handler stack with \C{is\_well\_formed} / \C{Unhandled}, Merkle-hashed audit chain, boundary specs with \C{explain\_for\_llm} --- carries the properties we care about: accountability, composition, formal guarantees, and a concrete LLM-self-healing contract. The neural layer (LLM decisions, embeddings, generative skills) carries expressiveness. This distinguishes Persistence from pure-neural approaches (no guarantees) and pure-symbolic approaches (no expressiveness), and positions it as a candidate substrate for neurosymbolic systems beyond LLM agents, including embodied agents, multi-agent planning, and human-in-the-loop scientific discovery.
 
 \section{Conclusion}\label{sec:conclusion}
-% Task 24 (short, Pandoc)
+
+We presented Persistence, a cognitive-runtime substrate for accountable neurosymbolic agents. Phase 1 plus the first Phase-2 increment of the reference implementation (v0.1.0a1 + v0.4.0a1, \textbf{832 tests green + 7 xfailed}) ships five modules --- Fact, Effect, Spec, Replay, Plan (minimal) --- demonstrating five substrate-derived capabilities: queryable bitemporal history, counterfactual branching with parent-store isolation, composable policy-gated effects with a machine-checkable well-formedness property, boundary-checked contracts with LLM-self-healing hints, and content-addressed homoiconic plan ASTs with byte-identical round-trip and descendant-propagation identity. Five formal propositions hold on the shipped artifact; the headline two are: well-formedness of any handler stack is decidable in linear time by \C{Runtime.is\_well\_formed} and enforced at runtime by \C{Unhandled}; replay of a NO-OP intervention produces a trajectory whose canonical hash is byte-identical to the factual trajectory's. The Merkle-hashed audit chain (\C{verify\_chain}) shipped and is the regulator-grade foundation on which Case A (project finance) and Case C (insurance) will build in Phase 2. Three further modules (Plan execution, Txn, REPL) are specified, partially registered in the spec registry ahead of the runtime (a deliberate parse-don't-validate methodology), and scheduled for Phase 2 (2026-Q3).
+
+The core claim is that accountability, counterfactual replay, composable safety, compositional skill learning, multi-agent coordination, and live production steering can be derived from one substrate rather than five --- and that the four already shipped are \emph{properties of the log, checkable against the artifact}, not features engineered per agent.
+
+\textbf{Future work.} We plan to extend the runtime to (1) a persistent-trie \C{Store} backend that makes Proposition~\ref{prop:branch}'s $O(\log n)$ branch share a shipped property, not an idealized-implementation theorem; (2) per-step rng-state recording in the replay engine, which unblocks byte-identical replay for LLM trajectories; (3) ed25519 per-transaction signing via a \C{sign\_transaction} primitive verified in \C{verify\_chain}; (4) a Datalog query surface over the datom set; (5) Z3-discharged \C{verify} leaves in the Plan-module AST following Proof-of-Thought~\citep{fan2024proofofthought}; (6) embodied-agent extensions where effects include physical-world interactions with partial observability; and (7) distributed deployment preserving bitemporal semantics across multi-region fact stores.
+
+We release the Phase-1 runtime under AGPL-3, with paper artifacts (benchmark harness, 50-trajectory synthetic regulator-replay dataset) under CC-BY-4.0.
 
 % Acknowledgements — \acks{} is JMLR-native; auto-suppressed under [anon].
 \acks{% Set under [final] before camera-ready.

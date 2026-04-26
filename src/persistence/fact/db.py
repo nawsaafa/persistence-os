@@ -493,3 +493,14 @@ def _find_prior_assert(
 
 
 __all__ = ["CausalDAG", "DB", "DBView", "RetroactiveCorrectionError"]
+
+
+# ---------------------------------------------------------------------------
+# Txn module attaches db.ref / db.new_ref / db.dosync at import time.
+# This is a one-way coupling: txn imports DB; DB does NOT import txn at
+# the top of this file. The attach call lives at the bottom so DB is
+# fully constructed when it runs.
+# ---------------------------------------------------------------------------
+from persistence.txn._db_extension import _attach_txn_methods  # noqa: E402
+
+_attach_txn_methods(DB)

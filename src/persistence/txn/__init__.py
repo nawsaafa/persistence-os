@@ -14,11 +14,12 @@ from persistence.txn.errors import (
     TxnError,
     TxnRetryExhausted,
 )
-from persistence.txn.ref import Ref, freeze
+from persistence.txn.ref import Ref, freeze, is_immutable_value
 
 __all__ = [
     "EffectInIoBlock",
     "freeze",
+    "is_immutable_value",
     "NestedDosyncNotSupported",
     "Ref",
     "RefBranchMismatch",

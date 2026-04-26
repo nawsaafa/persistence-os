@@ -46,7 +46,10 @@ def is_immutable_value(value: Any) -> bool:
     Accepted:
     - pyrsistent.PMap, PVector, PSet
     - frozenset, tuple, str, int, bool, float, Decimal, bytes, None
-    - frozen dataclass instances (``@dataclass(frozen=True)``)
+    - frozen dataclass instances (``@dataclass(frozen=True)``); only
+      attribute reassignment is blocked — field values are NOT
+      recursively checked, so callers must ensure each field holds an
+      immutable value.
 
     Rejected:
     - dict, list, set
@@ -65,7 +68,8 @@ def is_immutable_value(value: Any) -> bool:
 def freeze(value: Any) -> Any:
     """Recursively convert mutable collections to pyrsistent equivalents.
 
-    - ``dict`` → ``PMap`` (recursively freezing values)
+    - ``dict`` → ``PMap`` (recursively freezing values; keys are passed
+      through unchanged because dict keys must already be hashable)
     - ``list`` → ``PVector`` (recursively freezing items)
     - already-immutable values pass through unchanged
     - ``set`` → raises (use ``frozenset`` or ``pset`` explicitly to avoid

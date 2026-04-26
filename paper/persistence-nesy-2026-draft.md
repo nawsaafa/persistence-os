@@ -135,7 +135,7 @@ A **datom** is an eight-tuple:
 
 $$d = \langle e,\ a,\ v,\ \tau,\ \tau_{sys},\ \nu_{from},\ \nu_{to},\ \omega \rangle$$
 
-where $e$ is an entity identifier, $a$ a namespaced attribute, $v$ an EDN value, $\tau$ a monotonic transaction id, $\tau_{sys}$ the ingestion (system) time, $\nu_{from}$ and $\nu_{to}$ the valid-time interval, and $\omega \in \{\text{assert}, \text{retract}\}$. A provenance record $\pi$ (source, model, prompt-hash, confidence, content-hash) accompanies each datom; an optional pointer `invalidated-by` links a superseded datom to the transaction that superseded it. Phase 1 seals provenance with a SHA-256 content hash. Cryptographic per-transaction signatures (ed25519) are Phase 2 work and are discussed as a privacy-posture extension in §7.2.
+where $e$ is an entity identifier, $a$ a namespaced attribute, $v$ an EDN value, $\tau$ a monotonic transaction id, $\tau_{sys}$ the ingestion (system) time, $\nu_{from}$ and $\nu_{to}$ the valid-time interval, and $\omega \in \{\text{assert}, \text{retract}\}$. A provenance record $\pi$ accompanies each datom; v0.4.0a1 ships its typed schema as the `Provenance` `TypedDict` (`total=False`) over seven known keys — `source`, `tx_time`, `handler_id`, `canonical_call`, `parent_provenance_hash`, `superseded_by_tx`, and a free-form `extra` map for caller-defined fields. The schema is deliberately model-pluggable: `handler_id` names the registered effect handler that produced the datom, `canonical_call` is a content hash of the call site (model + prompt + tools + params), and there is no `:provider` field — the neural model is a plug-in, not embedded in the substrate's shape. An optional pointer `invalidated-by` links a superseded datom to the transaction that superseded it. Phase 1 seals provenance with a SHA-256 content hash. Cryptographic per-transaction signatures (ed25519) are Phase 2 work and are discussed as a privacy-posture extension in §7.2.
 
 The database $D$ is a finite set of datoms. We define the core queries:
 
@@ -143,6 +143,8 @@ The database $D$ is a finite set of datoms. We define the core queries:
 - $\text{validAsOf}(D, t) = \{d \in D \mid \omega(d) = \text{assert} \land \nu_{from}(d) \leq t < \nu_{to}(d)\}$
 - $\text{history}(D, e) = \{d \in D \mid \text{entity}(d) = e\}$, sorted by $\tau$
 - $\text{branch}(D, t, \Delta) = \text{asOf}(D, t) \cup \Delta$, where $\Delta$ is a set of hypothetical datoms
+
+Projection-layer counterfactuals are supported via `ProjectionAdapter.fork(branch_id)` (v0.4.0a1; `DictProjection.fork()` reference impl) — a Protocol method returning a fresh empty adapter that the caller populates by driving `rebuild()` against a branched DB. This closes a previously-implicit assumption that a counterfactual run could observe ordinary `apply()` writes from its parent's projection.
 
 **Proposition 1 (Branch is a logical operation over the shipped store).** `branch(D, t, Δ)` returns a new `DB` value backed by a fresh in-memory store seeded with `asOf(D, t)` and extended with $\Delta$; writes to the branched value cannot leak back into the parent store. *Complexity:* on the Phase 1 `InMemoryStore` reference implementation (`src/persistence/fact/db.py`), materialization is $O(|D|)$ in the seed snapshot plus $O(|\Delta|)$ in the hypothetical additions. *Phase 2 upgrade:* under a persistent hash-array-mapped-trie (HAMT) backing store, the seed step reduces to $O(|\Delta| \log |D|)$ via structural path-copy; the `Store` Protocol boundary makes this a drop-in replacement requiring no change to `branch`'s interface.
 

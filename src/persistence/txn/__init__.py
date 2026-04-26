@@ -14,10 +14,12 @@ from persistence.txn.errors import (
     TxnError,
     TxnRetryExhausted,
 )
+from persistence.txn.ref import Ref
 
 __all__ = [
     "EffectInIoBlock",
     "NestedDosyncNotSupported",
+    "Ref",
     "RefBranchMismatch",
     "RefValueNotImmutable",
     "TxnDeadlineExceeded",

@@ -2,6 +2,9 @@
 
 See ``docs/plans/2026-04-27-v0.5-txn-design.md`` for the full design.
 """
+
+__version__ = "0.5.0a1"
+
 from persistence.txn.errors import (
     EffectInIoBlock,
     NestedDosyncNotSupported,
@@ -11,8 +14,6 @@ from persistence.txn.errors import (
     TxnError,
     TxnRetryExhausted,
 )
-
-__version__ = "0.5.0a1"
 
 __all__ = [
     "EffectInIoBlock",

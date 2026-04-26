@@ -1,4 +1,6 @@
 """Ref dataclass — Phase A."""
+from dataclasses import FrozenInstanceError
+
 import pytest
 
 from persistence.txn import Ref
@@ -29,5 +31,5 @@ def test_ref_hashable():
 
 def test_ref_immutable():
     r = Ref(eid="account-1", db_id="db-A")
-    with pytest.raises((AttributeError, TypeError)):
+    with pytest.raises(FrozenInstanceError):
         r.eid = "other"  # frozen dataclass refuses assignment

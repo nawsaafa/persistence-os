@@ -162,3 +162,20 @@ def test_negative_infinity_in_inputs_raises_value_error():
     bad: TrainingExample = {"inputs": {"score": float("-inf")}, "expected": 1}
     with pytest.raises(ValueError):
         _canonicalize_training_set([bad])
+
+
+def test_tuple_and_list_inside_inputs_canonicalize_identically():
+    """json.dumps converts tuple to list, so {"a":(1,2)} and {"a":[1,2]}
+    canonicalize to the same bytes. Pin this to catch any future
+    refactor that adds tuple-vs-list normalization upstream."""
+    a: TrainingExample = {"inputs": {"a": (1, 2, 3)}, "expected": 1}
+    b: TrainingExample = {"inputs": {"a": [1, 2, 3]}, "expected": 1}
+    assert _canonicalize_training_set([a]) == _canonicalize_training_set([b])
+
+
+def test_non_json_serializable_inputs_raises_value_error():
+    """Non-JSON types (e.g. set) raise TypeError from json.dumps; we
+    wrap and re-raise as ValueError uniformly so callers match one class."""
+    bad: TrainingExample = {"inputs": {"a": {1, 2, 3}}, "expected": 1}  # set, not list
+    with pytest.raises(ValueError, match="index 0"):
+        _canonicalize_training_set([bad])

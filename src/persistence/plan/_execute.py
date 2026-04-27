@@ -320,10 +320,10 @@ def _canonicalize_training_set(training_set: list[TrainingExample]) -> str:
                 separators=(",", ":"),
                 allow_nan=False,
             )
-        except ValueError as exc:
+        except (ValueError, TypeError) as exc:
             # ValueError from json.dumps with allow_nan=False fires on
-            # NaN/Inf. Also catches non-JSON-serializable types via
-            # TypeError-elevated paths in some stdlib branches; we raise
+            # NaN/Inf. TypeError fires on non-JSON-serializable values
+            # (e.g. set, custom class without __json__). We raise
             # ValueError uniformly so callers have one exception class
             # to match.
             raise ValueError(

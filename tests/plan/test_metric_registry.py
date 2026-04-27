@@ -107,6 +107,18 @@ def test_re_register_with_replace_true_overwrites():
         unregister_metric(ref)
 
 
+def test_register_with_replace_true_on_absent_ref_succeeds():
+    """replace=True against an absent ref registers fresh (no error).
+    Pinned so test fixtures' replace=True idiom can't drift to "must
+    be already registered" in a future refactor."""
+    ref = MetricRef(id="never-before-seen", version="v1")
+    register_metric(ref, _make_metric(7.0), replace=True)
+    try:
+        assert lookup_metric(ref)(_ok_result(), {}) == 7.0
+    finally:
+        unregister_metric(ref)
+
+
 # --- Edge case 4: lookup on missing ref raises MetricNotRegistered ------- #
 
 

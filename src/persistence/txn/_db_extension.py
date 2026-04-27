@@ -113,18 +113,9 @@ def _build_dosync_cm(db: Any) -> Any:
     """Build the contextmanager object for the CM form of dosync."""
     @contextlib.contextmanager
     def cm() -> Any:
-        from persistence.txn.transaction import Transaction
+        from persistence.txn.transaction import Transaction, _commit_attempt
         from persistence.txn.intents import set_dosync_guard, clear_dosync_guard, is_in_dosync
-        from persistence.txn.errors import NestedDosyncNotSupported
-
-        from persistence.txn.transaction import (
-            _build_commit_fact,
-            _build_write_facts,
-            _spec_validate_writes,
-        )
-        from persistence.txn.conflict import any_datoms_since
-        from persistence.txn.errors import TxnRetryExhausted
-        import uuid as _uuid
+        from persistence.txn.errors import NestedDosyncNotSupported, TxnRetryExhausted
 
         if is_in_dosync():
             raise NestedDosyncNotSupported(
@@ -138,34 +129,14 @@ def _build_dosync_cm(db: Any) -> Any:
         finally:
             clear_dosync_guard(token)
         # Commit path (only reached on clean exit; exceptions from
-        # the with-block body skip this).
-        _spec_validate_writes(tx.write_set)
-        commit_id = str(_uuid.uuid4())  # noqa: wall-clock
-        facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
-        with db.store._lock:
-            touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
-            if any_datoms_since(db, t_start, touched):
-                raise TxnRetryExhausted(
-                    "dosync context-manager detected conflict on commit; "
-                    "use the @db.dosync decorator form for retry-on-conflict"
-                )
-            # `facts` always contains at least the commit datom, so no guard.
-            db.transact_batch(
-                facts,
-                provenance={
-                    ":persistence.txn/commit-id": commit_id,
-                    ":persistence.txn/started-at": t_start.isoformat(),
-                    ":persistence.txn/committed-at": db._clock().isoformat(),
-                    ":persistence.txn/retry-count": 0,
-                    ":persistence.txn/non-deterministic-retry": False,
-                },
+        # the with-block body skip this). The CM form is single-shot:
+        # a False return from _commit_attempt is escalated to
+        # TxnRetryExhausted instead of looping.
+        if not _commit_attempt(tx):
+            raise TxnRetryExhausted(
+                "dosync context-manager detected conflict on commit; "
+                "use the @db.dosync decorator form for retry-on-conflict"
             )
-        tx.commit_id = commit_id
-        from persistence.effect.runtime import _active as _effect_active
-        rt = _effect_active.get()
-        if rt is not None:
-            for intent in tx.effect_intent_log:
-                rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
 
     return cm()
 

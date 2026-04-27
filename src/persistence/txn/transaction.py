@@ -173,6 +173,78 @@ def _build_commit_fact(tx: "Transaction", commit_id: str) -> dict:
     }
 
 
+def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
+    """Build the dict passed as ``transact_batch(provenance=...)``.
+
+    Future home of the N1 read-set / intent-log keys (rev O narrowing).
+    Reads the optional private ``tx._deadline_set`` flag set by ``_run``
+    once before the retry loop (defaults to ``False`` — the CM path
+    never sets it).
+    """
+    return {
+        ":persistence.txn/commit-id": commit_id,
+        ":persistence.txn/started-at": tx.t_start.isoformat(),
+        ":persistence.txn/committed-at": tx.db._clock().isoformat(),
+        ":persistence.txn/retry-count": tx.attempt,
+        ":persistence.txn/non-deterministic-retry": getattr(
+            tx, "_deadline_set", False
+        ),
+    }
+
+
+def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
+    """Replay ``tx.effect_intent_log`` through the active effect runtime.
+
+    No-op when no runtime is active (intents queue but never fire — the
+    caller is responsible for setting up the runtime if it wants effects
+    to run). Future home of the N2 typed ``txn_commit`` kwarg.
+    """
+    from persistence.effect.runtime import _active as _effect_active
+
+    rt = _effect_active.get()
+    if rt is None:
+        return
+    for intent in tx.effect_intent_log:
+        rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
+
+
+def _commit_attempt(tx: "Transaction") -> bool:
+    """Run the spec-validate / facts-build / lock+conflict-check / transact
+    sequence atomically.
+
+    Returns ``True`` if committed, ``False`` if the conflict check rejected
+    it (caller decides retry vs raise). On success, sets ``tx.commit_id``
+    and replays effect intents through the active runtime (if any).
+
+    Both ``with db.dosync()`` and ``@db.dosync`` route their commit gate
+    through this single helper.
+    """
+    # Commit gate 1: spec validation BEFORE allocating tx-id.
+    _spec_validate_writes(tx.write_set)
+
+    # Commit gates 2+3: conflict check AND transact must be atomic.
+    # Without the lock, two threads can both pass the MVCC check before
+    # either writes, then both commit — losing increments (B7 concurrency
+    # bug). Holding store._lock across check+write collapses the window
+    # to zero: a thread that passes the check is guaranteed to commit
+    # before any other thread's check runs.
+    commit_id = str(_uuid.uuid4())  # noqa: wall-clock
+    facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
+    with tx.db.store._lock:
+        touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
+        if any_datoms_since(tx.db, tx.t_start, touched):
+            return False
+        # Apply atomically as one db.transact() — write_set + commit datom.
+        # `facts` always contains at least the commit datom, so no guard.
+        tx.db.transact_batch(
+            facts,
+            provenance=_build_commit_provenance(tx, commit_id),
+        )
+    tx.commit_id = commit_id
+    _replay_effect_intents(tx, commit_id)
+    return True
+
+
 def _run(
     db: Any,
     body: Callable[["Transaction"], Any],
@@ -203,6 +275,9 @@ def _run(
 
         t_start = db._clock()
         tx = Transaction(db=db, t_start=t_start, attempt=attempt)
+        if deadline is not None:
+            # Read by _build_commit_provenance; CM path leaves it absent.
+            tx._deadline_set = True  # type: ignore[attr-defined]
         token = set_dosync_guard()
         try:
             try:
@@ -215,47 +290,10 @@ def _run(
             # Body raised — propagate immediately, no commit, no retry.
             raise
 
-        # Commit gate 1: spec validation BEFORE allocating tx-id.
-        _spec_validate_writes(tx.write_set)
+        if _commit_attempt(tx):
+            return tx.commit_id  # type: ignore[return-value]
+        attempt += 1
 
-        # Commit gates 2+3: conflict check AND transact must be atomic.
-        # Without the lock, two threads can both pass the MVCC check before
-        # either writes, then both commit — losing increments (B7 concurrency
-        # bug). Holding store._lock across check+write collapses the window
-        # to zero: a thread that passes the check is guaranteed to commit
-        # before any other thread's check runs.
-        commit_id = str(_uuid.uuid4())  # noqa: wall-clock
-        facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
-        with db.store._lock:
-            touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
-            if any_datoms_since(db, t_start, touched):
-                attempt += 1
-                continue
-
-            # Apply atomically as one db.transact() — write_set + commit datom.
-            # `facts` always contains at least the commit datom, so no guard.
-            db.transact_batch(
-                facts,
-                provenance={
-                    ":persistence.txn/commit-id": commit_id,
-                    ":persistence.txn/started-at": t_start.isoformat(),
-                    ":persistence.txn/committed-at": db._clock().isoformat(),
-                    ":persistence.txn/retry-count": attempt,
-                    ":persistence.txn/non-deterministic-retry": deadline is not None,
-                },
-            )
-        tx.commit_id = commit_id
-
-        # Replay effect intents through the real handler stack.
-        # Only meaningful if there's an active runtime; if not, intents
-        # silently no-op (caller responsibility to set up runtime).
-        from persistence.effect.runtime import _active as _effect_active
-        rt = _effect_active.get()
-        if rt is not None:
-            for intent in tx.effect_intent_log:
-                rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
-
-        return commit_id
 
 __all__ = [
     "Transaction",
@@ -264,5 +302,8 @@ __all__ = [
     "_spec_validate_writes",
     "_build_write_facts",
     "_build_commit_fact",
+    "_build_commit_provenance",
+    "_replay_effect_intents",
+    "_commit_attempt",
     "_run",
 ]

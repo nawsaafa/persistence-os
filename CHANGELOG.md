@@ -38,7 +38,8 @@ All notable changes to Persistence OS are tracked here. Versions follow
 ### Design pins held
 - `PLAN_CANONICAL_VERSION` stays at 1.
 - Zero proposition impact (Prop 1–5 unchanged).
-- 832 + 7 xfailed baseline preserved; ≥ 50 new tests added.
+- 832 + 7 xfailed v0.4.0a1 baseline preserved; +80 new tests
+  (912 + 7 xfailed total).
 - No-GIL forward-compatible (rev N): every mutation guarded by explicit
   lock, `@pytest.mark.no_gil_safe` test in conflict suite.
 

@@ -8,6 +8,12 @@ retry). Such calls raise ``EffectInIoBlock``.
 
 Mirrors the existing ContextVar pattern in effect/runtime.py:254
 (_active runtime). Async-task-local for free, no threading.local.
+
+Note: child threads spawned via ``threading.Thread`` from inside a
+dosync body do NOT inherit the guard (Python ContextVars are
+copied for asyncio tasks but not for raw threads). Spawning sub-
+threads from inside a dosync body is undefined behaviour in
+v0.5.0a1 — restructure to spawn before/after the dosync.
 """
 from __future__ import annotations
 

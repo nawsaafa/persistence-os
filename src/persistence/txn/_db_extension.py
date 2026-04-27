@@ -9,6 +9,8 @@ Phase A ships ``ref`` and ``new_ref``. Phase B adds ``dosync`` and
 """
 from __future__ import annotations
 
+import contextlib
+import functools
 import uuid
 from typing import Any, Callable, Optional
 
@@ -65,10 +67,6 @@ def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
     eid = str(uuid.uuid4())  # uuid4; uuid7 not in stdlib until 3.13+  # noqa: wall-clock
     return Ref(eid=eid, db_id=_get_db_id(self))
 
-
-
-import contextlib
-import functools
 
 
 class _DosyncHandle:
@@ -151,17 +149,17 @@ def _build_dosync_cm(db: Any) -> Any:
                     "dosync context-manager detected conflict on commit; "
                     "use the @db.dosync decorator form for retry-on-conflict"
                 )
-            if facts:
-                db.transact_batch(
-                    facts,
-                    provenance={
-                        ":persistence.txn/commit-id": commit_id,
-                        ":persistence.txn/started-at": t_start.isoformat(),
-                        ":persistence.txn/committed-at": db._clock().isoformat(),
-                        ":persistence.txn/retry-count": 0,
-                        ":persistence.txn/non-deterministic-retry": False,
-                    },
-                )
+            # `facts` always contains at least the commit datom, so no guard.
+            db.transact_batch(
+                facts,
+                provenance={
+                    ":persistence.txn/commit-id": commit_id,
+                    ":persistence.txn/started-at": t_start.isoformat(),
+                    ":persistence.txn/committed-at": db._clock().isoformat(),
+                    ":persistence.txn/retry-count": 0,
+                    ":persistence.txn/non-deterministic-retry": False,
+                },
+            )
         tx.commit_id = commit_id
         from persistence.effect.runtime import _active as _effect_active
         rt = _effect_active.get()
@@ -191,6 +189,15 @@ def _dosync(
 
         @db.dosync(deadline=2.0, max_retries=512)
         def transfer(tx): ...
+
+    Retry semantics — IMPORTANT asymmetry:
+        - The CM form (``with db.dosync(...) as tx:``) is single-shot:
+          on a conflict at commit time it raises ``TxnRetryExhausted``
+          immediately. Suitable for one-off scripted writes where the
+          caller wants to handle conflicts explicitly.
+        - The decorator form (``@db.dosync`` / ``@db.dosync(...)``) is
+          the canonical retryable form: it re-runs the body up to
+          ``max_retries`` times (default 256) on conflict.
     """
     from persistence.txn.transaction import _run, DEFAULT_MAX_RETRIES
 
@@ -227,7 +234,7 @@ def _attach_txn_methods(db_cls: type) -> None:
     """
     db_cls.ref = _ref            # type: ignore[attr-defined]
     db_cls.new_ref = _new_ref    # type: ignore[attr-defined]
-    db_cls.dosync = _dosync      # type: ignore[attr-defined]    # type: ignore[attr-defined]
+    db_cls.dosync = _dosync      # type: ignore[attr-defined]
     # dosync + dosync_decorator are attached in Phase B.
 
 

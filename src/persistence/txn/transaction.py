@@ -8,12 +8,27 @@ in via ``Transaction._run`` (added in Task B7).
 """
 from __future__ import annotations
 
+import time
+import uuid as _uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Optional
 
-from persistence.txn.errors import RefValueNotImmutable
-from persistence.txn.intents import EffectIntent
+from persistence.spec import conform as _spec_conform
+from persistence.spec import registered_keys as _registered_keys
+from persistence.txn.conflict import any_datoms_since
+from persistence.txn.errors import (
+    NestedDosyncNotSupported,
+    RefValueNotImmutable,
+    TxnDeadlineExceeded,
+    TxnRetryExhausted,
+)
+from persistence.txn.intents import (
+    EffectIntent,
+    clear_dosync_guard,
+    is_in_dosync,
+    set_dosync_guard,
+)
 from persistence.txn.ref import Ref, is_immutable_value
 
 
@@ -47,8 +62,17 @@ class Transaction:
     def assoc(self, ref: Ref, value: Any) -> None:
         """Queue a write of ``value`` to ``ref`` at commit time.
 
-        Raises ``RefValueNotImmutable`` if ``value`` is mutable.
+        Raises ``RefBranchMismatch`` if ``ref`` was constructed against
+        a different DB. Raises ``RefValueNotImmutable`` if ``value`` is
+        mutable.
         """
+        from persistence.txn.errors import RefBranchMismatch
+        from persistence.txn._db_extension import _get_db_id
+
+        if ref.db_id != _get_db_id(self.db):
+            raise RefBranchMismatch(
+                f"ref {ref!r} belongs to a different DB than this dosync"
+            )
         if not is_immutable_value(value):
             raise RefValueNotImmutable(
                 f"tx.assoc value must be immutable; got {type(value).__name__!r}. "
@@ -99,24 +123,6 @@ class Transaction:
         self.assoc(ref, new_value)
         return new_value
 
-
-
-import time
-import uuid as _uuid
-
-from persistence.spec import conform as _spec_conform
-from persistence.spec import registered_keys as _registered_keys
-from persistence.txn.conflict import any_datoms_since
-from persistence.txn.errors import (
-    NestedDosyncNotSupported,
-    TxnDeadlineExceeded,
-    TxnRetryExhausted,
-)
-from persistence.txn.intents import (
-    clear_dosync_guard,
-    is_in_dosync,
-    set_dosync_guard,
-)
 
 
 DEFAULT_MAX_RETRIES = 256
@@ -227,17 +233,17 @@ def _run(
                 continue
 
             # Apply atomically as one db.transact() — write_set + commit datom.
-            if facts:
-                db.transact_batch(
-                    facts,
-                    provenance={
-                        ":persistence.txn/commit-id": commit_id,
-                        ":persistence.txn/started-at": t_start.isoformat(),
-                        ":persistence.txn/committed-at": db._clock().isoformat(),
-                        ":persistence.txn/retry-count": attempt,
-                        ":persistence.txn/non-deterministic-retry": deadline is not None,
-                    },
-                )
+            # `facts` always contains at least the commit datom, so no guard.
+            db.transact_batch(
+                facts,
+                provenance={
+                    ":persistence.txn/commit-id": commit_id,
+                    ":persistence.txn/started-at": t_start.isoformat(),
+                    ":persistence.txn/committed-at": db._clock().isoformat(),
+                    ":persistence.txn/retry-count": attempt,
+                    ":persistence.txn/non-deterministic-retry": deadline is not None,
+                },
+            )
         tx.commit_id = commit_id
 
         # Replay effect intents through the real handler stack.

@@ -388,6 +388,9 @@ class DB:
                     valid_from=vf,
                     valid_to=vt,
                     op=op,
+                    # Same rationale as transact() at db.py:250-260:
+                    # prov is structurally Provenance-compatible at runtime
+                    # but caller-supplied as a free-form dict.
                     provenance=prov,  # type: ignore[arg-type]
                 )
             )

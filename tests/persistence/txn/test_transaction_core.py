@@ -55,3 +55,52 @@ def test_tx_effect_queues_intent():
     intent = tx.effect_intent_log[0]
     assert intent.op == ":log/write"
     assert intent.kwargs == {"message": "hello"}
+
+
+def test_tx_assoc_raises_RefBranchMismatch_on_foreign_ref():
+    """tx.assoc on a ref from a different DB must raise RefBranchMismatch
+    (parallel to tx.deref). Without this guard, a foreign ref's eid would
+    be silently written into the wrong DB at commit time.
+    """
+    from persistence.txn import RefBranchMismatch
+
+    db1 = DB()
+    db2 = DB()
+    tx = Transaction(db=db1, t_start=db1._clock(), attempt=0)
+    foreign_ref = db2.ref("account-1")
+    with pytest.raises(RefBranchMismatch):
+        tx.assoc(foreign_ref, pmap({"balance": 100}))
+
+
+def test_empty_body_dosync_emits_exactly_one_commit_datom():
+    """An empty dosync body (no assoc, no effect) still commits a single
+    commit datom recording attempt count and timestamps. Pins the
+    no-op-but-witnessed contract that future refactors must preserve.
+    """
+    db = DB()
+
+    @db.dosync
+    def noop(tx):  # pyright: ignore [reportArgumentType]
+        pass
+
+    n_before = len(list(db.store.all_datoms()))
+    noop()
+    after = list(db.store.all_datoms())
+    assert len(after) - n_before == 1, (
+        f"empty dosync body should emit exactly 1 commit datom; got "
+        f"{len(after) - n_before}"
+    )
+    assert after[-1].a == "persistence.txn/commit-id"
+
+
+def test_RetroactiveCorrectionError_propagates_through_dosync():
+    """RetroactiveCorrectionError raised by transact_batch from inside a
+    dosync body must propagate as RetroactiveCorrectionError — it is NOT
+    a TxnError subclass. v0.4 callers using ``except TxnError`` will not
+    catch this; they must explicitly handle the retroactive case.
+    """
+    from persistence.fact.db import RetroactiveCorrectionError
+    from persistence.txn import TxnError
+
+    # RetroactiveCorrectionError is fact-layer, not txn-layer.
+    assert not issubclass(RetroactiveCorrectionError, TxnError)

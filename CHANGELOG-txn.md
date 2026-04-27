@@ -25,6 +25,24 @@ Initial release. See top-level `CHANGELOG.md` for the v0.5.0a1 section.
 - Default `max_retries=256`; opt-in `deadline=` for non-deterministic
   wall-clock retry budget.
 
+### Design-vs-impl narrowings (rev O — see design doc § 4.1, § 4.3, § 6, § 7.2)
+- `:persistence.txn/read-set` and `:persistence.txn/intent-log` are
+  spec-registered but NOT emitted into the commit datom's provenance.
+  Reconstructable from `db.store.since(t_start)` and the audit chain
+  respectively. Promotion deferred to v0.5.1.
+- The audit-chain `:effect/txn-commit` field shipped as a `_txn_commit`
+  kwarg passed to `runtime.perform`, not as a first-class AuditEntry
+  schema field. Promotion deferred to v0.5.1.
+- The CM form (`with db.dosync()`) is single-shot — raises
+  `TxnRetryExhausted` on conflict. The decorator form is the canonical
+  retryable form.
+- Per-ref attribute specs (`ref.spec_attr`) collapsed to a single global
+  `:value` spec key in `_spec_validate_writes`. Per-ref specs deferred
+  to v0.5.1.
+- Replay byte-identity test ships as a deterministic two-run structural
+  comparison rather than a Hypothesis `@given` property at
+  `max_examples=200`. Hypothesis upgrade deferred to v0.5.1.
+
 ### References
 - Design doc: `docs/plans/2026-04-27-v0.5-txn-design.md`
 - Impl plan: `docs/plans/2026-04-27-v0.5-txn-impl.md`

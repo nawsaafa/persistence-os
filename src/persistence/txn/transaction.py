@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from persistence.txn.errors import RefValueNotImmutable
 from persistence.txn.intents import EffectIntent
@@ -59,6 +59,45 @@ class Transaction:
     def effect(self, op: str, **kwargs: Any) -> None:
         """Queue an effect intent to be replayed atomically at commit."""
         self.effect_intent_log.append(EffectIntent(op=op, kwargs=dict(kwargs)))
+
+    def deref(self, ref: Ref) -> Any:
+        """Snapshot read of ``ref`` at ``t_start``.
+
+        Branch-checked: ``ref`` must belong to this transaction's DB.
+        Adds ``ref`` to the read_set. If the body has already written
+        to this ref via ``assoc`` or ``alter``, returns the pending
+        write (read-your-own-writes); otherwise returns the value of
+        the underlying entity at ``t_start``, or ``None`` if no
+        ``:value`` attribute has been asserted yet.
+        """
+        from persistence.txn.errors import RefBranchMismatch
+        from persistence.txn._db_extension import _get_db_id
+
+        if ref.db_id != _get_db_id(self.db):
+            raise RefBranchMismatch(
+                f"ref {ref!r} belongs to a different DB than this dosync"
+            )
+        self.read_set.add(ref)
+        if ref in self.write_set:
+            return self.write_set[ref]
+        # Snapshot read at t_start. The convention for ref-as-value:
+        # the entity's ``:value`` attribute holds the ref's value.
+        view = self.db.as_of(self.t_start)
+        entity_attrs = view.entity(ref.eid)
+        return entity_attrs.get(":value") if entity_attrs else None
+
+    def alter(self, ref: Ref, fn: Callable, *args: Any) -> Any:
+        """Read ``ref`` at snapshot, apply ``fn(snapshot_value, *args)``,
+        queue the result as a write, return the new value.
+
+        Adds ``ref`` to the read_set (so concurrent writes to ``ref``
+        cause this transaction to retry). The new value must be
+        immutable; ``RefValueNotImmutable`` is raised otherwise.
+        """
+        current = self.deref(ref)
+        new_value = fn(current, *args)
+        self.assoc(ref, new_value)
+        return new_value
 
 
 __all__ = ["Transaction"]

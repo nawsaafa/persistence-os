@@ -15,6 +15,7 @@ from persistence.txn.errors import (
     TxnRetryExhausted,
 )
 from persistence.txn.ref import Ref, freeze, is_immutable_value
+from persistence.txn.transaction import Transaction
 
 __all__ = [
     "EffectInIoBlock",
@@ -27,6 +28,7 @@ __all__ = [
     "TxnDeadlineExceeded",
     "TxnError",
     "TxnRetryExhausted",
+    "Transaction",
     "__version__",
 ]
 

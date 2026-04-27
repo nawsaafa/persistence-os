@@ -55,6 +55,10 @@ bench/.datasets/
 # OpenTelemetry local collector data
 .otel-local/
 .claude/
+
+# Local reviewer transcripts + scratch prompts (auto-review-loop artifacts).
+# Authoritative records live in conductor STATUS + design docs + git log.
+review-stage/
 build/
 uv.lock
 *.egg-info/

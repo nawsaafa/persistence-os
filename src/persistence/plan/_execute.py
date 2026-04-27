@@ -25,8 +25,10 @@ Design contract (per `docs/plans/2026-04-28-v0.6.0a1-plan-execution-design.md`
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 from persistence.plan._ast import Node
 from persistence.plan._dispatch import Dispatcher
@@ -36,8 +38,30 @@ __all__ = [
     "ExecutionResult",
     "FailureInfo",
     "LeafResult",
+    "TrainingExample",
     "execute",
 ]
+
+
+class TrainingExample(TypedDict):
+    """Closed-shape training example for `optimize()` / canonicalization.
+
+    Two keys exactly: ``inputs`` (model-facing kwargs dict) and
+    ``expected`` (free-form ground truth). Extra keys are rejected at
+    canonicalization time so the hash schema cannot drift silently.
+
+    Attributes:
+        inputs: Model-facing kwargs as a dict. Must be a dict (not a
+            list/string/scalar) because downstream adapters splat it as
+            ``**kwargs`` into a DSPy module's ``forward()``.
+        expected: Ground-truth value the metric compares against. Free-form
+            JSON-serializable (the canonicalizer uses ``json.dumps`` with
+            ``allow_nan=False`` so NaN/Inf inside ``expected`` is also
+            rejected — same rule as ``inputs``).
+    """
+
+    inputs: dict
+    expected: Any
 
 
 #: Sentinel handler-id when a node's `attrs` dict has no `"handler-id"`
@@ -200,3 +224,122 @@ def execute(
         leaf_results=tuple(leaf_results),
         failure=failure,
     )
+
+
+#: Closed schema for the validator. Both keys are required; nothing else
+#: is allowed. Membership comparison is via frozenset for O(1) checks.
+_TRAINING_EXAMPLE_KEYS: frozenset[str] = frozenset({"inputs", "expected"})
+
+
+def _canonicalize_training_set(training_set: list[TrainingExample]) -> str:
+    """Deterministic SHA-256 hex of a training set.
+
+    Per design §5 rule (1), the digest is the reproducibility hook for
+    paper §6 numeric tables: same examples → same hash → same provenance,
+    regardless of run, machine, or caller-supplied ordering. Only
+    canonical-JSON bytes feed sha256 — no Python-callable hashing, no
+    float drift.
+
+    Steps:
+
+    1. Validate the schema for each example: keys must be exactly
+       ``{"inputs", "expected"}``; ``inputs`` must be a ``dict``.
+       Violations raise ``ValueError`` with the offending example
+       index in the message.
+    2. Encode each validated example via the same canonical-JSON
+       serializer as ``Node.id`` (``sort_keys=True``,
+       ``separators=(',',':')``, ``allow_nan=False``). Sorted keys
+       absorb dict-key ordering noise inside ``inputs`` and
+       ``expected``; ``allow_nan=False`` rejects NaN/Inf so the
+       digest never depends on platform-specific float representations.
+    3. Sort the canonicalized example strings lexicographically. Caller
+       ordering of the list MUST NOT affect the hash.
+    4. Join sorted examples with ``\\n``, utf-8 encode, sha256, return
+       hexdigest.
+
+    Args:
+        training_set: List of `TrainingExample` dicts. Empty list is
+            valid (returns the pinned empty-bytes sha256).
+
+    Returns:
+        64-char lowercase hex digest. Empty list returns
+        ``"e3b0c44...b7852b855"`` (sha256 of ``b""``).
+
+    Raises:
+        ValueError: An example violates the schema (extra/missing key,
+            ``inputs`` not a dict, or NaN/Inf in any nested float).
+            The message includes the offending example index.
+    """
+    canonical_examples: list[str] = []
+
+    for index, example in enumerate(training_set):
+        # Step 1a: example must be a dict (TypedDict is a dict at runtime,
+        # but the hint is structural — defend against accidental list
+        # passing through TypedDict's loose type-check.)
+        if not isinstance(example, dict):
+            raise ValueError(
+                f"_canonicalize_training_set: example at index {index} must "
+                f"be a dict, got {type(example).__name__}."
+            )
+
+        # Step 1b: closed schema. Reject extras AND missing.
+        keys = frozenset(example.keys())
+        if keys != _TRAINING_EXAMPLE_KEYS:
+            extras = keys - _TRAINING_EXAMPLE_KEYS
+            missing = _TRAINING_EXAMPLE_KEYS - keys
+            problems: list[str] = []
+            if missing:
+                # Sort for deterministic message — set iteration order
+                # leaks into pytest match patterns otherwise.
+                problems.append(f"missing keys {sorted(missing)!r}")
+            if extras:
+                problems.append(f"extra keys {sorted(extras)!r}")
+            raise ValueError(
+                f"_canonicalize_training_set: example at index {index} has "
+                f"{'; '.join(problems)}. Allowed keys: ['expected', 'inputs']."
+            )
+
+        # Step 1c: `inputs` must be a dict so adapters can splat it as
+        # **kwargs into the DSPy module's forward().
+        inputs = example["inputs"]
+        if not isinstance(inputs, dict):
+            raise ValueError(
+                f"_canonicalize_training_set: example at index {index} has "
+                f"'inputs' of type {type(inputs).__name__}; required: dict."
+            )
+
+        # Step 2: canonical-JSON encode. Same rules as Node.id.
+        # allow_nan=False rejects NaN/Inf inside `inputs` OR `expected`
+        # (json.dumps walks recursively). The ValueError from json.dumps
+        # is re-raised with the example index so callers can locate the
+        # offender quickly.
+        try:
+            encoded = json.dumps(
+                {"inputs": inputs, "expected": example["expected"]},
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except ValueError as exc:
+            # ValueError from json.dumps with allow_nan=False fires on
+            # NaN/Inf. Also catches non-JSON-serializable types via
+            # TypeError-elevated paths in some stdlib branches; we raise
+            # ValueError uniformly so callers have one exception class
+            # to match.
+            raise ValueError(
+                f"_canonicalize_training_set: example at index {index} could "
+                f"not be canonicalized ({exc}). NaN/Inf and non-JSON types "
+                f"are rejected — content-addressing requires reflexive equality."
+            ) from exc
+
+        canonical_examples.append(encoded)
+
+    # Step 3: sort canonicalized strings. Caller ordering must not affect
+    # the digest. We sort the post-encode strings (not the source dicts)
+    # so the comparison key is byte-level deterministic.
+    canonical_examples.sort()
+
+    # Step 4: join + sha256. Empty list collapses to b"" — empty join,
+    # empty encode, sha256("") = e3b0c44...
+    payload = "\n".join(canonical_examples).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()

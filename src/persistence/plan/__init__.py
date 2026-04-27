@@ -30,7 +30,14 @@ from persistence.plan._execute import (
     ExecutionResult,
     FailureInfo,
     LeafResult,
+    TrainingExample,
     execute,
+)
+from persistence.plan._metric_registry import (
+    MetricRef,
+    lookup_metric,
+    register_metric,
+    unregister_metric,
 )
 from persistence.plan._parse import parse, unparse
 
@@ -42,15 +49,20 @@ __all__ = [
     "Handler",
     "ID_HEX_WIDTH",
     "LeafResult",
+    "MetricRef",
     "Node",
     "ParseError",
     "PLAN_CANONICAL_VERSION",
+    "TrainingExample",
     "UnimplementedNodeKindError",
     "execute",
     "lookup_coercion",
+    "lookup_metric",
     "parse",
     "register_coercion",
+    "register_metric",
     "unparse",
     "unregister_coercion",
+    "unregister_metric",
     "walk",
 ]

@@ -269,14 +269,14 @@ A small CPU-only slice runs at submission time on the bundled artifact, verifyin
 
 \begin{table}[ht]
 \centering
-\small
-\begin{tabular}{lrrrr}
+\footnotesize
+\begin{tabular}{lrr}
 \toprule
-\textbf{Operation} & \textbf{$|D|$ (datoms)} & \textbf{Median (ms)} & \textbf{IQR (ms)} & \textbf{Witness test} \\
+\textbf{Operation} & \textbf{Median [IQR] (ms)} & \textbf{Witness test} \\
 \midrule
-\C{Runtime.is\_well\_formed} (linear, $|K|{=}15$) & 15 ops $\times$ 6-handler stack & 0.04 & [0.03, 0.05] & \C{tests/effect/test\_runtime.py} \\
-\C{store.allocate\_and\_append} (1k, 16-thread) & 1{,}000 datoms & 0.21 / tx & [0.18, 0.27] / tx & \C{tests/fact/test\_concurrent.py} \\
-\C{replay(T, I_{\text{noop}})} byte-identity (toy) & 8-step trajectory & 1.7 & [1.5, 2.0] & \C{tests/replay/test\_determinism.py} \\
+\C{Runtime.is\_well\_formed} (linear, $|K|{=}15$) & 0.04 [0.03, 0.05] & \C{test\_runtime.py} \\
+\C{store.allocate\_and\_append} (1k datoms, 16-thread) & 0.21 [0.18, 0.27] / tx & \C{test\_concurrent.py} \\
+\C{replay}$(T, I_{\text{noop}})$ byte-identity (8-step toy) & 1.7 [1.5, 2.0] & \C{test\_determinism.py} \\
 \bottomrule
 \end{tabular}
 \caption{Phase-1 microbench, CPU-only. Witnesses Propositions~\ref{prop:wellformed} and~\ref{prop:noop} on the shipped artifact; absolute latencies are not the headline (Phase-1 tests check correctness, not p95), but the table establishes that the substrate primitives are not pathological at Phase-1 corpus sizes.}

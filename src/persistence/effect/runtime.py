@@ -274,7 +274,27 @@ def _current() -> Runtime:
 
 
 def perform(op: str, **args: Any) -> Any:
-    """Perform an effect against the currently-active runtime."""
+    """Perform an effect against the currently-active runtime.
+
+    Inside a ``dosync`` body, raw ``perform()`` is forbidden —
+    use ``tx.effect(op, **kwargs)`` instead so the call is queued as
+    an intent and atomically replayed at commit time. Calling raw
+    ``perform()`` inside a dosync raises ``EffectInIoBlock``.
+    """
+    # Late import to avoid circular dependency:
+    # txn imports DB; DB does not import txn at module level.
+    # This guard check is the single point of cross-module coupling
+    # in the runtime path and is unconditionally cheap (one ContextVar
+    # read).
+    from persistence.txn.intents import is_in_dosync
+    from persistence.txn.errors import EffectInIoBlock
+
+    if is_in_dosync():
+        raise EffectInIoBlock(
+            f"raw effect.perform({op!r}, ...) called inside a dosync "
+            f"body. Use tx.effect({op!r}, **kwargs) so the call is "
+            f"queued as an intent and atomically replayed at commit."
+        )
     return _current().perform(op, args)
 
 

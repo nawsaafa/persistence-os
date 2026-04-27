@@ -3,6 +3,50 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.5.0a1 — 2026-04-27 (Module 5: Txn — atomic multi-datom commit)
+
+### Added
+- `persistence.txn` module: atomic multi-datom commit, snapshot-read
+  isolation, retry-safe effects via effects-as-intents pattern.
+- `db.ref(eid)` / `db.new_ref(initial=...)`: Ref dataclass (frozen,
+  slotted, eq/hash over (eid, db_id)).
+- `with db.dosync() as tx:` (context-manager) and `@db.dosync` (decorator,
+  canonical retryable form). Decorator supports `max_retries` and
+  `deadline` kwargs.
+- `tx.deref` / `tx.assoc` / `tx.alter` / `tx.effect` / `tx.now`.
+- Mandatory immutable values for refs (pyrsistent.PMap/PVector/PSet,
+  frozenset, tuple, primitives, frozen dataclass). `RefValueNotImmutable`
+  raised on mutable input.
+- `persistence.txn.freeze()` helper for dict→PMap, list→PVector
+  migration.
+- `EffectInIoBlock` raised when raw `effect.perform()` called inside a
+  dosync body — use `tx.effect(op, **kwargs)` instead.
+- 8 boundary specs registered under `:persistence.txn/*`.
+- `DB.transact_batch()`: equivalent to `transact()` for correctness,
+  folds N auto-retraction lookups into a single log pass.
+
+### Dependencies
+- `pyrsistent>=0.20` added to project dependencies.
+
+### Deferred to later releases
+- `tx.commute` (commutative writes) → v0.5.1
+- `tx.ensure` (read-set padding) → v0.5.1
+- Atoms (single-cell CAS) → v0.5.2
+- Agents (async ordered single-cell) → v0.5.3
+- Nested `dosync` semantics → v0.5.4
+
+### Design pins held
+- `PLAN_CANONICAL_VERSION` stays at 1.
+- Zero proposition impact (Prop 1–5 unchanged).
+- 832 + 7 xfailed v0.4.0a1 baseline preserved; +80 new tests
+  (912 + 7 xfailed total).
+- No-GIL forward-compatible (rev N): every mutation guarded by explicit
+  lock, `@pytest.mark.no_gil_safe` test in conflict suite.
+
+### Predecessor
+- `v0.4.0a1` at `bce93da` — substrate primitives (Dispatcher, Provenance,
+  fork, causal_history).
+
 ## [0.4.0a1] — 2026-04-25 — v0.4 substrate-primitives (Phases A + C + D)
 
 ### Added

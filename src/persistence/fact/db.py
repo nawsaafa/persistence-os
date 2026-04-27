@@ -280,6 +280,134 @@ class DB:
 
         return DB(self.store, clock=self._clock)
 
+    def transact_batch(
+        self,
+        facts: list[dict],
+        provenance: Optional[dict] = None,
+        *,
+        force_retroactive: bool = False,
+    ) -> "DB":
+        """Like ``transact`` but folds all auto-retraction lookups into
+        a single pass over the log.
+
+        Equivalent to ``transact`` for correctness — the same companion
+        retract datoms are emitted, the same RetroactiveCorrectionError
+        is raised under the same conditions. The performance difference
+        only matters for fact-counts in the tens or higher; for
+        single-fact transactions, ``transact`` is fine.
+
+        Used by ``persistence.txn`` to commit a dosync block's write_set
+        as one atomic transaction without paying O(N²) auto-retraction
+        cost. See design doc § 6, rev I.
+        """
+        if not facts:
+            return self
+
+        prov_base: dict = provenance or {}
+        tx = TX_PLACEHOLDER
+        now = self._clock()
+        new_datoms: list[Datom] = []
+        invalidations: list[int] = []
+
+        # Single snapshot of the log for all auto-retraction lookups.
+        current_log = list(self.store.all_datoms())
+
+        # Build an index over the snapshot keyed by (e, a) so each fact's
+        # prior-assert lookup is O(1) average instead of O(N).
+        # Walk newest-to-oldest so the first hit per (e, a) is the most
+        # recent open assert (matching _find_prior_assert semantics).
+        prior_index: dict[tuple[str, str], Datom] = {}
+        for d in reversed(current_log):
+            if d.op != "assert":
+                continue
+            if d.invalidated_by is not None:
+                continue
+            if d.valid_to is not None:
+                continue
+            key = (d.e, d.a)
+            if key not in prior_index:
+                prior_index[key] = d
+
+        # Index for new_datoms accumulated in THIS batch — order matters
+        # because later facts in the batch may auto-retract earlier ones.
+        in_batch_open: dict[tuple[str, str], Datom] = {}
+
+        for fact in facts:
+            op = fact.get("op", "assert")
+            vf = _coerce_dt(fact.get("valid_from", now))
+            vt = _coerce_dt(fact.get("valid_to")) if fact.get("valid_to") else None
+
+            if op == "assert":
+                key = (fact["e"], fact["a"])
+                # Prefer in-batch open over snapshot.
+                prior = in_batch_open.get(key) or prior_index.get(key)
+                if prior is not None:
+                    if vf < prior.valid_from:
+                        if not force_retroactive:
+                            raise RetroactiveCorrectionError(
+                                f"retroactive correction for ({fact['e']!r}, "
+                                f"{fact['a']!r}): new valid_from={vf.isoformat()} "
+                                f"is earlier than prior valid_from="
+                                f"{prior.valid_from.isoformat()}. "
+                                f"Pass force_retroactive=True to opt in."
+                            )
+                        retract_valid_to = prior.valid_from
+                        retract_valid_from = vf
+                    else:
+                        retract_valid_from = prior.valid_from
+                        retract_valid_to = vf
+
+                    companion = Datom(
+                        e=prior.e,
+                        a=prior.a,
+                        v=prior.v,
+                        tx=tx,
+                        tx_time=now,
+                        valid_from=retract_valid_from,
+                        valid_to=retract_valid_to,
+                        op="retract",
+                        provenance={**prior.provenance, "superseded_by_tx": tx},
+                        invalidated_by=None,
+                    )
+                    new_datoms.append(companion)
+                    invalidations.append(prior.tx)
+                    # Remove from in_batch_open since it's now closed.
+                    in_batch_open.pop(key, None)
+
+            prov = {
+                **prov_base,
+                "prompt_hash": _hash_fact(fact),
+            }
+            new_datoms.append(
+                Datom(
+                    e=fact["e"],
+                    a=fact["a"],
+                    v=fact["v"],
+                    tx=tx,
+                    tx_time=now,
+                    valid_from=vf,
+                    valid_to=vt,
+                    op=op,
+                    # Same rationale as transact() at db.py:250-260:
+                    # prov is structurally Provenance-compatible at runtime
+                    # but caller-supplied as a free-form dict.
+                    provenance=prov,  # type: ignore[arg-type]
+                )
+            )
+            if op == "assert" and vt is None:
+                in_batch_open[(fact["e"], fact["a"])] = new_datoms[-1]
+
+        stored = self.store.allocate_and_append(new_datoms)
+        if stored:
+            real_tx = stored[0].tx
+            assert all(d.tx == real_tx for d in stored), (
+                "allocate_and_append returned mixed tx ids"
+            )
+            for old_tx in invalidations:
+                self.store.mark_invalidated(old_tx, real_tx)
+
+        return DB(self.store, clock=self._clock)
+
     # ---- Reads -----------------------------------------------------------
     def log(self) -> Iterator[Datom]:
         """Yield every datom in insertion order. Debugging + replication."""
@@ -493,3 +621,14 @@ def _find_prior_assert(
 
 
 __all__ = ["CausalDAG", "DB", "DBView", "RetroactiveCorrectionError"]
+
+
+# ---------------------------------------------------------------------------
+# Txn module attaches db.ref / db.new_ref / db.dosync at import time.
+# This is a one-way coupling: txn imports DB; DB does NOT import txn at
+# the top of this file. The attach call lives at the bottom so DB is
+# fully constructed when it runs.
+# ---------------------------------------------------------------------------
+from persistence.txn._db_extension import _attach_txn_methods  # noqa: E402
+
+_attach_txn_methods(DB)

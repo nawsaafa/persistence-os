@@ -138,7 +138,9 @@ class InMemoryStore:
 
     def __init__(self) -> None:
         self._log: list[Datom] = []
-        self._lock = threading.Lock()
+        # RLock (reentrant): _run() holds it across conflict-check + db.transact();
+        # allocate_and_append re-acquires on the same thread — safe with RLock.
+        self._lock = threading.RLock()
 
     def append(self, datoms: Iterable[Datom]) -> None:
         with self._lock:
@@ -213,7 +215,10 @@ class SQLiteStore:
         # BEGIN IMMEDIATE actually starts a reserved-write transaction
         # (the default implicit mode would start a deferred one).
         self._conn.isolation_level = None
-        self._lock = threading.Lock()
+        # RLock matches InMemoryStore: _run() in persistence.txn holds this
+        # across the conflict-check + db.transact() sequence; the inner
+        # allocate_and_append re-acquires on the same thread.
+        self._lock = threading.RLock()
         self._apply_migrations()
 
     def _apply_migrations(self) -> None:

@@ -210,7 +210,8 @@ def _dosync(
     raise RuntimeError("unreachable: dosync invocation pattern not recognised")
 
 def _attach_txn_methods(db_cls: type) -> None:
-    """Attach the txn DB-level methods to ``db_cls``.
+    """Attach the txn DB-level methods (``ref``, ``new_ref``, ``dosync``)
+    to ``db_cls``.
 
     Re-entrant safe — repeated calls overwrite the attributes with the
     same module-level functions, so the result is unchanged. Test code
@@ -219,7 +220,6 @@ def _attach_txn_methods(db_cls: type) -> None:
     db_cls.ref = _ref            # type: ignore[attr-defined]
     db_cls.new_ref = _new_ref    # type: ignore[attr-defined]
     db_cls.dosync = _dosync      # type: ignore[attr-defined]
-    # dosync + dosync_decorator are attached in Phase B.
 
 
 __all__ = ["_attach_txn_methods"]

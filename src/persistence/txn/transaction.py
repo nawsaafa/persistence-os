@@ -146,6 +146,22 @@ DEFAULT_MAX_RETRIES = 256
 WRITE_ATTR = "value"  # default ``Ref.spec_attr`` (Datom strips leading ":" from `a`)
 
 
+def _raise_spec_error(result: Any) -> None:
+    """v0.5.1 W1 fix-pass — R2 MINOR 3: centralised SpecError raise.
+
+    ``SpecError`` lives in ``persistence.spec._registry`` and is not
+    re-exported through ``persistence.spec.__all__`` (latent v0.5.0a1
+    gap; tests that need it use the same submodule path, e.g.
+    ``tests/plan/test_parse.py``). Two near-identical raise blocks
+    inside this module — write-set spec validation and intent-log
+    spec validation — collapse into this helper. The
+    ``# type: ignore[arg-type]`` matches the canonical pattern at
+    ``persistence/spec/_registry.py:71``.
+    """
+    from persistence.spec._registry import SpecError
+    raise SpecError(result)  # type: ignore[arg-type]
+
+
 def _spec_validate_writes(write_set: dict) -> None:
     """Run spec.conform over each write before tx-id allocation.
 
@@ -166,11 +182,7 @@ def _spec_validate_writes(write_set: dict) -> None:
             continue
         result = _spec_conform(spec_key, value)
         if not result.is_ok:
-            # ``SpecError`` lives in ``_registry`` and is not re-exported
-            # through ``persistence.spec.__all__`` (see N1 commentary in
-            # ``_build_commit_provenance``). Use the submodule path.
-            from persistence.spec._registry import SpecError
-            raise SpecError(result)  # type: ignore[arg-type]
+            _raise_spec_error(result)
 
 
 def _build_write_facts(tx: "Transaction") -> list[dict]:
@@ -222,9 +234,12 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
       failure ``SpecError`` is raised here, before the commit datom
       is written. This is option (3) from the design doc — strict
       validation at commit time, not at ``tx.effect()`` call site.
-      The lock-held ``transact_batch`` call below never runs when
-      this raises, so no datoms or commit_id are burned and the
-      enclosing ``with db.store._lock`` block unwinds cleanly.
+      v0.5.1 W1 fix-pass (R2 MINOR 1): this conformance call now runs
+      OUTSIDE the ``store._lock`` window in ``_commit_attempt`` — it
+      has no DB-state dependency, so on ``SpecError`` we never acquire
+      the lock at all. The lock-held ``transact_batch`` call still
+      never runs when this raises, so no datoms or commit_id are
+      burned; the unwind is "no lock held".
     """
     intent_log_wire: list[dict] = [
         {":op": intent.op, ":kwargs": dict(intent.kwargs)}
@@ -237,14 +252,7 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
     # item against the seq_of-wrapping registered key separately).
     result = _spec_conform(":persistence.txn/intent-log", intent_log_wire)
     if not result.is_ok:
-        # ``SpecError`` lives in ``_registry`` and is not re-exported through
-        # ``persistence.spec.__all__`` (latent gap in v0.5.0a1, also affects
-        # ``_spec_validate_writes`` above — that path is dormant because it
-        # only fires when a write spec is registered AND mismatches; nothing
-        # exercises it in v0.5.0a1). The submodule path is what
-        # ``tests/plan/test_parse.py`` uses.
-        from persistence.spec._registry import SpecError
-        raise SpecError(result)  # type: ignore[arg-type]
+        _raise_spec_error(result)
 
     return {
         ":persistence.txn/commit-id": commit_id,
@@ -306,16 +314,21 @@ def _commit_attempt(tx: "Transaction") -> bool:
     # before any other thread's check runs.
     commit_id = str(_uuid.uuid4())  # noqa: wall-clock
     facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
+    # v0.5.1 W1 fix-pass — R2 MINOR 1: build the provenance dict OUTSIDE
+    # the store lock. ``_build_commit_provenance`` runs the
+    # ``:persistence.txn/intent-log`` spec conformance, which has zero
+    # DB-state dependency — it only walks the intent_log and conforms it
+    # against a pre-registered spec. On ``SpecError`` we want to fail
+    # without holding ``store._lock`` under contention; on success we
+    # narrow the lock window to the conflict-check + transact-batch core.
+    provenance = _build_commit_provenance(tx, commit_id)
     with tx.db.store._lock:
         touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
         if any_datoms_since(tx.db, tx.t_start, touched):
             return False
         # Apply atomically as one db.transact() — write_set + commit datom.
         # `facts` always contains at least the commit datom, so no guard.
-        tx.db.transact_batch(
-            facts,
-            provenance=_build_commit_provenance(tx, commit_id),
-        )
+        tx.db.transact_batch(facts, provenance=provenance)
     tx.commit_id = commit_id
     _replay_effect_intents(tx, commit_id)
     return True
@@ -375,6 +388,7 @@ __all__ = [
     "Transaction",
     "DEFAULT_MAX_RETRIES",
     "WRITE_ATTR",
+    "_raise_spec_error",
     "_spec_validate_writes",
     "_build_write_facts",
     "_build_commit_fact",

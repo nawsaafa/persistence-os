@@ -13,8 +13,13 @@ from persistence.fact.db import DB
 
 
 # Strategy: ascii-letters-and-digits eids, 1-12 chars, never empty.
+# v0.5.1 W1 fix-pass — R2 NIT 3: ``whitelist_categories=`` is the
+# pre-Hypothesis-6.x spelling (deprecated since 6.0); current spelling
+# is ``categories=``. The behavior is identical (positive list of
+# Unicode general-category codes); the rename silences the
+# DeprecationWarning that would otherwise fire on every property run.
 ref_eid_strategy = st.text(
-    alphabet=st.characters(whitelist_categories=["Ll", "Lu", "Nd"]),
+    alphabet=st.characters(categories=["Ll", "Lu", "Nd"]),
     min_size=1, max_size=12,
 )
 

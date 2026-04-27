@@ -42,6 +42,9 @@ Initial release. See top-level `CHANGELOG.md` for the v0.5.0a1 section.
 - Replay byte-identity test ships as a deterministic two-run structural
   comparison rather than a Hypothesis `@given` property at
   `max_examples=200`. Hypothesis upgrade deferred to v0.5.1.
+  - **v0.5.1 update:** Hypothesis property covers single-shot `assoc`
+    transactions; `tx.alter` / `tx.effect` byte-identity coverage
+    deferred to v0.5.2.
 
 ### References
 - Design doc: `docs/plans/2026-04-27-v0.5-txn-design.md`

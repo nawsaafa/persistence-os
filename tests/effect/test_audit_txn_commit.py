@@ -246,3 +246,67 @@ def test_legacy_args_underscore_txn_commit_still_lifted_to_field():
     # And ``args_hash`` is identical across both paths because the
     # sentinel is popped before hashing in either case.
     assert typed_entry.args_hash == legacy_entry.args_hash
+
+
+# ---------------------------------------------------------------------------
+# 7. v0.5.1 W1 fix-pass — MAJOR-1: audit-chain hash continuity for non-txn
+# ---------------------------------------------------------------------------
+
+
+def test_audit_chain_hash_continuity_for_non_txn_calls():
+    """v0.5.1 W1 fix-pass — MAJOR-1 (R1): a non-txn audit entry (no
+    ``txn_commit`` at all) must produce a content hash AND a wire datom
+    that are byte-identical to a v0.5.0a1-shape entry of the same op.
+
+    Before the fix, ``make_audit_handler`` unconditionally inserted
+    ``"txn_commit": None`` into the hashed content dict, breaking
+    v0.5.0a1→v0.5.1 chain continuity for every non-txn entry — the same
+    args produced a different ``entry.id`` between releases purely
+    because of an extra ``None`` slot in the canonicalised content.
+
+    Pin: an AuditEntry with ``txn_commit=None`` and another with no
+    ``txn_commit`` set explicitly produce
+    - the same ``entry.id`` (content-hash continuity), and
+    - the same ``audit_entry_to_datom(...)`` provenance dict (no
+      ``:effect/txn-commit`` key on either side).
+    """
+    base_kwargs = dict(
+        id="sha256:" + "a" * 64,  # valid sha256 wire shape for audit_entry_to_datom
+        prev_hash=None,
+        op=":llm/call",
+        args_hash="sha256:" + "b" * 64,
+        verdict="ok",
+        latency_ms=10,
+        recorded_at=1_700_000_000.0,
+    )
+    # Two ways to express "no txn": explicit None vs default-omitted.
+    e_explicit_none = AuditEntry(**{**base_kwargs, "txn_commit": None})
+    e_default_omitted = AuditEntry(**base_kwargs)
+    # Default field value is None for both shapes — first invariant.
+    assert e_explicit_none.txn_commit is None
+    assert e_default_omitted.txn_commit is None
+
+    # Compute the canonical content hash that ``make_audit_handler``
+    # would assign as ``entry.id``. Both ``to_dict()`` calls must skip
+    # the key (the fix in ``AuditEntry.to_dict``), so the resulting
+    # hashes are equal.
+    from persistence.effect.handlers.audit import _content_hash
+    d_explicit = e_explicit_none.to_dict()
+    d_default = e_default_omitted.to_dict()
+    d_explicit.pop("id")
+    d_default.pop("id")
+    # MAJOR-1 invariant 1: both paths omit the key in to_dict.
+    assert "txn_commit" not in d_explicit
+    assert "txn_commit" not in d_default
+    # MAJOR-1 invariant 2: same content shape → same content hash.
+    assert _content_hash(d_explicit) == _content_hash(d_default)
+
+    # MAJOR-1 invariant 3: the wire datom omits the provenance key on
+    # both sides (audit_entry_to_datom already conditional on this).
+    datom_explicit = audit_entry_to_datom(e_explicit_none)
+    datom_default = audit_entry_to_datom(e_default_omitted)
+    assert ":effect/txn-commit" not in datom_explicit[":datom/provenance"]
+    assert ":effect/txn-commit" not in datom_default[":datom/provenance"]
+    # And the full provenance dicts are equal — no key drift sneaks in
+    # via a None-placeholder elsewhere.
+    assert datom_explicit[":datom/provenance"] == datom_default[":datom/provenance"]

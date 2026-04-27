@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from persistence.txn.errors import RefValueNotImmutable
 from persistence.txn.intents import EffectIntent
@@ -84,7 +84,7 @@ class Transaction:
         # the entity's ``:value`` attribute holds the ref's value.
         view = self.db.as_of(self.t_start)
         entity_attrs = view.entity(ref.eid)
-        return entity_attrs.get(":value") if entity_attrs else None
+        return entity_attrs.get(WRITE_ATTR) if entity_attrs else None
 
     def alter(self, ref: Ref, fn: Callable, *args: Any) -> Any:
         """Read ``ref`` at snapshot, apply ``fn(snapshot_value, *args)``,
@@ -100,4 +100,157 @@ class Transaction:
         return new_value
 
 
-__all__ = ["Transaction"]
+
+import time
+import uuid as _uuid
+
+from persistence.spec import conform as _spec_conform
+from persistence.spec import registered_keys as _registered_keys
+from persistence.txn.conflict import any_datoms_since
+from persistence.txn.errors import (
+    NestedDosyncNotSupported,
+    TxnDeadlineExceeded,
+    TxnRetryExhausted,
+)
+from persistence.txn.intents import (
+    clear_dosync_guard,
+    is_in_dosync,
+    set_dosync_guard,
+)
+
+
+DEFAULT_MAX_RETRIES = 256
+WRITE_ATTR = "value"  # ref values stored under this attribute (Datom strips leading ":" from `a`)
+
+
+def _spec_validate_writes(write_set: dict) -> None:
+    """Run spec.conform over each write before tx-id allocation.
+
+    For v0.5.0a1, the only spec we apply is the per-ref :value spec
+    if registered. Calls without a registered spec pass through.
+    Raises ``persistence.spec.SpecError`` on failure (caller propagates;
+    no tx-id is burned).
+    """
+    keys = set(_registered_keys())
+    spec_key = WRITE_ATTR
+    if spec_key not in keys:
+        return
+    for _ref, value in write_set.items():
+        result = _spec_conform(spec_key, value)
+        if not result.is_ok:
+            from persistence.spec import SpecError
+            raise SpecError(result)
+
+
+def _build_write_facts(tx: "Transaction") -> list[dict]:
+    """Build the list-of-fact-dicts payload for db.transact()."""
+    now = tx.db._clock()
+    facts: list[dict] = []
+    for ref, value in tx.write_set.items():
+        facts.append({
+            "e": ref.eid,
+            "a": WRITE_ATTR,
+            "v": value,
+            "valid_from": now,
+        })
+    return facts
+
+
+def _build_commit_fact(tx: "Transaction", commit_id: str) -> dict:
+    """Build the per-commit datom (one extra fact per dosync)."""
+    now = tx.db._clock()
+    return {
+        "e": commit_id,
+        "a": ":persistence.txn/commit-id",
+        "v": commit_id,
+        "valid_from": now,
+    }
+
+
+def _run(
+    db: Any,
+    body: Callable[["Transaction"], Any],
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    deadline: Optional[float] = None,
+) -> str:
+    """The retry loop that backs both ``with db.dosync()`` and
+    ``@db.dosync``. Returns the commit_id on success.
+    """
+    if is_in_dosync():
+        raise NestedDosyncNotSupported(
+            "nested dosync is not supported in v0.5.0a1; restructure "
+            "the calling code to do all transactional work in one "
+            "outermost block (deferred to v0.5.4)."
+        )
+
+    deadline_at = time.monotonic() + deadline if deadline else None  # noqa: wall-clock
+    attempt = 0
+    while True:
+        if deadline_at is not None and time.monotonic() >= deadline_at:  # noqa: wall-clock
+            raise TxnDeadlineExceeded(
+                f"dosync deadline of {deadline}s elapsed after {attempt} attempts"
+            )
+        if attempt > max_retries:
+            raise TxnRetryExhausted(
+                f"dosync exceeded max_retries={max_retries}"
+            )
+
+        t_start = db._clock()
+        tx = Transaction(db=db, t_start=t_start, attempt=attempt)
+        token = set_dosync_guard()
+        try:
+            try:
+                body(tx)
+            finally:
+                clear_dosync_guard(token)
+        except (TxnDeadlineExceeded, TxnRetryExhausted, NestedDosyncNotSupported):
+            raise
+        except Exception:
+            # Body raised — propagate immediately, no commit, no retry.
+            raise
+
+        # Commit gate 1: spec validation BEFORE allocating tx-id.
+        _spec_validate_writes(tx.write_set)
+
+        # Commit gate 2: MVCC conflict check.
+        touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
+        if any_datoms_since(db, t_start, touched):
+            attempt += 1
+            continue
+
+        # Apply atomically as one db.transact() — write_set + commit datom.
+        commit_id = str(_uuid.uuid4())  # noqa: wall-clock
+        facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
+        if facts:
+            db.transact(
+                facts,
+                provenance={
+                    ":persistence.txn/commit-id": commit_id,
+                    ":persistence.txn/started-at": t_start.isoformat(),
+                    ":persistence.txn/committed-at": db._clock().isoformat(),
+                    ":persistence.txn/retry-count": attempt,
+                    ":persistence.txn/non-deterministic-retry": deadline is not None,
+                },
+            )
+        tx.commit_id = commit_id
+
+        # Replay effect intents through the real handler stack.
+        # Only meaningful if there's an active runtime; if not, intents
+        # silently no-op (caller responsibility to set up runtime).
+        from persistence.effect.runtime import _active as _effect_active
+        rt = _effect_active.get()
+        if rt is not None:
+            for intent in tx.effect_intent_log:
+                rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
+
+        return commit_id
+
+__all__ = [
+    "Transaction",
+    "DEFAULT_MAX_RETRIES",
+    "WRITE_ATTR",
+    "_spec_validate_writes",
+    "_build_write_facts",
+    "_build_commit_fact",
+    "_run",
+]

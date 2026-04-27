@@ -13,6 +13,8 @@ import uuid
 from persistence.spec import (
     bool_,
     inst,
+    keys,
+    map_of,
     register,
     seq_of,
     str_,
@@ -78,8 +80,77 @@ class _NonNegativeIntSpec(Spec):
         return 0
 
 
+class _EdnValueSpec(Spec):
+    """Recursive EDN-conformant value: scalars + lists/tuples + str-keyed dicts.
+
+    Used by ``:persistence.txn/intent-log`` to validate the kwargs of each
+    queued effect intent at commit time. Rejects ``datetime``, dataclasses,
+    custom classes — values that would not survive a wire round-trip onto
+    the commit datom's provenance.
+
+    The intentional rejection of ``datetime`` here pins the contract: callers
+    that want to record a timestamp on an intent must call ``.isoformat()``
+    explicitly before passing the value into ``tx.effect()``.
+    """
+
+    spec_name: str = ":persistence.txn/edn-value"
+
+    def _conform(self, value):
+        # Scalars: bool comes before int (bool is an int subclass) but we
+        # accept both branches anyway. ``None`` is a valid EDN nil.
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return Conformed(value=value, spec_key=self.spec_name)
+        if isinstance(value, (list, tuple)):
+            for i, item in enumerate(value):
+                r = self._conform(item)
+                if not r.is_ok:
+                    return ConformError(
+                        spec_key=self.spec_name,
+                        value=value,
+                        reason=f"non-EDN element at index {i}: {type(item).__name__}",
+                        hint="EDN values are scalars (int/float/str/bool/None) "
+                        "or recursive lists/dicts",
+                    )
+            return Conformed(value=list(value), spec_key=self.spec_name)
+        if isinstance(value, dict):
+            for k, v in value.items():
+                if not isinstance(k, str):
+                    return ConformError(
+                        spec_key=self.spec_name,
+                        value=value,
+                        reason=f"non-string dict key: {type(k).__name__}",
+                        hint="EDN map keys must be strings",
+                    )
+                r = self._conform(v)
+                if not r.is_ok:
+                    return ConformError(
+                        spec_key=self.spec_name,
+                        value=value,
+                        reason=f"non-EDN value at key {k!r}: {type(v).__name__}",
+                        hint="EDN values are scalars or recursive lists/dicts",
+                    )
+            return Conformed(value=dict(value), spec_key=self.spec_name)
+        return ConformError(
+            spec_key=self.spec_name,
+            value=value,
+            reason=f"non-EDN value: {type(value).__name__}",
+            hint="EDN values are scalars (int/float/str/bool/None) or "
+            "lists/tuples/str-keyed dicts",
+        )
+
+    def _generate(self):
+        return None  # trivial example
+
+
 _uuid_str_spec = _UuidStringSpec()
 _non_negative_int_spec = _NonNegativeIntSpec()
+_edn_value_spec = _EdnValueSpec()
+_intent_element_spec = keys(
+    required={
+        ":op": str_(),
+        ":kwargs": map_of(str_(), _edn_value_spec),
+    },
+)
 
 
 def register_txn_specs() -> None:
@@ -94,7 +165,10 @@ def register_txn_specs() -> None:
     register(":persistence.txn/retry-count", _non_negative_int_spec)
     register(":persistence.txn/read-set", seq_of(str_()))
     register(":persistence.txn/non-deterministic-retry", bool_())
-    register(":persistence.txn/intent-log", seq_of(_uuid_str_spec))
+    # v0.5.1: per-element fixed-key map shape replaces the v0.5.0a1 placeholder
+    # ``seq_of(_uuid_str_spec)``, which was registered before the intent-log
+    # was ever emitted on a commit datom.
+    register(":persistence.txn/intent-log", seq_of(_intent_element_spec))
     register(":persistence.txn/commit", _uuid_str_spec)
 
 

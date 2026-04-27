@@ -81,7 +81,20 @@ class Transaction:
         self.write_set[ref] = value
 
     def effect(self, op: str, **kwargs: Any) -> None:
-        """Queue an effect intent to be replayed atomically at commit."""
+        """Queue an effect intent to be replayed atomically at commit.
+
+        Validation note: the kwargs are NOT validated at this call site.
+        Validation against ``:persistence.txn/intent-log`` happens at commit
+        time when the intent is serialised onto the commit datom's
+        provenance. A ``tx.effect()`` call that succeeds may still cause
+        the enclosing dosync to raise ``SpecError`` at commit if the kwargs
+        aren't EDN-conformant (e.g., raw ``datetime`` objects, custom
+        classes). Callers expecting eager validation must conform their
+        kwargs themselves before calling ``tx.effect()``.
+
+        See ``persistence.txn._specs._EdnValueSpec`` for the per-value rule
+        (scalars + lists/tuples + str-keyed dicts; rejects datetime).
+        """
         self.effect_intent_log.append(EffectIntent(op=op, kwargs=dict(kwargs)))
 
     def deref(self, ref: Ref) -> Any:
@@ -176,11 +189,46 @@ def _build_commit_fact(tx: "Transaction", commit_id: str) -> dict:
 def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
     """Build the dict passed as ``transact_batch(provenance=...)``.
 
-    Future home of the N1 read-set / intent-log keys (rev O narrowing).
     Reads the optional private ``tx._deadline_set`` flag set by ``_run``
     once before the retry loop (defaults to ``False`` — the CM path
     never sets it).
+
+    v0.5.1 (rev O / N1) emits two additional keys:
+
+    - ``:persistence.txn/read-set`` — sorted list of eids the body
+      read via ``tx.deref`` (or implicitly via ``tx.alter``). Empty
+      list when the body wrote without reading.
+    - ``:persistence.txn/intent-log`` — list of
+      ``{":op": str, ":kwargs": dict}`` items in queue order, one per
+      ``tx.effect()`` call. Each item is conformed against the
+      registered ``:persistence.txn/intent-log`` element spec; on
+      failure ``SpecError`` is raised here, before the commit datom
+      is written. This is option (3) from the design doc — strict
+      validation at commit time, not at ``tx.effect()`` call site.
+      The lock-held ``transact_batch`` call below never runs when
+      this raises, so no datoms or commit_id are burned and the
+      enclosing ``with db.store._lock`` block unwinds cleanly.
     """
+    intent_log_wire: list[dict] = [
+        {":op": intent.op, ":kwargs": dict(intent.kwargs)}
+        for intent in tx.effect_intent_log
+    ]
+    # Conform the whole list once: ``seq_of`` propagates per-index
+    # paths in ``ConformError.sub_errors``, so a non-EDN kwarg at the
+    # third intent reports as ``[2][":kwargs"][...]`` rather than
+    # collapsing to index 0 (which would happen if we conformed each
+    # item against the seq_of-wrapping registered key separately).
+    result = _spec_conform(":persistence.txn/intent-log", intent_log_wire)
+    if not result.is_ok:
+        # ``SpecError`` lives in ``_registry`` and is not re-exported through
+        # ``persistence.spec.__all__`` (latent gap in v0.5.0a1, also affects
+        # ``_spec_validate_writes`` above — that path is dormant because it
+        # only fires when a write spec is registered AND mismatches; nothing
+        # exercises it in v0.5.0a1). The submodule path is what
+        # ``tests/plan/test_parse.py`` uses.
+        from persistence.spec._registry import SpecError
+        raise SpecError(result)
+
     return {
         ":persistence.txn/commit-id": commit_id,
         ":persistence.txn/started-at": tx.t_start.isoformat(),
@@ -189,6 +237,8 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
         ":persistence.txn/non-deterministic-retry": getattr(
             tx, "_deadline_set", False
         ),
+        ":persistence.txn/read-set": sorted(r.eid for r in tx.read_set),
+        ":persistence.txn/intent-log": intent_log_wire,
     }
 
 

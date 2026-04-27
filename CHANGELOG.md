@@ -3,6 +3,86 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.5.1 — 2026-04-27 (Module 5: Txn — rev O narrowings closure)
+
+Closes the 5 carry-forwards from v0.5.0a1 `CHANGELOG-txn.md` § rev O
+in a single tight release. Zero proposition impact. Tag drops the
+`-aN` suffix (this is a patch release that closes named TODOs, not
+a new module — first non-alpha tag in the persistence-os repo).
+
+### Added
+- `:persistence.txn/read-set` (sorted eid list) and
+  `:persistence.txn/intent-log` (queue-ordered `[{:op, :kwargs}]` list)
+  emitted on every commit datom's provenance. Direct read; no longer
+  reconstructable-only.
+- `_EdnValueSpec` (recursive: scalars + lists/tuples + str-keyed dicts)
+  registered under `:persistence.txn/edn-value`. Replaces the v0.5.0a1
+  placeholder `seq_of(_uuid_str_spec)` registration on
+  `:persistence.txn/intent-log` with the real per-element map shape
+  `keys({":op": str_, ":kwargs": map_of(str_, edn-value)})`. Strict
+  conformance at commit time (option (3) — see design doc § N1).
+- `AuditEntry.txn_commit: str | None = None` first-class field.
+  `audit_entry_to_datom` emits `:effect/txn-commit` on provenance only
+  when set (symmetric with `:episode`); `datom_to_audit_entry` decodes
+  it back. Closes a latent v0.5.0a1 corruption where the
+  `_txn_commit` sentinel polluted every audited replay's `args_hash`.
+- `Runtime.perform(op, args, *, txn_commit=None)` — typed kwarg path
+  for txn-replayed intents; legacy `args["_txn_commit"]` direct path
+  still works (audit handler pops the sentinel before hashing).
+- `Ref.spec_attr: str = "value"` field (excluded from eq/hash via
+  `field(compare=False)`). Allows per-ref attribute specs:
+  `db.ref("acct", spec_attr="account/balance")`. Default `"value"`
+  preserves v0.5.0a1 behavior bit-for-bit.
+- Hypothesis `@given` byte-identity property at `max_examples=200`
+  in `test_replay_byte_identity_property.py`. Single-shot `assoc`
+  transactions covered; `tx.alter` / `tx.effect` byte-identity
+  coverage deferred to v0.5.2.
+
+### Changed
+- Helper extraction: `_commit_attempt(tx) -> bool` in
+  `transaction.py` is now the single point where spec-validate /
+  facts-build / lock+conflict-check / transact happens. Both
+  `with db.dosync()` (CM) and `@db.dosync` (decorator) paths route
+  through it. `_build_commit_provenance` and
+  `_replay_effect_intents` extracted as siblings.
+- `_build_commit_provenance` now runs OUTSIDE the
+  `with db.store._lock:` block — conformance has no DB-state
+  dependency, so commit-time SpecError no longer holds the lock
+  under contention.
+- `_raise_spec_error(result)` helper centralizes the
+  `from persistence.spec._registry import SpecError; raise
+  SpecError(result)` pattern (latent v0.5.0a1 export gap;
+  `# type: ignore[arg-type]` documented).
+
+### Fixed
+- **Audit-chain hash continuity for v0.5.0a1 → v0.5.1.** The
+  AuditEntry `content` dict that feeds `prev_hash` linkage now
+  inserts `txn_commit` only when not None (mirrors the wire-form
+  `:effect/txn-commit` emit-only-when-set semantics). v0.5.0a1
+  audit chains continue to verify byte-equal in v0.5.1 for
+  non-txn-replayed entries.
+- **Latent `args_hash` corruption from v0.5.0a1.** Audit handler
+  now `args.pop("_txn_commit", None)` BEFORE
+  `canonical_hash(args)`, so two replays of the same intent across
+  different commits produce identical `args_hash`. Pinned by
+  `test_args_hash_excludes_txn_commit`.
+
+### Design pins held
+- `PLAN_CANONICAL_VERSION` stays at 1 (zero canonical-form change).
+- Zero proposition impact (Prop 1–5 unchanged).
+- 912 + 7 xfailed v0.5.0a1 baseline preserved; +19 new tests
+  (931 + 7 xfailed total).
+
+### ARIS gate
+- R1 design fitness: 8.06 → re-pass after W1 fix-pass
+- R2 code quality: PASS at 9.19 / 8.5
+- R3 + R4 skipped — same warrant as v0.4.0a1 (no proposition /
+  paper claim change).
+
+### Predecessor
+- `v0.5.0a1` at `9377b86` — Module 5 Txn shipped; rev O narrowings
+  documented but deferred to keep the tag inside the paper window.
+
 ## v0.5.0a1 — 2026-04-27 (Module 5: Txn — atomic multi-datom commit)
 
 ### Added

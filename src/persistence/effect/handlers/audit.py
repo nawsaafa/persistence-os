@@ -60,6 +60,13 @@ class AuditEntry:
     principal: dict[str, Any] = field(default_factory=dict)
     run_id: str | None = None
     parent: str | None = None
+    txn_commit: str | None = None
+    """UUID of the dosync commit that produced this entry, when the
+    audited intent was replayed via ``persistence.txn`` at commit time.
+    ``None`` for direct (non-txn) ``perform`` calls. v0.5.1 N2 promoted
+    this from an ``args`` sentinel (``_txn_commit``) to a first-class
+    field — see :func:`audit_entry_to_datom` for the wire shape.
+    """
 
     def __post_init__(self) -> None:
         """Format invariants on :attr:`op` (ARIS Round 3 P-op-invariants).
@@ -165,7 +172,18 @@ class AuditEntry:
     # ---- helpers ----
 
     def to_dict(self) -> dict[str, Any]:
-        return dataclasses.asdict(self)
+        d = dataclasses.asdict(self)
+        # v0.5.1 W1 fix-pass — MAJOR-1: omit ``txn_commit`` when None so
+        # ``to_dict()`` matches the helper-side ``_canonicalise_content``
+        # output exactly (helper inserts the key only when set; this side
+        # must match for ``verify_chain`` to recompute identical hashes).
+        # Required for v0.5.0a1→v0.5.1 audit-chain hash continuity on
+        # non-txn entries. Symmetric with the wire-form
+        # ``:effect/txn-commit`` emit-only-when-set rule in
+        # ``audit_entry_to_datom``.
+        if d.get("txn_commit") is None:
+            d.pop("txn_commit", None)
+        return d
 
     def with_fields(self, **changes: Any) -> AuditEntry:
         return dataclasses.replace(self, **changes)
@@ -387,6 +405,18 @@ def make_audit_handler(
     audit_name = "audit"
 
     def clause(args: dict[str, Any], k, ctx) -> Any:
+        # v0.5.1 N2: strip the ``_txn_commit`` sentinel before hashing so
+        # ``args_hash`` is a stable function of the call's *arguments* —
+        # not of which dosync commit happened to drive the call. The
+        # sentinel was being passed as ``args["_txn_commit"]`` by
+        # ``Runtime.perform`` whenever a transaction's intent log replayed
+        # at commit time; in v0.5.0a1 that key reached
+        # ``canonical_hash(args)`` and corrupted every audited replay's
+        # args_hash with the commit_id. We pop it (mutating ``args`` in
+        # place is intentional — it propagates to ``k(args)`` so handlers
+        # below us also see clean args) and lift it onto the AuditEntry's
+        # typed ``txn_commit`` field.
+        txn_commit = args.pop("_txn_commit", None)
         # --- pre-call metadata
         args_hash = canonical_hash(args)
         # Masked so clock/now doesn't re-enter the audit handler (which might
@@ -429,6 +459,23 @@ def make_audit_handler(
                 "run_id": ctx.get("run_id"),
                 "parent": prev_hash,
             }
+            # v0.5.1 W1 fix-pass — MAJOR-1 (R1): only insert ``txn_commit``
+            # into the hashed content when set, mirroring the wire-form
+            # ``:effect/txn-commit`` emit-only-when-set rule (lines below).
+            # Unconditional insertion of ``"txn_commit": None`` would have
+            # broken v0.5.0a1→v0.5.1 audit-chain hash continuity for every
+            # non-txn AuditEntry: the same call args produced a different
+            # ``entry.id`` between releases purely because of an extra
+            # ``None`` slot in the canonicalised content dict. Symmetric
+            # with ``:episode``/``:effect/txn-commit`` over in
+            # ``audit_entry_to_datom``. The drift-pin fixtures in
+            # ``tests/effect/test_audit_canonicalize_drift_pin.py`` are
+            # adjusted to omit ``txn_commit`` from ``_base_content`` so
+            # the helper-vs-dataclass equality holds on the post-fix
+            # shape (the dataclass side mirrors via ``to_dict()``'s own
+            # conditional, see ``AuditEntry.to_dict``).
+            if txn_commit is not None:
+                content["txn_commit"] = txn_commit
             # ARIS Round 5 W-polish3 W6-factory-canonicalize (closes R5
             # N1 MAJOR). W-polish2's ``__post_init__`` canonicalises
             # ``policy_id`` / ``handler_chain`` / ``principal`` on the
@@ -635,6 +682,10 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
     }
     if entry.run_id is not None:
         provenance[":episode"] = entry.run_id
+    if entry.txn_commit is not None:
+        # v0.5.1 N2: symmetric with ``:episode``. Emit only when set so
+        # entries from non-txn ``perform`` calls keep a tight wire shape.
+        provenance[":effect/txn-commit"] = entry.txn_commit
     value = {
         "verdict": _verdict_as_edn(entry.verdict),
         "args_hash": entry.args_hash,
@@ -699,6 +750,7 @@ def datom_to_audit_entry(datom: dict[str, Any]) -> AuditEntry:
         principal=_keyword_map_to_principal(provenance.get(":principal", {})),
         run_id=provenance.get(":episode"),
         parent=provenance.get(":prev-hash"),
+        txn_commit=provenance.get(":effect/txn-commit"),
     )
 
 

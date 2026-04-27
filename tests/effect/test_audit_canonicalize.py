@@ -204,6 +204,11 @@ class TestFromEdnRoundTripPreservesVerifyChain:
             principal={":agent": "dfi"},
             run_id=str(uuid.uuid4()),
             parent=None,
+            # v0.5.1 W1 fix-pass — MAJOR-1: ``txn_commit`` omitted on
+            # purpose. The factory inserts the key only when set, and
+            # ``to_dict()`` strips the key when None, so both sides skip
+            # it on this non-txn-replay shape. Pinning a None placeholder
+            # here would diverge from production input.
         )
         # ARIS Round 6 R6-G3: use the shared ``_canonicalise_content``
         # helper instead of duplicating the canonicalisation rule

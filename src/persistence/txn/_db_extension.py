@@ -36,15 +36,26 @@ def _get_db_id(db: Any) -> str:
     return db_id
 
 
-def _ref(self: Any, eid: str) -> Ref:
-    """DB.ref(eid) — handle to existing/future entity by id."""
+def _ref(self: Any, eid: str, *, spec_attr: str = "value") -> Ref:
+    """DB.ref(eid, *, spec_attr="value") — handle to existing/future entity by id.
+
+    ``spec_attr`` (v0.5.1, keyword-only) names which write-spec the ref's
+    writes are validated against AND which entity-attribute name the
+    value lives under. Default ``"value"`` preserves v0.5.0a1 behavior
+    bit-for-bit. See ``Ref`` docstring for the eq/hash invariant.
+    """
     if not isinstance(eid, str):
         raise TypeError(f"eid must be str, got {type(eid).__name__}")
-    return Ref(eid=eid, db_id=_get_db_id(self))
+    return Ref(eid=eid, db_id=_get_db_id(self), spec_attr=spec_attr)
 
 
-def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
-    """DB.new_ref(initial=...) — allocate a fresh UUID4 entity-id.
+def _new_ref(
+    self: Any,
+    initial: Optional[Any] = None,
+    *,
+    spec_attr: str = "value",
+) -> Ref:
+    """DB.new_ref(initial=..., *, spec_attr="value") — allocate a fresh UUID4 entity-id.
 
     The ``initial`` parameter is validated as immutable and then
     DISCARDED in v0.5.0a1 — the Ref returned does NOT carry the
@@ -57,6 +68,8 @@ def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
 
     Accepted ``initial`` types (when provided): pyrsistent.PMap /
     PVector / PSet, frozen built-in, or frozen dataclass instance.
+
+    ``spec_attr`` (v0.5.1, keyword-only) — see ``DB.ref`` for semantics.
     """
     if initial is not None and not is_immutable_value(initial):
         raise RefValueNotImmutable(
@@ -65,7 +78,7 @@ def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
             f"or wrap in pyrsistent.pmap/pvector/pset."
         )
     eid = str(uuid.uuid4())  # uuid4; uuid7 not in stdlib until 3.13+  # noqa: wall-clock
-    return Ref(eid=eid, db_id=_get_db_id(self))
+    return Ref(eid=eid, db_id=_get_db_id(self), spec_attr=spec_attr)
 
 
 
@@ -113,18 +126,9 @@ def _build_dosync_cm(db: Any) -> Any:
     """Build the contextmanager object for the CM form of dosync."""
     @contextlib.contextmanager
     def cm() -> Any:
-        from persistence.txn.transaction import Transaction
+        from persistence.txn.transaction import Transaction, _commit_attempt
         from persistence.txn.intents import set_dosync_guard, clear_dosync_guard, is_in_dosync
-        from persistence.txn.errors import NestedDosyncNotSupported
-
-        from persistence.txn.transaction import (
-            _build_commit_fact,
-            _build_write_facts,
-            _spec_validate_writes,
-        )
-        from persistence.txn.conflict import any_datoms_since
-        from persistence.txn.errors import TxnRetryExhausted
-        import uuid as _uuid
+        from persistence.txn.errors import NestedDosyncNotSupported, TxnRetryExhausted
 
         if is_in_dosync():
             raise NestedDosyncNotSupported(
@@ -138,34 +142,14 @@ def _build_dosync_cm(db: Any) -> Any:
         finally:
             clear_dosync_guard(token)
         # Commit path (only reached on clean exit; exceptions from
-        # the with-block body skip this).
-        _spec_validate_writes(tx.write_set)
-        commit_id = str(_uuid.uuid4())  # noqa: wall-clock
-        facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
-        with db.store._lock:
-            touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
-            if any_datoms_since(db, t_start, touched):
-                raise TxnRetryExhausted(
-                    "dosync context-manager detected conflict on commit; "
-                    "use the @db.dosync decorator form for retry-on-conflict"
-                )
-            # `facts` always contains at least the commit datom, so no guard.
-            db.transact_batch(
-                facts,
-                provenance={
-                    ":persistence.txn/commit-id": commit_id,
-                    ":persistence.txn/started-at": t_start.isoformat(),
-                    ":persistence.txn/committed-at": db._clock().isoformat(),
-                    ":persistence.txn/retry-count": 0,
-                    ":persistence.txn/non-deterministic-retry": False,
-                },
+        # the with-block body skip this). The CM form is single-shot:
+        # a False return from _commit_attempt is escalated to
+        # TxnRetryExhausted instead of looping.
+        if not _commit_attempt(tx):
+            raise TxnRetryExhausted(
+                "dosync context-manager detected conflict on commit; "
+                "use the @db.dosync decorator form for retry-on-conflict"
             )
-        tx.commit_id = commit_id
-        from persistence.effect.runtime import _active as _effect_active
-        rt = _effect_active.get()
-        if rt is not None:
-            for intent in tx.effect_intent_log:
-                rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
 
     return cm()
 
@@ -226,7 +210,8 @@ def _dosync(
     raise RuntimeError("unreachable: dosync invocation pattern not recognised")
 
 def _attach_txn_methods(db_cls: type) -> None:
-    """Attach the txn DB-level methods to ``db_cls``.
+    """Attach the txn DB-level methods (``ref``, ``new_ref``, ``dosync``)
+    to ``db_cls``.
 
     Re-entrant safe — repeated calls overwrite the attributes with the
     same module-level functions, so the result is unchanged. Test code
@@ -235,7 +220,6 @@ def _attach_txn_methods(db_cls: type) -> None:
     db_cls.ref = _ref            # type: ignore[attr-defined]
     db_cls.new_ref = _new_ref    # type: ignore[attr-defined]
     db_cls.dosync = _dosync      # type: ignore[attr-defined]
-    # dosync + dosync_decorator are attached in Phase B.
 
 
 __all__ = ["_attach_txn_methods"]

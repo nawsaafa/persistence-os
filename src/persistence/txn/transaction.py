@@ -81,7 +81,20 @@ class Transaction:
         self.write_set[ref] = value
 
     def effect(self, op: str, **kwargs: Any) -> None:
-        """Queue an effect intent to be replayed atomically at commit."""
+        """Queue an effect intent to be replayed atomically at commit.
+
+        Validation note: the kwargs are NOT validated at this call site.
+        Validation against ``:persistence.txn/intent-log`` happens at commit
+        time when the intent is serialised onto the commit datom's
+        provenance. A ``tx.effect()`` call that succeeds may still cause
+        the enclosing dosync to raise ``SpecError`` at commit if the kwargs
+        aren't EDN-conformant (e.g., raw ``datetime`` objects, custom
+        classes). Callers expecting eager validation must conform their
+        kwargs themselves before calling ``tx.effect()``.
+
+        See ``persistence.txn._specs._EdnValueSpec`` for the per-value rule
+        (scalars + lists/tuples + str-keyed dicts; rejects datetime).
+        """
         self.effect_intent_log.append(EffectIntent(op=op, kwargs=dict(kwargs)))
 
     def deref(self, ref: Ref) -> Any:
@@ -104,11 +117,15 @@ class Transaction:
         self.read_set.add(ref)
         if ref in self.write_set:
             return self.write_set[ref]
-        # Snapshot read at t_start. The convention for ref-as-value:
-        # the entity's ``:value`` attribute holds the ref's value.
+        # Snapshot read at t_start. The ref's value lives under the
+        # ``ref.spec_attr`` attribute name (default ``"value"`` preserves
+        # v0.5.0a1 behavior bit-for-bit). Two refs sharing an eid but
+        # carrying different ``spec_attr`` resolve to different attribute
+        # values on the same entity — this is the per-ref-attribute
+        # contract introduced in v0.5.1 (rev O / N3).
         view = self.db.as_of(self.t_start)
         entity_attrs = view.entity(ref.eid)
-        return entity_attrs.get(WRITE_ATTR) if entity_attrs else None
+        return entity_attrs.get(ref.spec_attr) if entity_attrs else None
 
     def alter(self, ref: Ref, fn: Callable, *args: Any) -> Any:
         """Read ``ref`` at snapshot, apply ``fn(snapshot_value, *args)``,
@@ -126,36 +143,61 @@ class Transaction:
 
 
 DEFAULT_MAX_RETRIES = 256
-WRITE_ATTR = "value"  # ref values stored under this attribute (Datom strips leading ":" from `a`)
+WRITE_ATTR = "value"  # default ``Ref.spec_attr`` (Datom strips leading ":" from `a`)
+
+
+def _raise_spec_error(result: Any) -> None:
+    """v0.5.1 W1 fix-pass — R2 MINOR 3: centralised SpecError raise.
+
+    ``SpecError`` lives in ``persistence.spec._registry`` and is not
+    re-exported through ``persistence.spec.__all__`` (latent v0.5.0a1
+    gap; tests that need it use the same submodule path, e.g.
+    ``tests/plan/test_parse.py``). Two near-identical raise blocks
+    inside this module — write-set spec validation and intent-log
+    spec validation — collapse into this helper. The
+    ``# type: ignore[arg-type]`` matches the canonical pattern at
+    ``persistence/spec/_registry.py:71``.
+    """
+    from persistence.spec._registry import SpecError
+    raise SpecError(result)  # type: ignore[arg-type]
 
 
 def _spec_validate_writes(write_set: dict) -> None:
     """Run spec.conform over each write before tx-id allocation.
 
-    For v0.5.0a1, the only spec we apply is the per-ref :value spec
-    if registered. Calls without a registered spec pass through.
+    v0.5.1 (rev O / N3): each ref carries its own ``spec_attr`` (default
+    ``"value"``); we look up that key in the registry and conform the
+    write against it. Refs with no spec registered for their attr pass
+    through untouched. This generalises the v0.5.0a1 single-global-spec
+    behavior — the default ``spec_attr="value"`` makes unannotated
+    callers identical to before.
+
     Raises ``persistence.spec.SpecError`` on failure (caller propagates;
     no tx-id is burned).
     """
     keys = set(_registered_keys())
-    spec_key = WRITE_ATTR
-    if spec_key not in keys:
-        return
-    for _ref, value in write_set.items():
+    for ref, value in write_set.items():
+        spec_key = ref.spec_attr
+        if spec_key not in keys:
+            continue
         result = _spec_conform(spec_key, value)
         if not result.is_ok:
-            from persistence.spec import SpecError
-            raise SpecError(result)
+            _raise_spec_error(result)
 
 
 def _build_write_facts(tx: "Transaction") -> list[dict]:
-    """Build the list-of-fact-dicts payload for db.transact()."""
+    """Build the list-of-fact-dicts payload for db.transact().
+
+    v0.5.1 (rev O / N3): each fact's ``a`` is ``ref.spec_attr`` (default
+    ``"value"``), so per-ref attribute names land on the Datom store
+    directly. Datom strips a leading ``":"`` if present.
+    """
     now = tx.db._clock()
     facts: list[dict] = []
     for ref, value in tx.write_set.items():
         facts.append({
             "e": ref.eid,
-            "a": WRITE_ATTR,
+            "a": ref.spec_attr,
             "v": value,
             "valid_from": now,
         })
@@ -171,6 +213,125 @@ def _build_commit_fact(tx: "Transaction", commit_id: str) -> dict:
         "v": commit_id,
         "valid_from": now,
     }
+
+
+def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
+    """Build the dict passed as ``transact_batch(provenance=...)``.
+
+    Reads the optional private ``tx._deadline_set`` flag set by ``_run``
+    once before the retry loop (defaults to ``False`` — the CM path
+    never sets it).
+
+    v0.5.1 (rev O / N1) emits two additional keys:
+
+    - ``:persistence.txn/read-set`` — sorted list of eids the body
+      read via ``tx.deref`` (or implicitly via ``tx.alter``). Empty
+      list when the body wrote without reading.
+    - ``:persistence.txn/intent-log`` — list of
+      ``{":op": str, ":kwargs": dict}`` items in queue order, one per
+      ``tx.effect()`` call. Each item is conformed against the
+      registered ``:persistence.txn/intent-log`` element spec; on
+      failure ``SpecError`` is raised here, before the commit datom
+      is written. This is option (3) from the design doc — strict
+      validation at commit time, not at ``tx.effect()`` call site.
+      v0.5.1 W1 fix-pass (R2 MINOR 1): this conformance call now runs
+      OUTSIDE the ``store._lock`` window in ``_commit_attempt`` — it
+      has no DB-state dependency, so on ``SpecError`` we never acquire
+      the lock at all. The lock-held ``transact_batch`` call still
+      never runs when this raises, so no datoms or commit_id are
+      burned; the unwind is "no lock held".
+    """
+    intent_log_wire: list[dict] = [
+        {":op": intent.op, ":kwargs": dict(intent.kwargs)}
+        for intent in tx.effect_intent_log
+    ]
+    # Conform the whole list once: ``seq_of`` propagates per-index
+    # paths in ``ConformError.sub_errors``, so a non-EDN kwarg at the
+    # third intent reports as ``[2][":kwargs"][...]`` rather than
+    # collapsing to index 0 (which would happen if we conformed each
+    # item against the seq_of-wrapping registered key separately).
+    result = _spec_conform(":persistence.txn/intent-log", intent_log_wire)
+    if not result.is_ok:
+        _raise_spec_error(result)
+
+    return {
+        ":persistence.txn/commit-id": commit_id,
+        ":persistence.txn/started-at": tx.t_start.isoformat(),
+        ":persistence.txn/committed-at": tx.db._clock().isoformat(),
+        ":persistence.txn/retry-count": tx.attempt,
+        ":persistence.txn/non-deterministic-retry": getattr(
+            tx, "_deadline_set", False
+        ),
+        ":persistence.txn/read-set": sorted(r.eid for r in tx.read_set),
+        ":persistence.txn/intent-log": intent_log_wire,
+    }
+
+
+def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
+    """Replay ``tx.effect_intent_log`` through the active effect runtime.
+
+    No-op when no runtime is active (intents queue but never fire — the
+    caller is responsible for setting up the runtime if it wants effects
+    to run).
+
+    v0.5.1 N2: passes ``commit_id`` via the typed ``txn_commit`` kwarg
+    instead of stuffing ``"_txn_commit"`` into the intent's kwargs dict.
+    The audit handler pops the sentinel before hashing args, so the
+    same intent replayed across two different commits now produces the
+    same ``args_hash`` (closes the v0.5.0a1 corruption where args_hash
+    was polluted by commit_id). ``dict(intent.kwargs)`` defensively
+    copies so the audit handler's in-place ``args.pop`` never reaches
+    back to ``intent.kwargs``.
+    """
+    from persistence.effect.runtime import _active as _effect_active
+
+    rt = _effect_active.get()
+    if rt is None:
+        return
+    for intent in tx.effect_intent_log:
+        rt.perform(intent.op, dict(intent.kwargs), txn_commit=commit_id)
+
+
+def _commit_attempt(tx: "Transaction") -> bool:
+    """Run the spec-validate / facts-build / lock+conflict-check / transact
+    sequence atomically.
+
+    Returns ``True`` if committed, ``False`` if the conflict check rejected
+    it (caller decides retry vs raise). On success, sets ``tx.commit_id``
+    and replays effect intents through the active runtime (if any).
+
+    Both ``with db.dosync()`` and ``@db.dosync`` route their commit gate
+    through this single helper.
+    """
+    # Commit gate 1: spec validation BEFORE allocating tx-id.
+    _spec_validate_writes(tx.write_set)
+
+    # Commit gates 2+3: conflict check AND transact must be atomic.
+    # Without the lock, two threads can both pass the MVCC check before
+    # either writes, then both commit — losing increments (B7 concurrency
+    # bug). Holding store._lock across check+write collapses the window
+    # to zero: a thread that passes the check is guaranteed to commit
+    # before any other thread's check runs.
+    commit_id = str(_uuid.uuid4())  # noqa: wall-clock
+    facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
+    # v0.5.1 W1 fix-pass — R2 MINOR 1: build the provenance dict OUTSIDE
+    # the store lock. ``_build_commit_provenance`` runs the
+    # ``:persistence.txn/intent-log`` spec conformance, which has zero
+    # DB-state dependency — it only walks the intent_log and conforms it
+    # against a pre-registered spec. On ``SpecError`` we want to fail
+    # without holding ``store._lock`` under contention; on success we
+    # narrow the lock window to the conflict-check + transact-batch core.
+    provenance = _build_commit_provenance(tx, commit_id)
+    with tx.db.store._lock:
+        touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
+        if any_datoms_since(tx.db, tx.t_start, touched):
+            return False
+        # Apply atomically as one db.transact() — write_set + commit datom.
+        # `facts` always contains at least the commit datom, so no guard.
+        tx.db.transact_batch(facts, provenance=provenance)
+    tx.commit_id = commit_id
+    _replay_effect_intents(tx, commit_id)
+    return True
 
 
 def _run(
@@ -203,6 +364,9 @@ def _run(
 
         t_start = db._clock()
         tx = Transaction(db=db, t_start=t_start, attempt=attempt)
+        if deadline is not None:
+            # Read by _build_commit_provenance; CM path leaves it absent.
+            tx._deadline_set = True  # type: ignore[attr-defined]
         token = set_dosync_guard()
         try:
             try:
@@ -215,54 +379,21 @@ def _run(
             # Body raised — propagate immediately, no commit, no retry.
             raise
 
-        # Commit gate 1: spec validation BEFORE allocating tx-id.
-        _spec_validate_writes(tx.write_set)
+        if _commit_attempt(tx):
+            return tx.commit_id  # type: ignore[return-value]
+        attempt += 1
 
-        # Commit gates 2+3: conflict check AND transact must be atomic.
-        # Without the lock, two threads can both pass the MVCC check before
-        # either writes, then both commit — losing increments (B7 concurrency
-        # bug). Holding store._lock across check+write collapses the window
-        # to zero: a thread that passes the check is guaranteed to commit
-        # before any other thread's check runs.
-        commit_id = str(_uuid.uuid4())  # noqa: wall-clock
-        facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
-        with db.store._lock:
-            touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
-            if any_datoms_since(db, t_start, touched):
-                attempt += 1
-                continue
-
-            # Apply atomically as one db.transact() — write_set + commit datom.
-            # `facts` always contains at least the commit datom, so no guard.
-            db.transact_batch(
-                facts,
-                provenance={
-                    ":persistence.txn/commit-id": commit_id,
-                    ":persistence.txn/started-at": t_start.isoformat(),
-                    ":persistence.txn/committed-at": db._clock().isoformat(),
-                    ":persistence.txn/retry-count": attempt,
-                    ":persistence.txn/non-deterministic-retry": deadline is not None,
-                },
-            )
-        tx.commit_id = commit_id
-
-        # Replay effect intents through the real handler stack.
-        # Only meaningful if there's an active runtime; if not, intents
-        # silently no-op (caller responsibility to set up runtime).
-        from persistence.effect.runtime import _active as _effect_active
-        rt = _effect_active.get()
-        if rt is not None:
-            for intent in tx.effect_intent_log:
-                rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
-
-        return commit_id
 
 __all__ = [
     "Transaction",
     "DEFAULT_MAX_RETRIES",
     "WRITE_ATTR",
+    "_raise_spec_error",
     "_spec_validate_writes",
     "_build_write_facts",
     "_build_commit_fact",
+    "_build_commit_provenance",
+    "_replay_effect_intents",
+    "_commit_attempt",
     "_run",
 ]

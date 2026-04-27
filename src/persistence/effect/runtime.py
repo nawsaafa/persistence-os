@@ -169,8 +169,27 @@ class Runtime:
     def _pop_mask(self, token: contextvars.Token) -> None:
         self._mask_var.reset(token)
 
-    def perform(self, op: str, args: dict[str, Any]) -> Any:
-        """Dispatch ``op`` through the stack, outermost first."""
+    def perform(
+        self,
+        op: str,
+        args: dict[str, Any],
+        *,
+        txn_commit: str | None = None,
+    ) -> Any:
+        """Dispatch ``op`` through the stack, outermost first.
+
+        v0.5.1 N2: ``txn_commit`` is the typed seam between
+        ``persistence.txn._replay_effect_intents`` and the audit handler.
+        When set, the commit_id is lifted onto ``args`` under the
+        ``"_txn_commit"`` sentinel so the audit handler (and any future
+        handler that wants to know which dosync drove the call) sees it.
+        The audit handler pops the sentinel before hashing args, so
+        ``args_hash`` stays a pure function of the call's arguments.
+        Direct callers may still pass ``args["_txn_commit"]`` themselves;
+        both paths converge on the same per-handler view.
+        """
+        if txn_commit is not None:
+            args = {**args, "_txn_commit": txn_commit}
         masked = self._masked_names()
         # Build the ordered list of (handler, index) candidates — outermost first.
         # Handlers whose name is masked are skipped entirely.

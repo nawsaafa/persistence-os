@@ -62,6 +62,16 @@ def _base_content(**overrides) -> dict:
         principal={},
         run_id=str(uuid.uuid4()),
         parent=None,
+        # v0.5.1 W1 fix-pass — MAJOR-1: ``txn_commit`` is intentionally
+        # OMITTED. The factory now inserts ``"txn_commit": commit_id``
+        # only when set (mirrors the wire-form ``:effect/txn-commit``
+        # emit-only-when-set rule), and ``AuditEntry.to_dict()`` strips
+        # the key when None to keep the dataclass and helper sides in
+        # byte-lockstep. Including ``txn_commit=None`` here would make
+        # the helper's input dict carry a literal None that diverges
+        # from production input shapes (``make_audit_handler`` no longer
+        # writes ``None`` into ``content``). Omitting matches the
+        # post-fix factory shape exactly.
     )
     content.update(overrides)
     return content

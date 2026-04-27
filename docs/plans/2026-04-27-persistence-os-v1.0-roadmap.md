@@ -86,7 +86,21 @@ Per `vault emerge` 2026-04-27:
 - Stream B adds 5 days to critical path.
 - New paper Proposition 6 — "MCTS over the homoiconic Plan AST inherits content-addressed identity (every rollout's parent provenance hash is reconstructible from the audit log)." Defended in §5.X of v1.0 paper.
 - Skill-library 4-gate is now a precondition, not a Phase 4 polish item.
-- `:branch` semantics in Plan AST gain a third executor (the existing `:branch eval` for control flow + the new `:branch mcts` for plan-search). Dispatcher key is the only delta in `_dispatch.py`.
+- `:branch` semantics gain an executor — see [§3.3 below](#33-branch-semantics-contract-precondition-for-stream-b) for the contract. **The dispatcher-key-delta-only claim only holds under contract option (c) `:branch-mcts` as a separate tag**; option (a) (the path actually selected) is more invasive but matches the existing walker semantics.
+
+### 3.3 `:branch` semantics contract (precondition for Stream B)
+
+Today's plan walker (`src/persistence/plan/_walk.py:9-14`) holds: `_UNIMPLEMENTED_KINDS = frozenset({":code", ":branch"})` raises `UnimplementedNodeKindError` **only when the node is a leaf** (no children). A `:branch` node *with* children walks normally — visitor is called, children recurse. The dispatcher (`_dispatch.py`) layers handlers per tag over that walker.
+
+Three options were on the table for how Stream B threads MCTS into the walker:
+
+- **(a) `:branch` as non-leaf structural node, MCTS handler registered against `:branch` tag.** Children of `:branch` are candidate-plan subtrees; the MCTS handler receives the parent node, drives PUCT expansion over the children list, returns the chosen subtree. Walker stays unchanged — `:branch` already non-raises with children; we only register the dispatcher handler. **Selected for Stream B.**
+- (b) `:branch` as leaf, executor for `:branch` registered. Requires removing `:branch` from `_UNIMPLEMENTED_KINDS` AND adding an executor that synthesizes children at dispatch time. More invasive (walker change), worse for content-addressing (children not known at parse time).
+- (c) Split into `:branch-eval` and `:branch-mcts` as separate tags. Cleanest dispatcher boundary, but introduces two new tags into the canonical form (PLAN_CANONICAL_VERSION pin would have to bump).
+
+**Decision: option (a).** Rationale: (i) zero canonical-form change (PLAN_CANONICAL_VERSION stays at 1); (ii) zero walker change (semantics already match); (iii) one new dispatcher handler key (`":branch"`) and a small contract that the handler must consume and emit Plan AST subtrees (not arbitrary objects) so children remain content-addressed.
+
+**Stream B implication:** the design doc at `docs/plans/2026-05-03-v0.6.5-mcts-design.md` (TBD) MUST encode (a) as the contract. The "dispatcher key is the only delta" claim from earlier ADR text was true under (c) only; under (a) the delta is one dispatcher key + a contract (handler signature + child-subtree invariant), no walker code changes.
 
 ### What both ADRs preserve
 
@@ -205,16 +219,29 @@ UI ships at `src/persistence/repl/ui/` (browser console, no SPA framework — va
 
 ### Stream E — CAMO distributional
 
-**Goal.** Defend Module 4 Replay's "stronger than CAMO under NO-OP" claim with paired-rollout numbers (currently rescoped to NO-OP setting in paper abstract + §2.4).
+**Goal.** Defend Module 4 Replay's "stronger than CAMO" claim with paired-rollout numbers under a regime that actually exercises the substrate. The NO-OP regime alone is tautological — under NO-OP, byte-identity = 1.000 is forced by Prop 4 wording, not earned by the eval.
 
-**Contract.**
-- Harness at `bench/camo/harness.py`.
-- Paired-rollout: same prompt → CAMO trajectory + persistence-os trajectory under identical seed + handler stack.
-- 100-trajectory baseline. NO-OP setting: handler outputs are byte-identical, so any divergence is a substrate bug.
-- Metric: byte-identity rate (must be 1.000 by Prop 4); fall-through metric: per-step p50/p95 latency overhead vs CAMO.
-- Output: `bench/camo/reports/2026-05-XX-paired.json`.
+**Contract — two regimes.** Acceptance hinges on the **non-NO-OP regime**; NO-OP is a sanity check.
 
-**Acceptance:** byte-identity = 1.000 over all 100 trajectories under NO-OP. Latency overhead within 2x of CAMO baseline (substrate carries audit-chain cost; CAMO does not).
+**Regime 1 (sanity, NO-OP).** Handlers emit no recorded effects. byte-identity is trivially 1.000 by Prop 4 — this catches gross substrate bugs only. Required to pass but not the headline.
+
+**Regime 2 (headline, recorded-effects).** Handlers emit `:random`, `:clock/now`, and at least one `:tool-call` per trajectory. The substrate records each effect via the audit chain; CAMO records the same trajectory in its own format. Both replay engines re-run the trajectory from the recording.
+- 100 paired trajectories per regime.
+- Substrate replay must produce byte-identical leaf-result sequences from the recorded effects.
+- CAMO replay must produce its own re-run; we report the rate at which it matches the original under the same recordings.
+- The "stronger than CAMO" claim becomes operational: persistence-os re-replays under the recorded `:random`/`:clock/now`/`:tool-call` triple at rate X; CAMO re-replays under the same triple at rate Y; report X − Y honestly with confidence intervals.
+
+**Metrics (Regime 2).**
+- Substrate self-replay byte-identity rate (must be ≥ 0.99 — Prop 4 under recorded effects).
+- CAMO self-replay byte-identity rate under the same recordings (reported, not gated).
+- Per-step p50/p95 latency overhead vs CAMO (informational).
+
+**Output:** `bench/camo/reports/2026-05-XX-paired.json` carries both regime tables.
+
+**Acceptance.**
+- Regime 1: 100/100 byte-identity = 1.000 (sanity).
+- Regime 2: substrate self-replay byte-identity rate ≥ 0.99; CAMO rate reported honestly even if it differs in either direction.
+- Latency overhead within 2x of CAMO baseline under Regime 2 (substrate carries audit-chain cost; CAMO does not).
 
 ### Stream F — regulator-replay 50-trajectory CC-BY-4.0 corpus
 

@@ -1,0 +1,470 @@
+OpenAI Codex v0.94.0 (research preview)
+--------
+workdir: /Users/nawfalsaadi/Projects/persistence-os
+model: gpt-5.2
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: high
+reasoning summaries: auto
+session id: 019dcf3e-4023-7a23-9125-c1a00d9a4756
+--------
+user
+[Round 2/4 of autonomous review loop on persistence-nesy-2026.tex]
+
+## Score history
+- Round 1: 5/10 — ALMOST
+
+## Prior reviewer summary (verbatim, last round)
+**Score:** 5/10 (ALMOST). Verdict: salvageable without GPUs, but only if internal consistency + NeSy framing + at least one non-[TBD] evaluation slice are fixed.
+
+**Round 1 weaknesses (ranked):**
+1. Page budget (15p vs ~10p soft).
+2. Internal inconsistency: Plan was both "shipped" and "designed" across §1 / §3 / §5 / Table 1 / Fig 1.
+3. NeSy framing too "agent infra plumbing"; needed a concrete vignette.
+4. "We prove five propositions" overclaimed for mechanically-checked properties.
+5. Reproduction plan too [TBD]-heavy.
+6. Anonymization risk: % RESTORE: comments contain case names / SHAs / dollar figures in source.
+7. Prop 2 — "linear time" needed scoping.
+8. Prop 4 — sha256[:32] ambiguous (32 hex chars vs 32 bytes).
+9. Prop 5 — RNG-recording vs args-hash caching contradiction.
+10. Citations: anon2026camo / anon2026agenther / anon2025agentracer / anon2025aap / bieniusa2026multiverse flagged as possible placeholders.
+
+## Since your last review we have:
+1. **v0.5.1 refresh applied** across abstract / §1 / §3 / §5 / §6 / §8 / capability matrix / Fig 1: version markers now `v0.1.0a1 + v0.4.0a1 + v0.5.1`; test count 832 → 931; module count five → six (Txn shipped). Added: "Proposition statements are unchanged since v0.7; their machine-checked validations rerun green on v0.5.1."
+2. **§5.6 Txn rewritten** from "Phase 2 — designed" to "Phase 2.D — shipped, v0.5.1" with concrete details (snapshot isolation, atomic commit gate, three surface forms, N1-N4 closures).
+3. **§3 invariant 4 (transactions)** rewritten: shipped, snapshot-isolated, dosync, intent-log read-set provenance, :effect/txn-commit audit field.
+4. **§2.6 capability matrix:** Multi-agent STM flipped from $\circ$ to $\bullet$; Declarative plan AST clarified as "$\bullet$ (parse/spec)"; caption now references the S/P/D legend.
+5. **§5.8 Fig 1:** Txn moved from designed/dashed-italic to shipped/bold; caption updated to "Phase 1 / 2.B / 2.D shipped".
+6. **Status legend introduced in abstract:** S = shipped (Phase 1 / 2.B / 2.D); P = parse / spec layer only; D = designed (runtime Phase 2). Used consistently in capability matrix caption.
+7. **Internal consistency cleanup:** §5 intro split into "Phase 1 ships four; Phase 2.B + 2.D ship Plan-min + Txn; Phase 2.C / 2.E remain (Plan execution; REPL)"; §3 thesis closing now lists six shipped capabilities including "transactional shared-state coordination via the Phase 2.D Txn module's snapshot-isolated dosync with intent-log provenance threaded into the audit chain."
+8. **"We prove" → "We state and machine-check"** globally in abstract + §8 conclusion.
+9. **Prop 2 phrasing:** abstract + §4.2 body now say "linear in stack size for fixed catalog" (|K|=15 in shipped runtime).
+10. **Prop 4 phrasing:** id(n) now precisely defined as `sha256(canonical(n)).hexdigest()[:32]` (i.e. first 32 hex characters = 128-bit prefix), removing the bytes/hex ambiguity.
+11. **Prop 5 phrasing:** added explicit cache model `<step-index, op, args-hash>` (not args-hash alone), explicit trajectory_hash definition over the canonical effect-datom sequence, and explicit Phase-1 scope to "toy agents with recorded per-step rng-consumption" — no longer contradicts §5.4.
+12. **Production case study scope:** abstract no longer promises production case-study results in submission; explicitly staged for camera-ready 2026-07-20.
+13. **§7.4 NeSy framing strengthened:** prepended three explicit neuro-symbolic coupling contracts (Primary = spec-driven self-healing; Secondary = plan-as-data with content identity; Tertiary = replay determinism over neural leaves). Each contract names what is symbolic, what is neural, and how they couple. Spec-driven self-healing promoted as the pivotal NeSy contribution.
+14. **Capability-matrix caveat:** caption now says "NO-OP byte-identity verified for toy agents with recorded per-step rng-consumption; distributional fidelity for LLM leaves is Phase 2."
+15. **Citation integrity pass:** added `% [VERIFY] before camera-ready` markers above the five flagged keys (anon2026camo, anon2026agenther, anon2025agentracer, anon2025aap, bieniusa2026multiverse).
+
+## Items NOT yet addressed (deliberately deferred — speak to whether they block submission)
+- Page budget: still 337 source lines / ~15 PDF pages. A 15→10 page cut is its own dedicated trim cycle; we want your judgment on whether the current shape blocks submission given the v0.5.1 refresh + tightened propositions, or whether a separate trim must come first.
+- New CPU-only evaluation table: not added in this round (we did not run any benchmarks). We want your judgment on whether the v0.5.1 refresh + machine-checked propositions are sufficient evidence for the abstract deadline 2026-06-09, or whether at least a microbench / 10-trajectory regulator-replay is now mandatory.
+- % RESTORE: comments still in source (used for camera-ready de-anonymization workflow). We can move these to a private file outside the submission bundle if you confirm NeSy/CEUR-WS treats source as part of the anonymized artifact.
+
+## Your task
+Re-score and re-assess on the updated paper (full source below).
+
+Same format:
+1. Score 1-10
+2. Verdict: READY / ALMOST / NOT READY for 2026-06-16
+3. Remaining critical weaknesses (ranked) + minimum fixes
+4. Re-cover the same special-focus areas: internal consistency, proposition completeness, reproduction-plan honesty, anonymization, NeSy framing, citations.
+5. Hidden risks — anything you notice on the second pass.
+
+Be brutally honest. Most of all: tell us whether the deferred items (page budget, CPU eval table, RESTORE comments) are now blockers for the 06-16 deadline, given the rest of the fixes.
+
+## Updated paper source (full LaTeX, post-Round-1 fixes)
+
+```latex
+% !TEX program = tectonic
+\documentclass[anon]{nesy2026}   % submission: [anon]; camera-ready: [final]
+
+% --- light extras the class does NOT auto-load ---
+\usepackage{booktabs}              % nicer tabular rules
+\usepackage{makecell}              % multi-line table cells (§2.6 capability matrix)
+\usepackage{tikz}                  % §5.8 system diagram
+\usetikzlibrary{positioning,arrows.meta,shapes.geometric}
+
+% --- relaxed line-break tolerance: lets TeX stretch inter-word glue
+% --- as a last resort instead of leaving long \C{...} monospace tokens
+% --- hanging into the margin. 3em is conservative; raise if needed.
+\setlength{\emergencystretch}{4em}
+\hbadness=10000 % suppress underfull-hbox warnings on slightly stretched lines
+
+% --- propositions: JMLR class predefines proposition, theorem, lemma,
+% --- remark, example. No \newtheorem needed. Use \begin{proposition}...
+% --- \end{proposition} directly with \label{prop:...} for \theoremref.
+
+% --- inline code-span macro ---
+\newcommand{\C}[1]{\texttt{#1}}
+
+% --- title + author (JMLR-style) ---
+\title[Persistence OS]{Toward Accountable Neurosymbolic Runtimes: The Persistence OS Substrate}
+
+% Author block — class option [anon] auto-suppresses names in submission PDF.
+% For camera-ready, flip the documentclass option to [final] and the same author
+% block renders with names.
+\clearauthor{%
+  \Name{Author Name}                       % TODO: real name pre-camera-ready
+  \Email{anonymous@example.com}            % TODO: real email pre-camera-ready
+  \\\addr Affiliation                      % TODO: real affiliation pre-camera-ready
+}
+
+\begin{document}
+
+\maketitle
+
+% --- Revision history ---
+% Intentionally NOT included in submission .tex. The v0.1-v0.7 history is
+% preserved in paper/archive/persistence-nesy-2026-v0.7.md (lines 10-19).
+% If a future reviewer requests it, re-add as a \appendix section in the
+% camera-ready (\documentclass[final]{nesy2026}) build only.
+
+\begin{abstract}
+We present \textbf{Persistence}, a neurosymbolic substrate where symbolic state --- bitemporal datoms, content-addressed plan ASTs, policy-as-data, and boundary specs --- carries formal properties (immutability, replay determinism, Merkle audit-chain integrity, plan content-addressing with descendant propagation, transactional snapshot isolation) on top of which neural agency composes. The central invariant: every piece of agent state (memory, audit, plan, skill, transaction) is an immutable, content-addressed, bitemporal datom; effects route through a composable handler stack whose entries are themselves datoms; plans are EDN abstract syntax trees stored as Merkle-DAGs; counterfactual replay is a first-class query over the log. Contemporary agent frameworks fragment auditability, counterfactual analysis, and controllable learning across incompatible substrates: temporal knowledge graphs for memory~\citep{kurtic2025zep}, algebraic effects for tool use~\citep{cheng2025pangolin}, declarative program synthesis for reasoning~\citep{khattab2023dspy}, skill libraries for continual learning~\citep{wang2023voyager,memento2026skills}, seed-replay for counterfactuals~\citep{anon2026camo,anon2026agenther}. Persistence's claim is that these properties can be \emph{derived} from a single symbolic substrate rather than re-engineered per system. This paper reports the reference implementation v0.1.0a1 + v0.4.0a1 + v0.5.1 (\textbf{931 tests green, 7 xfailed}), which ships six of seven modules --- Fact, Effect, Spec, Replay, Txn (snapshot-isolated STM with intent-log read-set provenance and an \C{:effect/txn-commit} handle into the audit chain), and Plan (minimal: parse / unparse / walk / spec-validation with 128-bit content-addressing) --- demonstrating six substrate-derived capabilities: queryable bitemporal history, counterfactual branching, composable policy-gated effects, boundary-checked neurosymbolic contracts, content-addressed homoiconic plan ASTs with byte-identical round-trip, and transactional shared-state coordination. REPL and Plan-execution (MIPROv2/MCTS optimizer ladder, 4-gate skill promotion) remain Phase 2.C / 2.E. We state five propositions and machine-check them on the shipped artifact; the headline two: (i) any handler stack is well-formed iff every catalog operation is covered --- checkable in linear time in stack size for fixed catalog by \C{Runtime.is\_well\_formed}; (ii) \C{replay(T, I)} with a NO-OP intervention yields a canonical-hash byte-identical to the factual trajectory's --- a structural determinism guarantee stronger than CAMO's statistical seed-replay for the NO-OP case on toy agents with recorded per-step rng-consumption. \textbf{Status legend used throughout:} \textbf{S} = shipped (Phase~1 / 2.B / 2.D); \textbf{P} = parse / spec layer only (runtime deferred); \textbf{D} = designed (registered specs, runtime Phase~2). Proposition statements are unchanged since v0.7; their machine-checked validations rerun green on v0.5.1. A Reproduction Plan stages four evaluations for the camera-ready (2026-07-20): LongMemEval, CAMO-style counterfactual fidelity, a 50-trajectory synthetic regulator-replay, and one production case study; the abstract submission reports the formal properties machine-checked on the shipped artifact and treats numeric tables as [TBD --- camera-ready].
+\end{abstract}
+
+\section{Introduction}\label{sec:intro}
+
+\textbf{Research question.} When neural agency is scaffolded by a symbolic substrate, what formal properties does the combined system inherit that neither layer provides alone? We argue that six substrate invariants --- immutable bitemporal datoms, algebraic-effect handlers with audit semantics, homoiconic plan ASTs, transactional shared state, machine-readable boundary specs, and a REPL --- yield derived capabilities (accountability, replay, counterfactual fidelity, composable safety, compositional skill learning, multi-agent coordination) that are consequences of the substrate, not independently-engineered features.
+
+LLM agents in production --- project finance, insurance, trading, clinical intake, hospitality --- expose recurring gaps: regulators asking \emph{``what did the agent believe at 14:03, and why?''} get prose-log narratives; post-incident counterfactuals are simulated by prompt perturbation that changes more than the intended variable; agents that rewrite their own skills accumulate drift~\citep{hannecke2026ssgm}; single-layer guardrails (NeMo, LLM Guard, Rebuff) cannot compose policy/dry-run/cache/rate-limit/audit; prose chain-of-thought is inspectable but not editable, JSON tool graphs the reverse. The field offers partial solutions: bitemporal knowledge graphs~\citep{kurtic2025zep}, algebraic effects~\citep{cheng2025pangolin,wang2025composable}, declarative programs~\citep{khattab2023dspy}, skill libraries~\citep{wang2023voyager,memento2026skills}, counterfactual aligned-randomness~\citep{anon2026camo,anon2026agenther}. Each is a beachhead; none are composed. The integration burden --- five substrates, five consistency models, five failure modes --- erodes the properties each was designed to provide.
+
+\textbf{Contribution.} We present \textbf{Persistence}, a cognitive-runtime substrate built around a single claim: accountability, replay, counterfactuals, composable safety, and compositional skill learning can be derived from \emph{one} substrate rather than re-engineered per system. Every piece of agent state is an immutable, content-addressed, bitemporal datom; effects route through a composable handler stack whose entries are themselves datoms; plans are EDN ASTs stored as Merkle-DAGs; trajectories are ordered effect-datom sequences, making counterfactual replay a first-class query; transactions compose via STM over datom-backed refs; specs constrain every boundary; a REPL exposes inspection, editing, rewind, and speculative branching against running agents.
+
+\textbf{What this paper reports.} v0.1.0a1 + v0.4.0a1 + v0.5.1 ships six of seven modules (\textbf{931 tests green, 7 xfailed}): Fact, Effect, Spec, Replay (Phase 1), a minimal Plan module (Phase 2.B) providing parse, unparse, walk, and spec validation over a uniform EDN AST with 128-bit content-addressing, and Txn (Phase 2.D) providing snapshot-isolated software transactional memory with read-set + intent-log provenance and an \C{:effect/txn-commit} field threaded into the audit chain. Plan execution (optimizer ladder, 4-gate skill promotion) and REPL remain Phase 2.C / 2.E; the Plan specs were registered in Phase 1 as a deliberate parse-don't-validate commitment. \textbf{The substrate is asserted once; each derived capability is a property we check against the log, not a feature engineered per agent.} Neural agency (LLM decisions, embeddings, generative skills) operates over an explicitly symbolic substrate: bitemporal datom queries with a Datalog-shaped surface, EDN AST grammars for plans, policy-as-data, and Malli-style specs with an \C{explain\_for\_llm} self-healing surface. We do not claim a Datalog rule engine or Z3-discharged \C{verify} leaves~\citep{fan2024proofofthought} in Phase 1; both are adjacent future work.
+
+\section{Related Work}\label{sec:related}
+
+\textbf{Agent memory}\label{sec:memory} has evolved from vector-store RAG to graph-structured memory (Graphiti, Neo4j-based agent graphs). Zep~\citep{kurtic2025zep} and Memento~\citep{n1n2026memento} introduce bitemporal edges with \C{valid\_at}/\C{invalid\_at} timestamps. Mem0 and A-Mem pursue mutable memory updated by LLM-driven consolidation, which~\citet{hannecke2026ssgm} shows produces unbounded drift without a formal write-gate. Persistence sits on the immutable end with a critical extension: it treats \emph{every} datom (memory, audit, plan, skill, transaction) as bitemporal --- memory is one consumer; the substrate serves all.
+
+\textbf{Algebraic effects in LLM programming}\label{sec:effects-rw} were brought to LLM scripting by~\citet{wang2025composable} and Pangolin~\citep{cheng2025pangolin}: separating what an effect is from how it is handled enables stacked interceptors for retry, caching, multi-shot sampling, observability. Neither integrates effect handlers with a temporal memory substrate, policy-as-data, or a formal audit chain. Persistence does: with the audit handler wrapping the full catalog (the regulated-deployment default), every effect emits a datom, every handler is policy-reviewable, every run is replayable.
+
+\textbf{Structured agent programming.}\label{sec:structured} DSPy~\citep{khattab2023dspy} treats agents as declarative programs compiled by optimizers (BootstrapFewshot, MIPROv2). LLM+PDDL integrations~\citep{liu2023llmp,valmeekam2023planbench} route LLMs through classical planners; \citet{kambhampati2024canllm} argues LLMs-as-planners are unsound without a symbolic verifier. The neurosymbolic reasoning literature --- Logic Tensor Networks~\citep{badreddine2022ltn}, DeepProbLog~\citep{manhaeve2018deepproblog}, NeuPSL~\citep{pryor2023neupsl} --- integrates differentiable neural components with symbolic inference at finer granularity than we target; our contribution is orthogonal: a substrate for agent-level symbolic scaffolding with LLM leaves, not a neural-symbolic reasoning hybrid at the inference layer.
+
+\textbf{Skill libraries and continual learning.}\label{sec:skills} Voyager~\citep{wang2023voyager} demonstrated LLM agents can accumulate executable skill libraries; Memento-Skills~\citep{memento2026skills} extended this with Read-Write Reflective Learning. Voyager promotes skills on first successful use, producing a long tail of single-use skills under noise. Persistence's Plan module enforces a four-gate criterion over versioned, content-addressed skills with parent pointers preserving lineage.
+
+\textbf{Counterfactual replay.}\label{sec:counterfactual-rw} CAMO~\citep{anon2026camo} introduced simulator-internal counterfactuals with aligned randomness; AgentHER~\citep{anon2026agenther} adapted Hindsight Experience Replay~\citep{andrychowicz2017her}; AgenTracer~\citep{anon2025agentracer} uses counterfactual fault injection; Abduct-Act-Predict~\citep{anon2025aap} operationalizes Pearl's causal ladder. Persistence is stronger on this axis: because all state is immutable bitemporal datoms, aligned randomness is a substrate property, not a simulator hack. For the NO-OP intervention case, the canonical hash of the replayed trajectory is byte-identical to the factual trajectory's --- a structural guarantee, not a statistical one.
+
+\subsection{Positioning}\label{sec:positioning}
+
+Table~\ref{tab:capability-matrix} places Persistence relative to the beachheads. Shipped Phase-1 capabilities are marked $\bullet$; Phase-2-designed capabilities are marked $\circ$.
+
+\begin{table}[ht]
+\centering
+\resizebox{\textwidth}{!}{%
+\scriptsize
+\begin{tabular}{lcccccc}
+\toprule
+Capability & Zep/Graphiti & Pangolin & DSPy & Voyager & CAMO & Persistence \\
+\midrule
+Bitemporal memory                              & $\bullet$ &           &           &           &           & $\bullet$ \\
+Effect handler stack                           &           & $\bullet$ &           &           &           & $\bullet$ \\
+Merkle-hashed audit chain                      & partial   &           &           &           &           & $\bullet$ \\
+Counterfactual replay (NO-OP byte-identical)   &           &           &           &           & partial   & $\bullet^*$ \\
+Boundary specs + LLM self-healing              &           &           & partial   &           &           & $\bullet$ \\
+Declarative plan AST                           &           &           & $\bullet$ &           &           & \makecell{$\bullet$\\(parse/spec)} \\
+Plan-AST optimization                          &           &           & partial   &           &           & $\circ$ \\
+Skill library (4-gate promotion)               &           &           &           & $\bullet$ &           & $\circ$ \\
+Multi-agent STM                                &           &           &           &           &           & $\bullet$ \\
+Live production REPL                           &           &           &           &           &           & $\circ$ \\
+\bottomrule
+\end{tabular}%
+}
+\caption{Capability coverage. $\bullet$ = shipped (Phase 1 / 2.B / 2.D --- corresponds to status legend \textbf{S}); $\circ$ = designed (Phase 2.C / 2.E --- legend \textbf{D}); ``partial'' = with caveats. ``parse/spec'' annotates the parse-don't-validate layer (legend \textbf{P}: shape registered + parser + spec-validation, runtime deferred). $^*$NO-OP byte-identity verified for toy agents with recorded per-step rng-consumption; distributional fidelity for LLM leaves is Phase 2 (\sectionref{sec:eval-camo}).}
+\label{tab:capability-matrix}
+\end{table}
+
+\section{The Persistence Thesis}\label{sec:thesis}
+
+We state six substrate invariants. Invariants 1, 2, 5 are fully realized in Phase 1; invariant 3 is realized at the shape + parse + validate layer by Phase 2.B (execution Phase 2.C); 4 and 6 are frozen at the spec-registry boundary with runtime in Phase 2.
+
+\begin{enumerate}
+\item \textbf{Every fact is immutable, temporal, content-addressed.} Memory, audit, plan, skill, transaction are all datoms; provenance, counterfactual branching, audit trails are derived. \emph{[Phase 1: shipped.]}
+\item \textbf{Every action is an effect.} LLM calls, tool calls, memory writes, and side effects pass through a composable handler stack; policy, safety, caching, dry-run, retry are handler instances. \emph{[Phase 1: shipped, 15-op catalog.]}
+\item \textbf{Every plan is an EDN AST.} Agents read, edit, and evolve their own plans; skills are named AST subtrees promoted under statistical evidence; plan optimization is structural search. \emph{[Phase 2.B v0.2.0a1: parse/walk/spec-validation over the \C{[tag \{attrs\} *children]} AST with 128-bit content-addressing; execution Phase 2.C.]}
+\item \textbf{Every shared state change is a transaction.} STM coordinates multi-agent belief updates without locks or message passing. \emph{[Phase 2.D v0.5.1: shipped --- snapshot-isolated dosync (CM + decorator + factory forms) over datom-backed refs; commit gate \C{any\_datoms\_since(t\_start)} guarded by an atomic \C{store.\_lock} window; intent-log read-set emitted into commit-datom provenance; \C{:effect/txn-commit} promoted to a first-class \C{AuditEntry} field threading transactional commits into the audit chain.]}
+\item \textbf{Every LLM boundary has a spec.} Parse-don't-validate at trust boundaries; generative testing from specs; self-healing via spec-error feedback. \emph{[Phase 1: shipped, 186 tests.]}
+\item \textbf{Everything is REPL-live.} Inspection, editing, rewind, and speculative branching apply to running production agents. \emph{[Rewind subsumed by \C{as\_of}; REPL Phase 2.]}
+\end{enumerate}
+
+\textbf{Thesis.} These six invariants, implemented together as a single runtime, produce a system where accountability, replay, counterfactuals, composable safety, compositional skill promotion, coordinated multi-agency, and live production steering are \emph{properties of the substrate} --- not features engineered per agent. Six are shipped: accountability via the Merkle-hashed audit chain; replay via byte-identical NO-OP; counterfactual branching via \C{branch()}; composable safety via the Effect handler stack with a machine-checkable well-formedness property; homoiconic plan-as-data via the Phase 2.B Plan module's content-addressed parse/walk/spec-validation; and transactional shared-state coordination via the Phase 2.D Txn module's snapshot-isolated \C{dosync} with intent-log provenance threaded into the audit chain. Phase 2.C / 2.E ship the remaining capabilities (Plan-execution, REPL) on top of the same substrate with no schema changes --- that non-requirement is the testable form of the thesis.
+
+\section{Formalization}\label{sec:formal}
+
+The formalization below tracks the Phase 1 reference implementation. Where a claim depends on Phase 2 work, we mark it explicitly.
+
+\subsection{Datoms and bitemporal queries}\label{sec:datoms}
+
+A \textbf{datom} is an eight-tuple:
+
+\begin{equation}\label{eq:datom}
+d = \langle e,\ a,\ v,\ \tau,\ \tau_{sys},\ \nu_{from},\ \nu_{to},\ \omega \rangle
+\end{equation}
+
+where $e$ is an entity, $a$ a namespaced attribute, $v$ an EDN value, $\tau$ a monotonic transaction id, $\tau_{sys}$ the ingestion time, $\nu_{from},\nu_{to}$ the valid-time interval, and $\omega \in \{\text{assert}, \text{retract}\}$. A provenance record $\pi$ ships as the \C{Provenance} \C{TypedDict} (\C{total=False}) over seven known keys --- \C{source}, \C{tx\_time}, \C{handler\_id}, \C{canonical\_call}, \C{parent\_provenance\_hash}, \C{superseded\_by\_tx}, plus a free-form \C{extra} map. The schema is deliberately model-pluggable: \C{canonical\_call} is a content hash of (model, prompt, tools, params); no \C{:provider} field --- the neural model is a plug-in, not embedded in the substrate's shape. Phase 1 seals provenance with SHA-256; per-transaction ed25519 signing is Phase 2 (\sectionref{sec:privacy}). Core queries: $\text{asOf}(D, t) = \{d \mid \tau_{sys}(d) \leq t\}$; $\text{validAsOf}(D, t) = \{d \mid \omega = \text{assert},\, \nu_{from} \leq t < \nu_{to}\}$; $\text{history}(D, e) = \{d \mid \text{entity}(d) = e\}$ sorted by $\tau$; $\text{branch}(D, t, \Delta) = \text{asOf}(D, t) \cup \Delta$. Projection-layer counterfactuals are supported via \C{ProjectionAdapter.fork(branch\_id)} (v0.4.0a1) --- a Protocol method returning a fresh empty adapter the caller populates by \C{rebuild()} against a branched DB.
+
+\begin{proposition}[Branch is a logical operation over the shipped store]\label{prop:branch}
+\C{branch(D, t, $\Delta$)} returns a new \C{DB} value backed by a fresh in-memory store seeded with \C{asOf(D, t)} and extended with $\Delta$; writes to the branched value cannot leak back into the parent. \emph{Complexity:} on the Phase 1 \C{InMemoryStore}, $O(|D|)$ seed plus $O(|\Delta|)$ additions. \emph{Phase 2 upgrade:} a persistent HAMT backing store reduces seed to $O(|\Delta| \log |D|)$; the \C{Store} Protocol makes this drop-in.
+\end{proposition}
+
+\emph{Remark.} The Phase 1 complexity is honest rather than ideal --- we ship a correct list-backed implementation rather than pull in \C{pyrsistent}. The \emph{isolation} property holds unconditionally and is the load-bearing one for counterfactual reasoning.
+
+\subsection{Effects, handlers, and well-formedness}\label{sec:effects}
+
+An effect signature is a typed pair $\langle \text{op}: \kappa, \text{args}: \sigma_{in} \rightharpoonup \sigma_{out} \rangle$. The minimum catalog $K$ comprises 15 ops: \C{llm/call}, \C{tool/call}, \C{mem/read}, \C{mem/write}, \C{decide}, \C{ask-user}, \C{emit-artifact}, \C{sleep}, \C{random}, \C{env/read}, \C{net/fetch}, \C{secret/use}, \C{cost/charge}, \C{clock/now}, \C{audit/emit}. A \textbf{handler} $h$ is a partial function $(\kappa, \sigma_{in}, k: \sigma_{out} \to \alpha, \mathrm{ctx}) \to \alpha$ with continuation semantics. A stack $H = [h_1, \dots, h_n]$ ($h_1$ outermost) dispatches $\kappa$ to the outermost handler whose domain contains it; that handler invokes the continuation, delegating to the remaining stack.
+
+\begin{proposition}[Well-formedness; machine-checkable on the shipped runtime]\label{prop:wellformed}
+A stack $H$ over catalog $K$ is well-formed iff for every $\kappa \in K$, at least one handler above the raw base handles $\kappa$. The shipped \C{Runtime.is\_well\_formed(catalog)} (\C{src/persistence/effect/runtime.py}) decides this property in $O(|H| \cdot |K|)$ time --- \emph{linear in stack size for fixed catalog} ($|K|=15$ in the shipped runtime); \C{Runtime.uncovered\_ops(catalog)} returns the witness set. At runtime, \C{Runtime.perform(op, \dots)} raises \C{Unhandled} when no handler covers $\kappa$ --- the property is not merely asserted but \emph{enforced on every call}.
+\end{proposition}
+
+This is the paper's strongest formal contribution on the Phase-1 artifact: a decidable, linear-time, machine-checked completeness property with runtime enforcement via \C{Unhandled}. Properties above (audit-chain integrity \sectionref{sec:audit}, replay determinism \sectionref{sec:replay}) build on well-formedness. Handlers compose \emph{masked} (Koka semantics): $\text{mask}_a(h)$ prevents $h$ from intercepting operations of attribute $a$ within its own body, eliminating re-entrant loops.
+
+\subsection{The Merkle-hashed audit chain}\label{sec:audit}
+
+When the \C{audit} handler wraps a set of operations $W \subseteq K$, each effect on $\kappa \in W$ emits a datom recording \C{(op, args, verdict, provenance, prev\_hash)} before the continuation fires; the chain is \C{sha256(canonical\_serialize(entry) || prev\_hash)}. Phase 1 ships \C{make\_audit\_handler(wraps, \dots)} (default \C{("llm/call",)}), \C{verify\_chain(entries) $\to$ bool} (re-derives \C{prev\_hash}; detects field-mutation tamper), and \C{audit\_entry\_to\_datom} flowing audit entries into the Fact log. As of v0.4.0a1, \C{audit\_entry\_to\_datom} also emits a \C{parent\_provenance\_hash} alias alongside \C{:prev-hash}, bridging audit-entry datoms into the typed \C{Provenance} schema so \C{DB.causal\_history(e)} walks audit chains and fact-log derivation chains under one query primitive. Authenticity (\emph{who} signed) is distinct from integrity and not claimed for Phase 1; per-transaction ed25519 is Phase 2 (\sectionref{sec:privacy}).
+
+\begin{proposition}[Audit-chain immutability]\label{prop:tamper}
+For any audit-chain $C = \langle e_0, \dots, e_n \rangle$ produced by \C{make\_audit\_handler}, \C{verify\_chain(C)} returns true iff for all $i$, $e_i.\text{id} = \text{sha256}(\text{canonical}(e_i.\text{fields} \setminus \{\text{id}\}))$ and $e_i.\text{prev\_hash} = e_{i-1}.\text{id}$ --- i.e. no entry has been mutated, deleted, reordered, or truncated from the middle. Exercised end-to-end by \C{tests/effect/test\_audit.py} (tampering / deletion / reordering tests). Tail-truncation is allowed by construction and must be detected by regulators comparing a separately-recorded expected length.
+\end{proposition}
+
+\textbf{Universality contract.} ``Every effect emits a datom'' holds when $W$ covers the full catalog $K$; \C{Runtime.is\_well\_formed} checks this, and regulated deployments (Case A in \sectionref{sec:eval-cases}) wrap all 15 ops.
+
+\subsection{Plans (Phase 2.B shipped: parse/walk/spec-validation; execution Phase 2.C)}\label{sec:plans}
+
+A plan is a labeled tree: internal nodes are \emph{control operators} ($\text{seq}$, $\text{par}$, $\text{choice}$, $\text{loop}$, $\text{race}$, $\text{let}$, $\text{branch}$); leaves are \emph{effect invocations} ($\text{tool-call}$, $\text{llm-call}$, $\text{code}$, $\text{checkpoint}$) or \emph{cognitive operators} ($\text{reflect}$, $\text{verify}$, $\text{call-skill}$). Every node $n$ carries content identity $\text{id}(n) = \text{sha256}(\text{canonical}(n))[:32]$ as its Merkle-DAG handle. The \C{:persistence.plan/node} spec is registered in Phase 1; the Phase 2.B \C{persistence.plan} module (v0.2.0a1) ships parse, unparse, depth-first walk, and spec validation against this shape. Encoding nodes as EDN vectors \C{[:tag \{attrs\} \& children]} rather than maps makes plan ASTs \emph{homoiconic}: the homoiconicity contract's allowed self-edits (read, splice, compose, rewrite, fork, promote) reduce to list-splicing over well-typed vectors.
+
+\begin{proposition}[Plan content-addressing with descendant propagation]\label{prop:plan}
+For any plan node $n = \langle \text{tag}, \text{attrs}, \text{children} \rangle$ constructed through the shipped \C{Node} constructor, $\text{id}(n) = \text{sha256}(\text{canonical}(n)).\text{hexdigest}()[{:}32]$ (i.e.\ the first 32 hex characters $=$ 128-bit prefix of the SHA-256 digest) over $n$'s tag, alphabetically-sorted attr map (non-finite floats rejected; non-string / colon-prefixed / empty / reserved \C{id} keys rejected at both construct and parse as defense-in-depth against EDN hash-poisoning), and its children's ids recursively. Hence for any descendant modification at depth $d$ producing $T'$, every ancestor id on the root-to-leaf path differs between $T$ and $T'$. Property-checked at \C{max\_examples=200} on round-trip id preservation and descendant-mutation propagation over all 16 node kinds. Spec conformance against \C{:persistence.plan/node} is enforced at parse when \C{strict=True}; 7 \C{xfail} cases scope Phase-2.C per-kind required-attr tightening and do not mask the shipped claim. Birthday-collision probability at 1\% reaches $\approx 2.6 \times 10^{18}$ plans at 128 bits, argued in the corresponding ship commit's CHANGELOG.  % RESTORE: 'commit \C{190668a}'
+\end{proposition}
+
+\emph{Dispatch seam (v0.4.0a1).} The \C{Dispatcher} class layers handler-per-tag dispatch over the AST walker (renamed \C{\_walk.py}; back-compat shim retained); walk order $\equiv$ dispatch order, hypothesis-tested at \C{max\_examples=50}. This is the seam Phase 2.C binds effect handlers into without AST shape changes; \C{PLAN\_CANONICAL\_VERSION} stays at 1.
+
+\emph{Neurosymbolic reading.} Proposition~\ref{prop:plan} is the formal identity law for a homoiconic neurosymbolic AST: the skeleton (tag, attrs, children) is symbolic --- editable, optimizable, regulator-readable; leaves (\C{:llm-call}, \C{:code}, \C{:reflect}) are neural. Descendant propagation makes every structural edit produce a new ancestor-id path --- a verifiable identity surface Phase-2.C optimizers (MIPROv2, MCTS-over-Plan) walk over while leaves remain neural. The homoiconicity contract permits read, splice, compose, rewrite, fork, promote; it forbids edits to \C{:verify} nodes (would defeat Proof-of-Thought~\citep{fan2024proofofthought}), edits to ancestors of the executing frame, and unbounded \C{:loop}.
+
+A \textbf{skill} is a quadruple $\langle \text{name}, \text{version}, \text{ast}, \text{stats} \rangle$ encoded by \C{:persistence.plan/skill}. Promotion (Phase 2 runtime) requires: $\text{uses}(T) \geq 3$, $T$ in $\geq 2$ distinct parents, rolling success rate $\geq 0.8$, and an LLM-written docstring of $T$ that retrieves $T$ as top-1 over the existing skill library --- the last gate enforcing semantic non-collision cheaply.
+
+\subsection{Trajectories and replay}\label{sec:replay}
+
+A \textbf{trajectory} is an ordered sequence of effect datoms sharing a run-id, plus a seed vector $\sigma = \langle \sigma_{llm}, \sigma_{tool}, \sigma_{env} \rangle$. An \textbf{intervention set} $I = [\langle \text{step}, \text{field}, \text{new-value} \rangle, \dots]$ is a list of per-step modifications, sorted by step. The replay operator copies $T_i$ verbatim for $i < I.\text{step}$, applies the intervention at $I.\text{step}$, and re-executes the suffix with effect calls routed through a \emph{replay handler} that returns cached responses keyed by args-hash.
+
+\begin{proposition}[Replay determinism --- stronger NO-OP form]\label{prop:noop}
+If all non-determinism in the agent routes through effects in catalog $K$ \textbf{and} the per-step rng-consumption pattern is recorded, $\text{replay}(T, I)$ produces a deterministic counterfactual trajectory that diverges from $T$ exactly at $I.\text{step}$. \emph{Cache model:} the replay handler keys cached responses by $\langle \text{step-index}, \text{op}, \text{args-hash} \rangle$ rather than args-hash alone, so that two distinct steps issuing the same op with identical args still resolve to their respective recorded outcomes; the RNG-consumption pattern is what guarantees the cache key sequence reproduces deterministically. \emph{Trajectory hash:} $\text{trajectory\_hash}(T) = \text{sha256}(\text{canonical\_dumps}(\langle e_{\text{run-id}}, \text{op}, \text{args}, \text{value}, \tau, \text{prev-hash} \rangle_{i=0..n}))$ over the effect-datom sequence; it does not include wall-clock or non-recorded environment reads. Phase 1 strengthens the proposition for the NO-OP case: for an intervention that applies but changes no value, $\text{trajectory\_hash}(\text{replay}(T, I_{\text{noop}})) = \text{trajectory\_hash}(T)$ --- \emph{byte-identical} on the canonical serialization, not merely statistically close. Verified by \C{tests/replay/test\_determinism.py} (NO-OP byte-identity test) on toy agents with fixed per-step rng-consumption; LLM-leaf generalization is Phase 2 (\sectionref{sec:eval-camo}).
+\end{proposition}
+
+This strengthens CAMO's aligned-randomness on the axis NeSy reviewers care about: a structural canonical-hash guarantee, not a statistical outcome-delta claim. Extending from toy agents (per-step rng-consumption fixed in \C{conftest.py}) to real LLM trajectories requires replacing \C{\_advance\_rngs\_to\_match} with a recorded per-step rng-state vector --- Phase 2 work, prerequisite for the \sectionref{sec:eval-camo} camera-ready numbers.
+
+\subsection{Transactions}\label{sec:transactions}
+
+A \textbf{ref} is a pair $\langle \iota, \tau_{\text{current}} \rangle$ where $\iota$ is an identity and $\tau_{\text{current}}$ the most recent transaction id. A transaction body is a thunk that reads and writes refs; commit emits an atomic set of datoms, CAS-ing on all read refs' $\tau$. On conflict, the transaction is retried. Composition is automatic: a transaction that calls another transaction inherits the outer's write set. The Txn-module runtime is Phase 2.
+
+\subsection{Specs and the self-healing LLM contract}\label{sec:specs}
+
+A \textbf{spec} $s$ is a predicate-generator pair. Conforming $x$ against $s$ yields a refined value or $\bot$ via a discriminated union (\C{Conformed} \textbar{} \C{ConformError}, not silent coercion). The boundary contract: business logic is typed against conformed values; raw inputs cannot reach it. Specs are first-class EDN --- composable, diffable, versionable.
+
+\textbf{Self-healing contract (shipped).} On conform failure, \C{spec.explain\_for\_llm(err)} returns a structured message with field path, failure reason, and a Fix-clause-annotated hint. When an LLM emits a malformed tool call, the spec layer returns a prompt-ready correction the agent can retry against --- a \textbf{conform $\to$ explain $\to$ retry} contract. The symbolic layer emits hints the neural layer consumes; this is a concrete neurosymbolic contribution distinct from post-hoc error logging.
+
+\textbf{Self-conforming producers (shipped).} Every load-bearing producer calls \C{spec.conform} on its return value and raises on mismatch --- a defect fails at the producer's site, not later inside a consumer that read a bad wire form.
+
+\textbf{Forward-compatible spec-first commitment.} The two plan specs were registered in Phase 1 \emph{before} the Plan module existed --- a parse-don't-validate methodology that locks the data shape before code depends on it.
+
+\section{Implementation}\label{sec:impl}
+
+Persistence is implemented across seven modules. The reference implementation is in Python for integration parity with existing agent stacks. Phase 1 ships four modules (Fact, Effect, Spec, Replay); Phase 2.B ships Plan (minimal: parse / unparse / walk / spec-validation); Phase 2.D ships Txn (snapshot-isolated STM); Phase 2.C and 2.E remain (Plan execution; REPL).
+
+\subsection{Fact (Phase 1 --- shipped)}\label{sec:impl-fact}
+
+Fact is designed for an append-only Postgres datom log with five covering indexes (EAVT, AEVT, AVET, VAET) plus a bitemporal VT-E range index (Datomic Index Model;~\citealp{tonsky2023datomic}). Phase 1 ships a \C{Store} Protocol with two backends: \C{InMemoryStore} and \C{SQLiteStore} (against SQLite 3.37+; Postgres adapter and Zstd segment compression are Phase 2). Writes pass through a transactor computing auto-retractions for cardinality-one overwrites, preserving history via \C{invalidated-by} pointers. Projection is a \C{ProjectionAdapter} Protocol with a reference \C{DictProjection}; v0.4.0a1 adds \C{fork(branch\_id)} returning a fresh adapter the caller populates by \C{rebuild()} against a branched DB --- closing the projection-side counterpart to \C{branch()}. \C{DB.causal\_history(e, max\_depth=16)} ships as the substrate-level lineage query (single-level v0.4.0a1; multi-level deferred to v0.5).
+
+\textbf{Concurrent-writer safety.} \C{Store.allocate\_and\_append(datoms)} runs \C{MAX(tx)+1} and row inserts inside a single atomic transaction (SQLite \C{BEGIN IMMEDIATE}; in-memory \C{threading.Lock}), closing the TOCTOU window a split \C{next\_tx()}/\C{append} would leave open. Exercised by 16 threads $\times$ 50 transacts producing 800 unique tx ids with zero collisions. This race-free allocator is the concurrency invariant Proposition~\ref{prop:noop} implicitly depends on. Phase 1 tests check correctness, not latency; per-operation p95 targets and reference numbers across 1k/10k/100k corpora are [TBD] for the camera-ready.
+
+\subsection{Effect (Phase 1 --- shipped)}\label{sec:impl-effect}
+
+The Effect module implements a handler-stack runtime. Handlers are declared in EDN with clauses keyed by operation. The canonical stack for regulated domains is:
+
+The canonical regulated stack is \C{audit $\to$ policy $\to$ dry-run $\to$ cache $\to$ retry $\to$ rate-limit $\to$ raw}. Each handler is a pure function over operation, arguments, and continuation; \C{audit} emits a datom into the Fact module chaining via \C{prev-hash}. Policies are declarative EDN interpreted by a $\sim$200-line evaluator (\C{policy\_eval.py}) supporting principal attributes, op-matching, and conditional effects (\C{:op=}, \C{:op-in}, \C{:mode=}, \C{:and}, \C{:or}, \C{:not}, \C{:contains?}, \C{:matches?}). \C{Runtime.is\_well\_formed} and \C{Runtime.uncovered\_ops} are part of the public API.
+
+\subsection{Spec (Phase 1 --- shipped)}\label{sec:impl-spec}
+
+The Spec module provides Malli-equivalent functionality in Python: predicate-generator pairs, composable registry, conformance. Specs are EDN data; a generative harness produces examples for every registered spec, and failed conforms emit self-healing retry hints (\C{spec.explain\_for\_llm}). Ten canonical specs are registered across the namespaces \C{persistence.\{fact, effect, replay, plan\}} --- with the two plan specs ahead of the Plan module.
+
+\subsection{Replay (Phase 1 --- shipped)}\label{sec:impl-replay}
+
+The Replay module records trajectories as sequences of effect datoms and implements the replay operator from \sectionref{sec:replay}. A replay handler intercepts effects during branching, returning cached responses indexed by args-hash. DPO pairs are to be extracted when paired trajectories differ in outcome beyond a configurable threshold: prefix must match exactly; suffix divergence feeds the \C{chosen}/\C{rejected} dataset automatically. \C{gen\_regression\_test(trajectory)} emits a pytest-source snapshot-test string that asserts against the loaded trajectory (this is honest snapshot-replay rather than agent-re-run; full regression re-execution is Phase 2). The byte-identical NO-OP determinism invariant (\sectionref{sec:replay} corollary) is the headline test result for this module.
+
+\subsection{Plan (Phase 2.B --- shipped; Phase 2.C --- designed)}\label{sec:impl-plan}
+
+Plan v0.2.0a1 ships a minimal parse/walk/spec surface over the uniform \C{[tag \{attrs\} *children]} EDN AST across 16 node kinds (\C{:seq}, \C{:par}, \C{:choice}, \C{:case}, \C{:loop}, \C{:race}, \C{:let}, \C{:branch}, \C{:ref}, \C{:tool-call}, \C{:llm-call}, \C{:code}, \C{:checkpoint}, \C{:reflect}, \C{:verify}, \C{:call-skill}). A frozen-slots \C{Node} dataclass with content-addressed \C{id} (Proposition~\ref{prop:plan}); an \C{edn\_format}-backed parser with optional alias lowering (\C{:phase}/\C{:workstream} $\to$ \C{:seq}); a symmetric canonical unparser; a depth-first \C{walk(node, visitor)} trace primitive; \C{PlanSpecError} conformance against \C{:persistence.plan/node}. Attr keys are plain strings internally, re-prefixed at the spec/emit boundary; user-supplied top-level \C{:id} is stripped at parse. NaN/Inf in attrs are rejected at id computation (\C{allow\_nan=False}). 172 plan-module tests ship alongside the full-repo suite of \textbf{931 passed + 7 xfailed} (v0.5.1).
+
+v0.2.0a1$\to$v0.3.0a1 closed the reserved-attr-key round-trip falsifier and shipped a \C{Node.id} coercion registry for non-JSON-native types (\C{datetime}, \C{bytes}, \C{Decimal}, \C{UUID}, \C{frozenset}, \C{edn\_format.Symbol}), plus an alias escape hatch and a shared \C{SpecError} base. Phase 2.C (designed): a \C{fold} primitive for speculation/rollback/checkpointing; an effect-dispatched evaluator emitting OpenTelemetry spans keyed by \C{node.id}; the optimizer ladder (MIPROv2 on \C{:llm-call} via DSPy, UCT-MCTS on \C{:choice}/\C{:branch} with Pareto dominance, evolutionary topology search); the 4-gate skill-promotion pipeline.
+
+\subsection{Txn (Phase 2.D --- shipped, v0.5.1)}\label{sec:impl-txn}
+
+The Txn module implements software transactional memory over refs backed by the Fact store. Commits are snapshot-isolated against the read-set: a transaction body is a thunk that reads and writes refs; on commit, the runtime checks \C{any\_datoms\_since(t\_start)} against the recorded read-set inside an atomic \C{store.\_lock} window (the TOCTOU-free commit gate), retries on conflict via the \C{dosync} retry loop, and emits the write-set as a single tx-commit datom. Three surface forms ship: \C{with db.dosync()} (single-shot CM), \C{@db.dosync(max\_retries=N)} (retryable decorator), and \C{db.dosync()(callable)} (factory). Read-set + intent-log emit into the commit datom's provenance (v0.5.1 N1); per-ref attribute specs route through \C{Ref.spec\_attr} (N3); a Hypothesis property at \C{max\_examples=200} pins single-shot \C{assoc} byte-identity (N4); and \C{:effect/txn-commit} is promoted to a first-class \C{AuditEntry} field (N2), threading transactional commits through the audit chain. Commit semantics follow the Multiverse~\citep{bieniusa2026multiverse} hybrid of versioned and unversioned execution; multi-process coordination via Postgres SERIALIZABLE is deferred to v0.6.x. The integration with Fact means every transaction is itself a datom; the entire multi-agent coordination history is queryable.
+
+\subsection{REPL (Phase 2 --- designed)}\label{sec:impl-repl}
+
+The REPL module will expose a capability-gated WebSocket API for live inspection, editing, rewind, and branching of running agents. The UI is an extension of an in-house thread-routing Claude Code client. Rewind resumes an agent from an earlier $\tau$ using the already-shipped \C{as-of} view; branch runs a speculative path in a sandboxed handler stack with dry-run forced. Production invariant: a REPL session cannot write to the authoritative fact store without a signed operator approval.
+
+\subsection{System diagram}\label{sec:diagram}
+
+\begin{figure}[ht]
+\centering
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  node distance=4mm and 6mm,
+  every node/.style={font=\scriptsize, align=center},
+  box/.style={draw, rounded corners=1pt, minimum height=6mm, inner sep=1.5mm, align=center, fill=gray!5},
+  shipped/.style={box},
+  designed/.style={box, draw=gray, dashed, fill=white},
+  arr/.style={-{Latex[length=1.4mm]}, thick}
+]
+\node[box, minimum width=72mm] (agent) {AGENT (business logic, domain-specific)};
+\node[shipped, below=4mm of agent, minimum width=72mm] (effects) {\textbf{Effect}~$\bullet$~\textbf{Spec}~$\bullet$~\textbf{Txn}\\\scriptsize handler stack $\cdot$ boundary contracts $\cdot$ snapshot-isolated STM (v0.5.1)};
+\node[shipped, below=4mm of effects, minimum width=72mm] (fact) {\textbf{Fact} --- bitemporal datom log\\\scriptsize InMemory / SQLite $\cdot$ DictProjection $\cdot$ [P2: Postgres / Kuzu / mem0]};
+\node[shipped, below left=6mm and 0mm of fact, minimum width=34mm] (replay) {\textbf{Replay}\\\scriptsize trajectories $\cdot$ NO-OP byte-identity};
+\node[designed, below right=6mm and 0mm of fact, minimum width=34mm] (plan) {\textit{Plan} [P2.B shipped; P2.C]\\\scriptsize EDN AST $\cdot$ MIPROv2/MCTS $\cdot$ 4-gate};
+\node[designed, below=6mm of plan, minimum width=72mm, xshift=-19mm] (repl) {\textit{REPL} [P2] --- inspect / edit / rewind / branch (capability-gated)};
+
+\draw[arr] (agent) -- node[right]{\scriptsize\C{perform :op}} (effects);
+\draw[arr] (effects) -- node[right]{\scriptsize emit datoms} (fact);
+\draw[arr] (fact.south) ++(-1.5,0) -- (replay.north);
+\draw[arr] (fact.south) ++(1.5,0) -- (plan.north);
+\draw[arr, dashed] (replay.east) -- node[above]{\scriptsize evidence} (plan.west);
+\draw[arr] (repl.north) -- (plan.south);
+\end{tikzpicture}%
+}
+\caption{Persistence runtime stack. Solid: Phase 1 / 2.B / 2.D shipped (Fact, Effect, Spec, Replay, minimal Plan, Txn). Dashed: Phase 2.C / 2.E designed (Plan execution, REPL).}
+\label{fig:system-diagram}
+\end{figure}
+
+\section{Evaluation --- Reproduction Plan}\label{sec:eval}
+
+The abstract reports the Phase-1 + 2.B + 2.D + v0.4.0a1 + v0.5.1 shipped artifact with formal properties (Propositions~\ref{prop:wellformed},~\ref{prop:noop}) checked in the bundled test suite (931 passed + 7 xfailed). Numeric evaluations are a \textbf{Reproduction Plan}; measured numbers land in the camera-ready (2026-07-20) once the per-step-rng-recording replay extension and Phase 2.C / 2.E verticals are in place.
+
+\subsection{LongMemEval (camera-ready)}\label{sec:eval-longmem}
+
+LongMemEval measures long-horizon memory fidelity across agent conversations. We will compare Persistence's Fact module against published MemGPT, Mem0, Mem0g, Zep/Graphiti, and Memento numbers on the LongMemEval v1 corpus. The integration is direct because our \C{as\_of\_valid} is the same temporal filter Zep's bitemporal edges implement; the mem0 projection adapter (Phase 2) is the scale gating dependency. \emph{Hypothesis:} Persistence matches Zep accuracy (shared bitemporal model) at competitive latency; the contribution is not a raw memory win but composability with audit, replay, and plan storage.
+
+\subsection{CAMO-style counterfactual fidelity}\label{sec:eval-camo}
+
+The \emph{byte-identical NO-OP} property (Proposition~\ref{prop:noop}) is already testable on the Phase 1 artifact and cited as the structural baseline stronger than CAMO's statistical aligned-randomness. The \emph{distributional CAMO protocol} --- 1000 paired rollouts with single-variable interventions, measuring prefix alignment (Hamming distance from factual), intervention faithfulness, and suffix variance over 100 re-replays --- requires the per-step rng-state recording extension (Phase 2) and meaningful LLM budget. Camera-ready: 1000-trajectory table on a toy agent with honest per-step rng recording, plus a scaled-down 100-trajectory table on Claude Haiku if budget permits.
+
+\subsection{Regulator-replay benchmark --- 50 synthetic trajectories (novel)}\label{sec:eval-regulator}
+
+We propose \textbf{regulator-replay fidelity}: given an agent decision trajectory in a regulated domain, can a third-party auditor --- given only the datom log and the plan AST --- deterministically reconstruct the production decision? The metric is the fraction of decisions reconstructing byte-for-byte under \C{effect.canonical.canonical\_dumps}. We target a 50-trajectory synthetic project-finance corpus (WACC, gearing, concession-fee, sector classification) over an independent reconstruction script. Dataset generator, harness, and corpus released together under a permissive open-data license before camera-ready.  % RESTORE: 'CC-BY-4.0' Hypothesis H1: reconstruction fidelity $\geq$ 99\%; deviations diagnose catalog well-formedness gaps rather than substrate limits. Unlike pure-trace replay~\citep{anon2026camo,anon2026agenther}, regulator-replay requires the symbolic plan AST and the neural effect trace to recover byte-identically together --- a single fidelity metric on symbolic-neural coupling.
+
+\subsection{Case studies --- one production deployment, three anonymized vignettes}\label{sec:eval-cases}
+
+\textbf{Case B --- production algorithmic-trading deployment (reported with numbers).}  % RESTORE: 'Adaptive Trader v2 (named deployment ...)' A neurosymbolic trading agent where the \emph{playbook AST} (symbolic: entry conditions, regime classifiers, risk gates) composes with a \emph{neural decision layer} (Claude-as-sole-decision-maker) through an effect-captured non-determinism seam. Every decision writes a datom; every playbook is content-addressed; every counterfactual replay walks the symbolic tree while re-sampling the neural leaves. A representative excerpt:
+
+% RESTORE: verbatim block — case-name 'Adaptive Trader v2'; symbols 'BTCUSDT', 'ETHUSDT'
+\begin{verbatim}
+[:seq {:regime "trend-following"}
+  [:llm-call {:tool "market-classifier" :model "claude-opus"}
+    [:context {:window "4h" :symbols ["ASSET-1" "ASSET-2"]}]]
+  [:verify {:gate "risk-limit" :max-pos-pct 0.20}]
+  [:branch {:on :regime-classification}
+    [:case {:when "trend"}
+      [:llm-call {:tool "entry-sizer" :playbook "momentum-v7"}]]
+    [:case {:when "range"}
+      [:llm-call {:tool "entry-sizer" :playbook "mean-revert-v3"}]]]
+  [:effect {:audit true :kill-switch :position-limit}]]
+\end{verbatim}
+
+Every node is content-addressed by Proposition~\ref{prop:plan}; neural \C{:llm-call} leaves compose with symbolic control flow under the effect handler stack. A 13-day pre-Persistence dry-run baseline closed at profit factor 0.43 over 8 entries with negative PnL --- a clear NO-GO that motivated the migration.  % RESTORE: 'Adaptive Trader v2 ... Binance Futures ... $400 USDT ... -$26.87 PnL' Persistence-instrumented numbers (audit-chain entries per decision, regulator-replay fidelity over the 8 baseline trajectories, post-migration profit factor) are [TBD --- camera-ready]; DPO-pair extraction is staged behind the per-step-rng-recording extension (Phase 2). A companion paper will report the extended live-capital evaluation.  % RESTORE: 'Adaptive Trader v2'
+
+\textbf{Cases A, C, D (anonymized vignettes).} A project-finance assessment SaaS for development finance institutions where every scoring assumption (WACC, gearing, concession-fee) must be reconstructible under audit (Case A); a licensed insurance comparator under a regime requiring full quote-issuance traceability, where bitemporal client state resolves \emph{when did the agent learn of price change X, and what quotes did it issue in the interim?} compliance queries structurally impossible without both clocks (Case C); a multi-tenant hospitality operations agent on WhatsApp where regression trajectories auto-generated from production feedback replay through the new handler stack in CI (Case D). All three: Phase 1 shipped, Plan-driven pipeline Phase 2; numeric reporting deferred pending client co-authorship, artifacts available to NeSy chairs under NDA.
+
+\subsection{Reproduction posture}\label{sec:eval-posture}
+
+The Phase-1 + Phase-2.B + Phase-2.D + v0.5.1 artifact is bundled with the submission; \C{pytest -q} from a clean clone runs \textbf{931 passed / 7 xfailed} in under one minute. \sectionref{sec:eval-longmem}, \sectionref{sec:eval-camo}, \sectionref{sec:eval-regulator}, and Case~B numbers all ship in the camera-ready (2026-07-20). Licensing details deferred to camera-ready.  % RESTORE: 'Runtime: AGPL-3. Paper + benchmark harness + regulator-replay dataset: CC-BY-4.0.' At the 2026-06-09 abstract deadline, this section reports the formal properties (Propositions~\ref{prop:wellformed},~\ref{prop:noop}) as already-checked on the shipped artifact; all numeric tables carry [TBD] honestly.
+
+\section{Discussion}\label{sec:discussion}
+
+\subsection{Limitations}\label{sec:limitations}
+
+Persistence Phase 1 imposes costs we disclose frankly. \textbf{Write latency} rises by a constant per-transaction overhead from transactor validation and auto-retraction; exact figures on \C{InMemoryStore}/\C{SQLiteStore} are [TBD] for the camera-ready. \textbf{Storage} on an append-only log is approximately $4\times$ a mutable-memory baseline, partially offset by content-addressing and (Phase 2) Zstd segment compression. \textbf{\C{branch} complexity} is $O(|D|)$-copy (Proposition~\ref{prop:branch}); HAMT backing is the Phase 2 upgrade. \textbf{Replay determinism} is byte-identical only for toy agents (Proposition~\ref{prop:noop}); LLM-trajectory generalization requires per-step rng-state recording (Phase 2). \textbf{Audit universality} is a stack-configuration contract, not a substrate invariant (\sectionref{sec:audit}). \textbf{Policy-as-EDN} presumes EDN/Clojure literacy; JSON is a subset, so interop is straightforward. \textbf{Substrate lock-in:} adopting Persistence is opinionated, but the migration path is additive (\sectionref{sec:adoption}).
+
+\subsection{Privacy architecture}\label{sec:privacy}
+
+Persistence is designed for local-first deployment: the authoritative datom log runs on operator-controlled infrastructure; projections are regenerable. Phase 1 provides chain \emph{integrity} via SHA-256 per-datom hashes and \C{verify\_chain}; cryptographic \emph{authenticity} (per-transaction ed25519 signing via \C{sign\_transaction(tx\_id, tx\_hash, key)} verified inside \C{verify\_chain}) is Phase 2. A \C{:privacy :local} attribute on \C{:llm-call} nodes routes inference to local models (Qwen, DeepSeek, Llama), bypassing cloud vendors; \C{:visibility :private} on skills enforces never-to-cloud semantics; telemetry goes to an operator-controlled OpenTelemetry collector with no SaaS egress. With the audit handler wrapping the full catalog, regulated deployments are fully auditable inside the client's VPC with zero third-party data exposure.
+
+\subsection{Adoption path}\label{sec:adoption}
+
+Persistence is explicitly additive. An existing agent stack migrates in three phases: (1) stand up Fact alongside the existing memory system, wrapping writes with a datom-emitting interceptor (~2 days, non-breaking, zero reads change); (2) backfill datoms from existing mutable state with \C{tx-time = created\_at}, \C{valid-from = created\_at} (~3 days); (3) build \C{as\_of}, \C{history}, \C{branch} as thin functions over the log (~1 week). Effect, Spec, and Replay then migrate one at a time at the operator's pace; Plan, Txn, REPL land in Phase 2.
+
+\subsection{Relation to neurosymbolic AI}\label{sec:nesy-rel}
+
+Persistence is neurosymbolic in a specific technical sense: the substrate is symbolic, the agency is neural, and the two are coupled through three concrete contracts (not just storage and audit). \textbf{Primary contract --- spec-driven self-healing (\sectionref{sec:specs}, shipped):} when an LLM emits a malformed tool call, the symbolic spec layer fails the conform, computes a Fix-clause-annotated structured counterexample via \C{spec.explain\_for\_llm(err)}, and feeds it back as a prompt-ready correction the neural layer retries against. The symbolic constraint and the neural repair loop close around a structured handshake; business logic only ever sees conformed values. This is a concrete neuro-symbolic interaction, not post-hoc error logging. \textbf{Secondary contract --- plan-as-data with content identity (\sectionref{sec:plans}):} the symbolic skeleton (tag, attrs, children) is editable, optimizable, regulator-readable; the leaves (\C{:llm-call}, \C{:code}, \C{:reflect}) are neural; descendant propagation makes every structural edit produce a new ancestor-id path, the verifiable identity surface that Phase-2.C optimizers walk while leaves stay neural. \textbf{Tertiary contract --- replay determinism over neural leaves (\sectionref{sec:replay}):} the canonical-hash byte-identity NO-OP property holds because the \emph{symbolic} effect-datom sequence is replayable independently of how a \emph{neural} leaf was sampled, given recorded RNG. Phase 1 ships four symbolic substrate pieces: bitemporal datom queries with a Datalog-shaped surface (\C{as\_of}, \C{history}, \C{branch}, \C{validAsOf} as Python comprehensions over the log); EDN AST grammars for plans (\C{:persistence.plan/node} registered Phase 1, evaluator Phase 2.C); policy-as-data (\C{policy\_eval.py}); Malli-style specs with self-healing LLM hints (186 tests, \C{explain\_for\_llm}). Two items we do \emph{not} claim as shipped: a Datalog rule engine (the datom model is Datalog-ready, but Phase 1 is comprehensions, not a rule engine), and Z3-discharged \C{verify} leaves following Proof-of-Thought~\citep{fan2024proofofthought}. Both are adjacent Phase-2 work. The shipped substrate carries accountability, composition, formal guarantees, and the three coupling contracts above; the neural layer carries expressiveness. This distinguishes Persistence from pure-neural approaches (no guarantees) and pure-symbolic approaches (no expressiveness), and positions it as a candidate substrate for neurosymbolic systems beyond LLM agents.
+
+\section{Conclusion}\label{sec:conclusion}
+
+We presented Persistence, a cognitive-runtime substrate for accountable neurosymbolic agents. v0.1.0a1 + v0.4.0a1 + v0.5.1 (\textbf{931 tests green + 7 xfailed}) ships six modules --- Fact, Effect, Spec, Replay, Plan (minimal), Txn --- demonstrating six substrate-derived capabilities: queryable bitemporal history, counterfactual branching with parent-store isolation, composable policy-gated effects with machine-checkable well-formedness, boundary-checked contracts with LLM-self-healing hints, content-addressed homoiconic plan ASTs with byte-identical round-trip and descendant-propagation identity, and snapshot-isolated transactional shared state with intent-log read-set provenance threaded into the audit chain. Five formal propositions are stated and machine-checked on the shipped artifact; the headline two: well-formedness is decidable in linear time in stack size for fixed catalog by \C{Runtime.is\_well\_formed} and enforced at runtime via \C{Unhandled}; NO-OP replay produces a canonical-hash byte-identical to the factual trajectory's (toy agents with recorded per-step rng-consumption). Two further modules (Plan execution, REPL) are specified, partially registered in the spec registry ahead of the runtime, and scheduled for Phase 2.C / 2.E (2026-Q3). The core claim is that accountability, counterfactual replay, composable safety, compositional skill learning, multi-agent coordination, and live production steering derive from \emph{one} substrate rather than six --- and the six already shipped are properties of the log, checkable against the artifact, not features engineered per agent.
+
+\textbf{Future work.} (1) A persistent-trie \C{Store} making Proposition~\ref{prop:branch}'s $O(\log n)$ branch a shipped property; (2) per-step rng-state recording unblocking byte-identical LLM-trajectory replay; (3) ed25519 per-transaction signing; (4) a Datalog query surface; (5) Z3-discharged \C{verify} leaves following Proof-of-Thought~\citep{fan2024proofofthought}; (6) embodied-agent extensions with partial-observability effects; (7) distributed deployment preserving bitemporal semantics across regions.
+
+% RESTORE: 'We release the Phase-1 runtime under AGPL-3, with paper artifacts (benchmark harness, 50-trajectory synthetic regulator-replay dataset) under CC-BY-4.0.'
+
+% Acknowledgements — \acks{} is JMLR-native; auto-suppressed under [anon].
+\acks{% Set under [final] before camera-ready.
+}
+
+\bibliography{references}   % no \bibliographystyle — class controls it
+
+\end{document}
+```
+mcp: composio starting
+mcp: composio ready
+mcp startup: ready: composio
+
+
+
+
+thinking
+**Clarifying system diagram details**
+
+I see some issues in the system diagram regarding the 'plan' node, where it mentions a minimal Plan shipped but indicates designed. I’ll need to fix it with the shipped style and maybe a split indicator. In section 3, the invariants list mentions "REPL shipped," but invariant 6 refers to REPL Phase 2. There are inconsistencies about modules being shipped and implemented. I’m also noting the propositions and their alignment; however, there seems to be no specific proposition about Txn snapshot isolation despite earlier descriptions.
+thinking
+**Examining propositions and claims**
+
+I see a mismatch between the "five propositions" and the claims made in the document. The abstract mentions transactional snapshot isolation, but there's no explicit proposition for it, which is concerning. While it’s stated as a property, it hasn’t been proven. Perhaps I could suggest adding a Proposition 6, but they prefer to keep it at five. Instead, I could modify the language to refer to a "tested property." The reproduction plan shows improvement, though it still includes numeric cases that may require careful consideration.
+thinking
+**Addressing submission risks**
+
+I’m noticing that many venues might overlook .tex files, but some allow source as supplementary material. Double-blind reviews focus on PDFs and other materials, yet sharing the source can risk leaks. The text does contain RESTORE comments with sensitive information. Many conferences require LaTeX source, which poses a blocker for anonymous submissions. A simple fix could be to remove or replace RESTORE blocks with generic placeholders. Citations are critical too; if they’re placeholders or fictional, that could be problematic, but anonymized preprints might be acceptable.
+thinking
+**Evaluating source and citation issues**
+
+I think the markers in the source are acceptable, but having a bibliography entry like "Anonymous 2026" could seem strange. Some venues allow arXiv submissions, but internal keys like "anon2026" need to match real formatted references. If they’re just placeholders, that’s a problem. Real citations are critical. They have a page budget of 15 pages, but for workshops, it might be a soft limit of 10. If NeSy 2026 has a strict 10-page limit, that's definitely a blocker.
+codex
+1) **Score:** 6/10
+
+2) **Verdict (for 2026-06-16):** **ALMOST** (not ready yet)
+
+3) **Remaining critical weaknesses (ranked) + minimum fixes**
+1. **Anonymization is still actively leaking in-source.** `% RESTORE:` comments include deployment names, assets/symbols, SHAs, licenses, and dollar figures.  
+   - **Minimum fix:** strip *all* `% RESTORE:` blocks (or move them to a private, non-submitted file) before any anonymous submission bundle that includes `.tex`/sources.
+2. **Internal consistency is improved but still broken in a few load-bearing places.**  
+   - **Minimum fixes (concrete):**
+     - **§4.6 Transactions** ends with “Txn-module runtime is Phase 2.” That contradicts “Txn (Phase 2.D shipped, v0.5.1)” everywhere else. Update §4.6 to match shipped Txn (or explicitly mark the *formalization* as Phase-1-only and move Txn out of §4).
+     - **§4.3 Audit chain hash definition vs Prop~\ref{prop:tamper}:** text says `sha256(canonical(entry) || prev_hash)` but proposition defines `id = sha256(canonical(fields\{id\}))` (which may or may not include `prev_hash`). Make one unambiguous definition and use it everywhere.
+     - **Replay cache key inconsistency:** Prop~\ref{prop:noop} says cache key is `<step-index, op, args-hash>`, but §5.4 says “indexed by args-hash.” Align the implementation description with the proposition (or vice versa).
+     - **Fig 1 styling inconsistency:** Plan is drawn as “designed/dashed” even though caption says minimal Plan is shipped; either draw Plan as shipped with an internal “2.B shipped / 2.C designed” label, or split it into two nodes.
+3. **Evidence posture is still very thin for NeSy reviewers.** “931 tests green” + 5 propositions is real evidence, but many NeSy reviews will still penalize “no evaluation” even at workshop level.  
+   - **Minimum fix:** add *one* CPU-only table/figure that is not `[TBD]` (even tiny): e.g., branch cost vs |D|, replay overhead vs trajectory length, handler-stack overhead per op, Txn conflict retry rates on a synthetic contended workload, or “10-trajectory regulator-replay byte-identity” on the toy agent harness.
+4. **Page budget is a real acceptance risk.** If the venue’s soft target is ~10 pages and you’re at ~15, you risk desk rejection or reviewer irritation independent of technical merit.  
+   - **Minimum fix (if you can’t do a full trim cycle):** cut the heaviest/least-essential blocks now (verbatim Case B snippet, most of §7 eval plan prose, compress Related Work) to get closer to 10–11; otherwise expect this to be raised.
+
+4) **Special-focus areas**
+- **Internal consistency:** Much better, but the four contradictions above (Txn Phase-2 line, audit hash definition, replay cache key, Plan shown as designed in Fig 1) are still submission-grade issues because they touch the core “machine-checkable properties” story.
+- **Proposition completeness:** You now clearly have five propositions and they read scoped/honest overall (esp. Prop 2 and Prop 5 fixes). The remaining risk is not “missing propositions,” it’s **definitions drifting** (audit hash; replay cache key) which can undermine trust in *all* five.
+- **Reproduction-plan honesty:** Stronger and mostly honest: you explicitly stage camera-ready eval and label `[TBD]`. However, with *everything* numeric deferred, you’re betting reviewers accept “formal properties + tests” as sufficient evaluation. That’s plausible but risky for NeSy; one small non-TBD slice would materially de-risk.
+- **Anonymization:** **Blocker** if sources are submitted. Even if the PDF is clean, many workflows upload the `.tex` bundle; reviewers/ACs can see comments. Move de-anon scaffolding out of the submission artifact.
+- **NeSy framing:** The 3-contract framing is a real improvement; spec-driven self-healing is the best “actual coupling” story. Remaining weakness: there’s still no short, concrete vignette early (Intro/Thesis) that shows a single failure → spec explain → LLM retry → audited effect trace → replay; adding that would make the NeSy contribution feel less like “agent infra.”
+- **Citations:** Marking `[VERIFY]` helps process, but it doesn’t solve the core risk: if `anon2026camo/agenther/agentracer/aap` or `bieniusa2026multiverse` are placeholders or non-existent, that’s a serious credibility hit. Minimum bar: ensure every cited item is real and in the `.bib`, and that the rendered reference list doesn’t contain “Anonymous 2026” unless that’s genuinely the published author string.
+
+5) **Hidden risks (second-pass)**
+- **Reviewer trust fragility:** Any lingering definitional mismatch (audit hash, replay cache key, “Txn is Phase 2”) will make reviewers doubt the “machine-checked” narrative even if the code is correct.
+- **Over-claim tone in a few places:** Phrases like “stronger than CAMO” are now better-scoped to NO-OP/toy agents, but you still risk triggering “unfair comparison” pushback without at least one comparative or numeric sanity check.
+- **xfailed optics:** “931 passed + 7 xfailed” is fine, but reviewers may ask what they are; you currently gesture at them in Prop~\ref{prop:plan}. Consider a one-sentence explicit scope of what xfails correspond to (and why they don’t touch the shipped claims).
+
+**Are the deferred items blockers for 06-16?**
+- **RESTORE comments:** **Yes, blocker** (if any source bundle is submitted).
+- **Page budget:** **Probably a blocker** if the workshop is strict/soft-10 in practice; at minimum it’s a high rejection risk you should not ignore.
+- **CPU-only eval table:** **Soft blocker but strongly recommended**; without *any* non-TBD evaluation slice, you’re relying on unusually sympathetic reviewers.
+
+If you want Round 3 to land “READY,” the fastest path is: (1) strip RESTORE, (2) fix the four internal inconsistencies, (3) add one tiny CPU-only evaluation table/plot, (4) do a tactical cut to get nearer the page target.
+tokens used
+42,411

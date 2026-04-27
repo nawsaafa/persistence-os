@@ -1,0 +1,803 @@
+You are an adversarial senior NeurIPS/ICML/NeSy reviewer + senior staff engineer
+hybrid, doing an ARIS R1 (design fitness) review of a strategic roadmap and
+an immediate-next design doc.
+
+CONTEXT — what changed at the pivot 2026-04-27
+
+The user (Nawfal) has been building "Persistence OS" — a substrate for
+agent runtimes (bitemporal datom store, content-addressed plan ASTs, effect
+handler stack, replay byte-identity, spec parse-don't-validate, Module 5
+multi-agent transactions). Paper artifact `paper/tex/persistence-nesy-2026.tex`
+was driven through 6 rounds of codex-loop review and reached 8.3/10 READY for
+NeSy 2026 abstract (2026-06-09) + late paper (2026-06-16). Paper merged on
+main at `0343321`.
+
+Then user direct override: "My goal is to build the ferrari so that I can
+sell it. Time is of the essence. Research paper is an addon."
+
+This pivots from "paper-first → substrate-completion-after-camera-ready"
+to "substrate-first → paper-rewrites-against-substrate-complete." It also
+reverses two prior defer-decisions:
+  (1) Module 7 REPL was Phase 2.E deferred (UI cut from v1.0); now FULL scope
+      including capability-gated WS + browser console UI + 4 ops.
+  (2) Module 3.X MCTS was Phase 3 NeSy 2027 deferred (per
+      `docs/plans/2026-04-25-v0.4-substrate-primitives.md` Decision 3); now
+      IN scope as v0.6.5 extension.
+
+Velocity baseline (from vault emerge): user historically estimates correctly,
+Claude estimates 3-5x too long. v0.3 + v0.4 + v0.5-A + v0.5-B all shipped
+in three days April 25-27. Subagent-dispatch model from v0.5-txn Phase B
+(12 commits / 8 tasks / 2-stage review per task, caught 2 real production
+defects) is the execution model.
+
+Module 5 Txn ALREADY shipped (tagged v0.5.0a1 + v0.5.1, ARIS-passed mean
+9.26 / min 8.0, 931+7 tests) — landed on main in Stream 0 minutes ago.
+
+YOUR JOB
+
+Review the roadmap below adversarially. Do NOT take the velocity baseline
+on faith. Do NOT take the proposition claims on faith. Do NOT take the
+38d-critical-path math on faith. Look for:
+
+1. Hidden dependencies that break parallelism (C alongside A/B; E and F
+   alongside D — are these REALLY parallel or does one quietly block another?).
+2. Underestimated streams. Stream B 5 days for PUCT MCTS over a homoiconic
+   AST + LLM evaluator pluggable + skill-library 4-gate integration —
+   is that real?
+3. Underestimated Stream D. 7 days for capability-gated WS + browser console
+   UI + 4 ops + threat-model review + ARIS — is that real?
+4. Stream H paper rewrite in 12 days from substrate-complete state — is the
+   paper actually a "rewrite" or is it a delta-from-v0.9?
+5. Numeric eval streams (C/E/F) — are the contracts actually defensible?
+   E.g. CAMO byte-identity = 1.000 over 100 trajectories under NO-OP — is
+   the NO-OP setting honest, or is it a tautology that makes the eval vacuous?
+6. Stream A design — Module 3 execution layer extension with `_optimize.py`
+   + `_skill_library.py` + `_promotion.py` + MIPROv2 wrapper + 4-gate
+   promotion. Are the boundaries real? Is the G4 operator approval stub →
+   REPL handoff a real transition or a fudge?
+7. Prop 6 MCTS provenance reconstructibility — is it a tautology? "By
+   composition of Props 1, 2, 4 — Q.E.D." — is this a real proof outline
+   or a hand-wave?
+8. Risk table — is anything missing that would break the timeline?
+9. The user (Nawfal) is solo. He has multiple parallel streams in this plan.
+   Is the "parallel streams" claim realistic for a solo worker, or is it
+   sequential-with-context-switching dressed up?
+
+OUTPUT FORMAT
+
+- Score 1-10 for ROADMAP design fitness
+- Score 1-10 for STREAM A DESIGN fitness
+- Verdict: ready / almost / not ready (separately for each)
+- For each weakness: rank by severity (BLOCKER / MAJOR / MINOR / NIT),
+  cite specific lines, propose minimum fix
+- Specific question: is the 38-day-critical-path / 12-day-buffer math
+  actually defensible, or is the buffer fictional?
+- Specific question: should ANY stream be cut to make this real?
+- Specific question: should the v0.9 paper fallback path actually be the
+  primary path, with v1.0 substrate as the upgrade — i.e. is the user's
+  pivot wishful?
+
+Be brutally honest. The user wants a real check, not validation.
+
+==============================================================================
+ROADMAP DOC: docs/plans/2026-04-27-persistence-os-v1.0-roadmap.md
+==============================================================================
+
+# persistence-os v1.0 — Ferrari-first Roadmap
+
+**Date:** 2026-04-27
+**Status:** Locked. Strategic pivot from "paper-first" to "substrate-first." Two prior defer-decisions reversed. 8-stream roadmap. Hard deadline 2026-06-16.
+**Author:** Nawfal Saadi (with Claude Opus 4.7)
+**Audience:** persistence-os engineering agent (next session and downstream)
+**Predecessors:**
+- [`2026-04-25-v0.4-substrate-primitives.md`](2026-04-25-v0.4-substrate-primitives.md) — supersedes Decision 3 (`:branch MCTS → Phase 3 NeSy 2027`). See ADR-2.
+- [`2026-04-23-persistence-plan-v0.1-design.md`](2026-04-23-persistence-plan-v0.1-design.md) — context for Plan execution scope.
+- Paper `paper/v0.9-aris-refresh` merged at `0343321` (L2R3 8.3/10 READY) — stays on `main` as fallback.
+
+**Target tag:** `v1.0.0` (Stream G, 2026-05-28)
+**Target paper:** v1.0 rewrite for NeSy 2026 abstract submission 2026-06-09 / late paper 2026-06-16
+**NeSy 2026 relevance:** load-bearing — substrate-complete is the entire paper claim.
+
+---
+
+## 1. One-paragraph summary
+
+Persistence OS v1.0 ships all 7 modules + MCTS + 3 numeric evaluations into a tagged substrate before the NeSy 2026 paper deadline. Module 5 Txn ships first via merge train (already built, tagged `v0.5.0a1`+`v0.5.1` on `feat/v0.5-txn`+`feat/v0.5.1-rev-o-narrowings`). Module 3 Plan execution ships next as `v0.6.0a1` with skill-library + 4-gate promotion + MIPROv2 wrapper, then Module 3.X MCTS ships as `v0.6.5` extension. Module 7 REPL ships as `v0.7.0a1` with capability-gated WebSocket + browser console UI + 4 ops. Three numeric evals (LongMemEval, CAMO distributional, regulator-replay 50-trajectory) land in parallel streams. v1.0.0 tag closes cumulative ARIS R4 across all 7 modules. Paper v1.0 rewrites against the substrate-complete state. **38 days critical path / 12 days buffer.** Velocity baseline (vault emerge 2026-04-27): Claude estimates 3-5x too long; v0.3+v0.4+v0.5-A+v0.5-B all shipped April 25-27 (3 days). 5 weeks is comfortable.
+
+---
+
+## 2. Strategic frame
+
+User direct override 2026-04-27: *"My goal is to build the ferrari so that I can sell it. Time is of the essence. Research paper is an addon."*
+
+### What changed at the pivot
+
+Prior plan: paper v0.9 ships first → camera-ready window 2026-07-08 → 2026-07-20 → substrate `:code` execution layer + MCTS in v1.0 post-camera-ready → Phase 3 NeSy 2027 features later.
+
+New plan: substrate v1.0.0 ships first → paper v1.0 rewrites against substrate-complete state → camera-ready window becomes paper-only polish, not substrate completion.
+
+### What does **not** change
+
+- Bitemporal datom store, append-only log, content-addressed plan ASTs, replay byte-identity, effect handler stack, spec parse-don't-validate boundaries — all preserved bit-for-bit. v1.0.0 is additive over v0.5.1.
+- `PLAN_CANONICAL_VERSION = 1` stays at 1 across all v1.0 work.
+- Audit-chain hash continuity preserved across v0.5.1 → v0.6.0a1 → v0.6.5 → v0.7.0a1 → v1.0.0.
+- TDD discipline, no live LLM in tests, canonical JSON for cache + audit keys, mask `:audit` inside policy body.
+- Paper v0.9 (`0343321` L2R3 8.3/10 READY) stays merged on `main` as fallback. v1.0 paper is a separate Stream H artifact.
+
+### Velocity baseline
+
+Per `vault emerge` 2026-04-27:
+
+- v0.3 ship: Claude estimated 3-5h, actual ~1h.
+- April 25-27 window shipped v0.3, v0.4, v0.5-A, v0.5-B — four versions in three days.
+- v0.5-txn Phase B is the execution proof: 12 commits / 8 tasks / 2-stage review per task / single sprint, all subagent-driven, caught two real production defects (TOCTOU race in `_run` commit gate + `@db.dosync(max_retries=0)` decorator-factory broken). **This is the v1.0 execution model.**
+- 5 weeks (2026-04-27 → 2026-06-16) is comfortable, not tight.
+
+---
+
+## 3. ADRs — two strategic decisions LOCKED today
+
+### ADR-1: REPL scope = FULL (was Phase 2.E deferred)
+
+**Status:** ACCEPTED 2026-04-27. Overrides prior "REPL is headless-only / UI deferred to Phase 2.E."
+
+**Context.** Module 7 REPL was scoped headless-only because "live steering" was treated as a paper claim that did not require a UI to defend formally. Foundation primitives needed for live steering — `asOf`, `branch`, `fork`, handler-stack push/pop — all already shipped in v0.1.0a1 → v0.5.1.
+
+**Decision.** Module 7 REPL ships as a capability-gated WebSocket + browser console UI + 4 operations `{inspect, edit, rewind, branch}` over the existing primitives. UI ships with the substrate, not in a separate phase.
+
+**Why.** The "live steering" claim is load-bearing for the substrate's positioning against MemGPT/Mem0/Zep — those systems are read-only stores; persistence-os is the only one with a write-time + steering-time + replay-time triad. Without a UI the proposition reads aspirational. With a UI the demo is the proof.
+
+**Consequences.**
+- Stream D adds ~7 days to critical path (was 0 in old plan).
+- Module 7 paper section in v1.0 rewrite has a runnable artifact, not a forward-looking promise.
+- Capability gating is mandatory: WebSocket must require an operator-issued capability token, no anonymous access. (Threat model: no production-data leakage via REPL.)
+- `inspect`, `edit`, `rewind`, `branch` map 1:1 to existing primitives (`asOf`, `db.transact`, `db.branch(t)`, `db.fork()`) — no new substrate API.
+
+### ADR-2: MCTS scope = IN (was Phase 3 NeSy 2027)
+
+**Status:** ACCEPTED 2026-04-27. **Overrides** [`2026-04-25-v0.4-substrate-primitives.md`](2026-04-25-v0.4-substrate-primitives.md) §3 Decision 3 (`:branch MCTS → Phase 3 NeSy 2027`).
+
+**Context.** v0.4.0a1 design deferred MCTS to Phase 3 because the timeline assumed paper-first → substrate-completion-after-camera-ready. The deferral was timing-driven, not technical.
+
+**Decision.** Module 3.X MCTS plan-search extension ships as `v0.6.5` on top of `v0.6.0a1` execution layer:
+- PUCT-style tree search over the homoiconic Plan AST (already content-addressed via `_dispatch.py`).
+- LLM evaluator pluggable via the same `:llm/handler-id` registry (no `:provider` field — model-agnostic).
+- Skill-library 4-gate promotion gates which leaf actions enter the search prior.
+- Plan AST nodes stay content-addressed; MCTS state is provenance-recorded (every rollout's `parent_provenance_hash` chain is reconstructible).
+
+**Why.** Ferrari-first reframing makes the original Phase 3 timing irrelevant. Tree search over content-addressed plan ASTs is the substrate's strongest compositional-planning claim — without it, the paper is "we have a plan AST" without "we can search over it." Module 3 execution-without-MCTS leaves the paper one proposition short.
+
+**Consequences.**
+- Stream B adds 5 days to critical path.
+- New paper Proposition 6 — "MCTS over the homoiconic Plan AST inherits content-addressed identity (every rollout's parent provenance hash is reconstructible from the audit log)." Defended in §5.X of v1.0 paper.
+- Skill-library 4-gate is now a precondition, not a Phase 4 polish item.
+- `:branch` semantics in Plan AST gain a third executor (the existing `:branch eval` for control flow + the new `:branch mcts` for plan-search). Dispatcher key is the only delta in `_dispatch.py`.
+
+### What both ADRs preserve
+
+- Zero canonical-form change to existing modules. `PLAN_CANONICAL_VERSION = 1`.
+- Zero proposition-1-through-5 wording change. Props 1-5 stay byte-identical to v0.7 paper.
+- Zero `_interpret.py` shim removal — backwards-compat shim from v0.4 stays through v1.0.0.
+- Audit-chain hash continuity preserved.
+
+---
+
+## 4. Eight-stream roadmap
+
+| Stream | Window | Days | Output | Tag |
+|---|---|---|---|---|
+| **0 — merge train** | 04-27 → 04-28 | 2 | merge `feat/v0.5-txn` (`9377b86`, tag `v0.5.0a1`) + `feat/v0.5.1-rev-o-narrowings` (`ffd51cf`, tag `v0.5.1`) into `main` | (existing tags) |
+| **A — Module 3 Plan execution** | 04-28 → 05-04 | 7 | execution layer (`_optimize.py`, `_skill_library.py`, `_promotion.py`); MIPROv2 wrapper; 4-gate skill promotion; ARIS R1+R2+R3 | `v0.6.0a1` |
+| **B — Module 3.X MCTS** | 05-04 → 05-09 | 5 | PUCT tree search over Plan AST; LLM evaluator over `:llm/handler-id` registry; provenance-recorded rollouts; ARIS R1+R2+R3 | `v0.6.5` |
+| **C — LongMemEval (parallel)** | 05-04 → 05-09 | 5 | numeric table Fact vs Mem0 / Zep / Memento / MemGPT (recall@k, latency, audit-cost) | (no tag, lands as `bench/longmem_eval/`) |
+| **D — Module 7 REPL** | 05-09 → 05-16 | 7 | capability-gated WebSocket + browser console UI + 4 ops {inspect, edit, rewind, branch}; ARIS R1+R2+R3 | `v0.7.0a1` |
+| **E — CAMO distributional (parallel)** | 05-09 → 05-14 | 5 | paired-rollout fidelity numeric table (CAMO replays vs production trajectories) | (lands as `bench/camo/`) |
+| **F — regulator-replay 50-trajectory (parallel)** | 05-14 → 05-21 | 7 | 50-trajectory CC-BY-4.0 corpus + byte-identity numeric table | (extends `bench/regulator_replay/`, releases dataset under CC-BY-4.0) |
+| **G — substrate v1.0.0 tag** | 05-21 → 05-28 | 7 | cumulative ARIS R4 across all 7 modules + integration sweep + CHANGELOG aggregation | `v1.0.0` |
+| **H — paper v1.0 rewrite + ARIS** | 05-28 → 06-09 | 12 | drop all `[TBD]`; numeric tables filled; 7-module shipped story; ~6-7 propositions; abstract submission 2026-06-09 | (paper artifact) |
+| **Buffer + late paper** | 06-09 → 06-16 | 7 | final polish; late paper submission 2026-06-16 | — |
+
+**Critical path: 38 days. Buffer: 12 days. Total window: 2026-04-27 → 2026-06-16 = 50 days.**
+
+### Dependency graph
+
+```
+Stream 0 ─┬─→ Stream A ─→ Stream B ─┐
+          │                          │
+          │                          ├─→ Stream G (v1.0.0) ─→ Stream H (paper v1.0)
+          │                          │
+          ├─→ Stream C (parallel)   │
+          │                          │
+          └─→ Stream D ──────────────┤
+                                     │
+              Stream E (parallel) ───┤
+                                     │
+              Stream F (parallel) ───┘
+```
+
+Streams C, E, F run in parallel with their owning critical-path streams (C alongside A/B, E and F alongside D). Stream G is the only stream that requires all prior streams complete.
+
+### Per-stream gate criteria
+
+- **Stream 0:** suite green post-merge (912+7 tests minimum, target 931+7 if v0.5.1 lands together). No new code, just merge + verify.
+- **Stream A:** `v0.6.0a1` tagged when ARIS R1+R2+R3 passes mean ≥ 8.5 / min ≥ 7.0; suite ≥ 1000 passed.
+- **Stream B:** `v0.6.5` tagged when MCTS rollout produces audit-log-reconstructible plan from a held-out test prompt + ARIS pass.
+- **Stream C:** numeric table populated for ≥ 4 baselines × ≥ 3 metrics; document in `paper/tex/persistence-nesy-2026.tex` Stream H slot.
+- **Stream D:** `v0.7.0a1` tagged when 4-op browser smoke runs end-to-end against a live `feat/v0.4-substrate-primitives` substrate + capability-gating threat-model review pass.
+- **Stream E:** CAMO paired-rollout fidelity ≥ 0.95 byte-identity over a fixed 100-trajectory baseline.
+- **Stream F:** 50 trajectories generated + byte-identity verified + CC-BY-4.0 LICENSE + manifest hashes pinned in repo.
+- **Stream G:** `v1.0.0` tagged when cumulative ARIS R4 across all 7 modules passes mean ≥ 9.0 / min ≥ 8.0; CHANGELOG-v1.0.0 aggregates per-module CHANGELOGs.
+- **Stream H:** paper v1.0 ARIS round passes mean ≥ 8.0; abstract submitted 2026-06-09; full paper submitted 2026-06-16 (or earlier).
+
+---
+
+## 5. Per-stream proposition surface
+
+### Module 3 Plan execution (Stream A) — proposition surface
+
+The execution layer extends Module 3 from "parse, walk, dispatch, coerce" to "parse, walk, dispatch, coerce, **execute, optimize, promote**." Three new internal files:
+
+- **`src/persistence/plan/_optimize.py`** — MIPROv2 wrapper that takes a Plan AST + a training set + a metric, returns an optimized Plan AST. Output AST carries provenance `{:plan/optimizer "miprov2-v1", :plan/optimizer-call <canonical-hash>, :plan/baseline <baseline-hash>}`. Pluggable evaluator key (`:llm/handler-id`) so MIPROv2 is not coupled to a specific model.
+- **`src/persistence/plan/_skill_library.py`** — content-addressed skill registry: each skill is a tagged Plan AST with a 4-gate promotion record. Lookup by skill-id is `O(1)` via the existing fact store; provenance walks back through the gate audit.
+- **`src/persistence/plan/_promotion.py`** — 4-gate promotion criterion. A skill enters the library when it passes all four gates: (G1) replay byte-identity over ≥ N held-out trajectories; (G2) effect-handler audit-chain unbroken; (G3) MIPROv2 score improvement vs baseline ≥ ε; (G4) operator approval via REPL `inspect` (Stream D dependency for soft-promote; hard-promote in Stream A uses a stub approval that Stream D replaces). Gate-record is a Plan AST node with provenance.
+
+**Paper claim (lifts from Prop 4 wording in v0.7 paper):** "Skill promotion is a 4-gate audit-recorded transition; a promoted skill's provenance walks back to the originating trajectory, the optimizer call, and the gate decisions in deterministic order."
+
+### Module 3.X MCTS (Stream B) — proposition surface
+
+PUCT-style tree search over the homoiconic Plan AST. State is content-addressed (each node is a hash of the partial plan). Action space is "next leaf to expand" (which Plan AST `:branch` to instantiate). Evaluator is an LLM call routed through the `:llm/handler-id` registry — same handler used for production execution.
+
+**New paper Proposition 6 (load-bearing for v1.0 paper §5.X):**
+
+> *Proposition 6 (MCTS provenance reconstructibility).* For any MCTS rollout `R` produced by `Module 3.X` over a content-addressed Plan AST, every node visited carries a `parent_provenance_hash` such that the full search trajectory can be reconstructed from the audit log alone, without re-executing the LLM evaluator.
+
+Defense outline:
+- Plan AST nodes are content-addressed (Module 3 invariant).
+- Each MCTS expansion is a Plan AST mutation (Module 3 dispatcher).
+- Each expansion is recorded as a `:plan/mcts-expand` fact (Module 1 invariant).
+- Each evaluator call is recorded as a `:llm/canonical-call` audit entry (Module 2 invariant).
+- Therefore the rollout = audit log slice between two timestamps. Q.E.D. by composition of Props 1, 2, 4.
+
+### Module 7 REPL (Stream D) — proposition surface
+
+REPL = capability-gated WebSocket + browser console UI + 4 ops:
+
+- **inspect** — `db.entity(eid).asOf(t)` snapshot view, plus walk `causal_history(eid, depth)`. Reads the audit log. No write surface.
+- **edit** — `db.transact([...])` with operator capability token. Writes a `:operator/edit` fact, audit-chained.
+- **rewind** — `db.branch(t)` opens a parallel timeline at `t`. Read-only by default; promote-to-main via `db.fork()` requires capability-elevated token.
+- **branch** — `db.fork()` from current head with operator-tagged provenance. Used for "what-if" exploration.
+
+UI ships at `src/persistence/repl/ui/` (browser console, no SPA framework — vanilla TS or htmx-style). WebSocket protocol at `src/persistence/repl/_ws.py`. Capability gating at `src/persistence/repl/_caps.py` (token issued by operator, expires by audit policy).
+
+**Paper claim:** "Live steering is a capability-gated audit-chained operation; every operator action is a `:operator/<op>` fact in the audit log, indistinguishable in form from a programmatic write." (Proposition 4 already covers this; Module 7 makes it concrete.)
+
+---
+
+## 6. Numeric eval contracts
+
+### Stream C — LongMemEval
+
+**Goal.** Populate paper §6 Comparison table: persistence-os Fact module vs Mem0 / Zep / Memento / MemGPT.
+
+**Contract.**
+- Harness at `bench/longmem_eval/harness.py`.
+- 4 baselines × ≥ 3 metrics × ≥ 100 query trajectories.
+- Metrics: recall@k (k ∈ {1, 5, 10}), p50/p95 latency, audit-reconstructibility rate (per-query, fraction reconstructible from log alone — persistence-os should hit 1.0 by Prop 1; baselines vary).
+- Output: `bench/longmem_eval/reports/2026-05-XX-summary.json` + Markdown table for paper §6.
+- Reproducibility: harness deterministic given seed + corpus hash; paper cites `git rev-parse HEAD` of the bench commit.
+
+**Acceptance:** persistence-os audit-reconstructibility = 1.000 (must hold by Prop 1); recall@5 within ±0.05 of best non-persistence baseline (parity, not dominance — the substrate's claim is reconstructibility, not retrieval quality).
+
+### Stream E — CAMO distributional
+
+**Goal.** Defend Module 4 Replay's "stronger than CAMO under NO-OP" claim with paired-rollout numbers (currently rescoped to NO-OP setting in paper abstract + §2.4).
+
+**Contract.**
+- Harness at `bench/camo/harness.py`.
+- Paired-rollout: same prompt → CAMO trajectory + persistence-os trajectory under identical seed + handler stack.
+- 100-trajectory baseline. NO-OP setting: handler outputs are byte-identical, so any divergence is a substrate bug.
+- Metric: byte-identity rate (must be 1.000 by Prop 4); fall-through metric: per-step p50/p95 latency overhead vs CAMO.
+- Output: `bench/camo/reports/2026-05-XX-paired.json`.
+
+**Acceptance:** byte-identity = 1.000 over all 100 trajectories under NO-OP. Latency overhead within 2x of CAMO baseline (substrate carries audit-chain cost; CAMO does not).
+
+### Stream F — regulator-replay 50-trajectory CC-BY-4.0 corpus
+
+**Goal.** Ship the 50-trajectory corpus referenced in paper §6.5 as a public CC-BY-4.0 release. Currently scaffolded (`bench/regulator_replay/{generator.py, harness.py, README.md}` already on `main`) with zero trajectories and zero reports.
+
+**Contract.**
+- 50 trajectories generated by `bench/regulator_replay/generator.py` against synthetic regulator-policy fixtures.
+- Each trajectory: `{trajectory_id, prompt, plan_ast_hash, audit_chain_root_hash, replay_byte_identity_proof}`.
+- Manifest hashes pinned in `bench/regulator_replay/MANIFEST.json` (one SHA-256 per trajectory + corpus-root hash).
+- LICENSE: CC-BY-4.0 in `bench/regulator_replay/LICENSE` (referenced in paper §6.3).
+- Replay verifier: `bench/regulator_replay/harness.py` runs each trajectory, checks byte-identity, fails on any divergence. Fail = blocker for Stream G.
+
+**Acceptance:** 50/50 trajectories byte-identity verified. CC-BY-4.0 LICENSE present. MANIFEST hashes match repo state.
+
+---
+
+## 7. Paper v1.0 anchor points (Stream H)
+
+Stream H rewrites `paper/tex/persistence-nesy-2026.tex` against substrate-complete state. **Not** a delta from v0.9 — a fresh draft from the v1.0.0 substrate, then ARIS R3+R4.
+
+**Anchor points:**
+
+| Section | v0.9 state | v1.0 target |
+|---|---|---|
+| Abstract | 6/7 modules, `[TBD]` evals | 7/7 modules + 3 numeric tables |
+| §1 Introduction | "we will ship" framing | "we shipped" framing |
+| §2 Related Work | 19 citations | 19 citations + LongMemEval comparison sentence |
+| §3 Thesis | 5 propositions named | 6 propositions named (adds Prop 6 MCTS) |
+| §4 Formalization | Prop 1-5 unchanged | Prop 1-5 unchanged + Prop 6 added |
+| §5 Implementation | 6 module subsections + REPL forward-look | 7 module subsections + MCTS subsection |
+| §5.7 REPL | "will expose" forward-look | shipped, screenshots, capability-token threat model |
+| §5.X MCTS | absent | NEW: PUCT over Plan AST, LLM evaluator pluggability, Prop 6 defense |
+| §6 Comparison | `[TBD camera-ready]` | LongMemEval table + CAMO paired-rollout table + regulator-replay 50/50 |
+| §6.5 case studies | 4 anonymized + `[TBD]` numbers | de-anonymize via `review-stage/anon_restore.txt` (12 RESTORE cookies) |
+| §7 Discussion | privacy paragraph dropped | substrate-complete posture; future work = Phase 2.E privacy + multi-process Postgres |
+| §8 Conclusion | compressed | substrate-complete framing; references `v1.0.0` git tag |
+
+**Process.**
+1. Branch from `main` post-Stream-G as `paper/v1.0-substrate-complete`.
+2. Rewrite per anchor table (subagent-dispatched, 1 section per task, 2-stage review).
+3. ARIS R3 (paper fitness) — codex `gpt-5.2` reviewer, target ≥ 8.0 / ready.
+4. ARIS R4 (cumulative across substrate + paper) — only when v1.0.0 + paper land together.
+5. Submit abstract 2026-06-09 / late paper 2026-06-16.
+
+**Fallback.** If v1.0 paper rewrite slips past 2026-06-09, paper/v0.9-aris-refresh (`0343321` 8.3/10 READY) submits as-is. Substrate ship is independent of paper success.
+
+---
+
+## 8. Execution model
+
+**Subagent dispatching** per task — pattern proven by v0.5-txn Phase B (12 commits / 8 tasks B1-B8 / fresh implementer + spec-reviewer + code-quality-reviewer per task). For each stream:
+
+1. Task decomposition: each stream broken into ≤ 8 numbered tasks with clear interfaces.
+2. Per-task subagent: fresh agent reads design doc + immediate prior-task commit, implements, runs tests.
+3. Two-stage review per task: spec-reviewer (does this match the design?) + code-quality-reviewer (is this code reviewable for ARIS R2?).
+4. ARIS R1+R2+R3 at stream end: parallel reviewers + W1 fix-pass + tag.
+5. Per-stream serena memory + auto-memory MEMORY.md entry on ship.
+
+**ARIS gates** between modules — R1 design fitness, R2 code quality, R3 paper fitness, R4 cumulative when shipping `v1.0.0`. R3 skip warrant matches v0.4.0a1 + v0.5.1 precedent (no proposition change → R3 skipped per-stream; R3 runs once at Stream H).
+
+**Parallel streams** where dependencies allow (C alongside A/B; E alongside D; F alongside D).
+
+**Discipline** (preserved from v0.5.1):
+- TDD strict.
+- No `time.time()` / `datetime.now()` / `random.random()` in handler code — route through `:clock/now` / `:random` effects.
+- Canonical JSON for all cache + audit keys.
+- Mask `:audit` inside policy body.
+- No live LLM calls in tests except integration suites.
+- Local-only tags per repo convention; only push tags when explicitly asked.
+
+---
+
+## 9. Risk + mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| Stream A skill-library 4-gate harder than estimated | Medium | +3 days | Defer G4 operator-approval (REPL dependency) — use stub in Stream A, replace in Stream D. Already factored into ADR-1 dependency graph. |
+| Stream B MCTS LLM evaluator hits rate-limit during ARIS | Medium | +2 days | Use mock evaluator in tests; only real LLM in Stream H paper-table generation. |
+| Stream D capability-gating threat-model review surfaces hard issue | Low | +5 days | Ship behind `feature_repl=false` flag with default off in Stream D; remove flag at Stream G. |
+| Stream F regulator-replay byte-identity divergence | Low | +7 days (substrate bug fix) | Run F generator against current `main` HEAD before Stream G; surface bugs early. |
+| Buffer eaten by Stream H paper rewrite | Medium | abstract slip | Paper v0.9 fallback at `0343321` is unconditional submission. v1.0 paper is upgrade, not blocker. |
+| Camera-ready window 2026-07-08 → 2026-07-20 not used | Low | n/a | Pure polish window. v1.0 substrate is shipped before camera-ready opens. |
+
+---
+
+## 10. Persistence + recovery
+
+### State locations (canonical at pivot lock 2026-04-27)
+
+- **Serena project memories:**
+  - `persistence-os-v1.0-ferrari-first-pivot-locked` — recovery doc (read first on next session).
+  - `module_status_v1.0_pivot_20260427` — technical companion (per-module shipped/unshipped state).
+- **Conductor track:** `~/Projects/ai-box/conductor/tracks/persistence-os-foundation_20260420/STATUS.md` (pivot section appended).
+- **Auto-memory:** `~/.claude-nawfal-2/projects/-Users-nawfalsaadi-Projects/memory/MEMORY.md` index entry + `project_persistence_v1.0_ferrari_first_pivot.md` topic file.
+- **Vault:** tx=2107 strategic-pivot, tx=2105 MCTS-reversal ADR, tx=2106 REPL-full-scope ADR (`nawfal-dev/L1`).
+- **This roadmap:** `docs/plans/2026-04-27-persistence-os-v1.0-roadmap.md`.
+
+### Per-stream persistence on ship
+
+Each stream's tag commit ships with:
+1. CHANGELOG entry per module (`CHANGELOG-<module>.md` aggregated into `CHANGELOG.md` at v1.0.0).
+2. Serena memory `<stream>-shipped` (e.g., `v0.6.0a1-shipped-aris-passed`).
+3. Auto-memory MEMORY.md entry under "Persistence OS — Cognitive Runtime" topic.
+4. Vault memory tx (`nawfal-dev/L1`).
+5. Conductor STATUS append at `persistence-os-foundation_20260420`.
+
+---
+
+## 11. Hard cutoffs
+
+- **2026-05-15:** Stream C kickoff cutoff — paper v1.0 rewrite (Stream H) cannot start before substrate is at least at `v0.7.0a1` + numeric tables filled. Slip past 2026-05-15 = pivot to paper v0.9 fallback path.
+- **2026-05-28:** `v1.0.0` tag cutoff — Stream G must close.
+- **2026-06-09:** NeSy 2026 abstract submission deadline (firm; paper site cutoff).
+- **2026-06-16:** NeSy 2026 late full-paper submission deadline (firm; paper site cutoff).
+- **2026-07-20:** Camera-ready deadline (only relevant if accepted; substrate-complete by then).
+
+**Buffer math:** 38d critical path + 12d buffer = 50d. Window 04-27 → 06-16 = 50d. Zero slack — but Stream H has paper v0.9 fallback, so Stream H slip is non-fatal.
+
+---
+
+## 12. What ships next (immediately after this doc lands)
+
+1. **Stream 0** — merge train: `feat/v0.5-txn` (`9377b86`, tag `v0.5.0a1`) → main, then `feat/v0.5.1-rev-o-narrowings` (`ffd51cf`, tag `v0.5.1`) → main. Verify suite ≥ 931 passed + 7 xfailed post-merge. ~2 hours.
+2. **Stream A design doc** — `docs/plans/2026-04-28-v0.6.0a1-plan-execution-design.md` covering `_optimize.py` + `_skill_library.py` + `_promotion.py` + 4-gate criterion + MIPROv2 wrapper + ARIS gate criteria. ~1 day.
+3. **Stream A implementation** — subagent-dispatched per the v0.5-txn Phase B model. 6-7 days.
+
+This doc is the load-bearing artifact for the next 50 days. Update in place if streams reorder; otherwise hold the structure.
+
+==============================================================================
+STREAM A DESIGN: docs/plans/2026-04-28-v0.6.0a1-plan-execution-design.md
+==============================================================================
+
+# persistence-os v0.6.0a1 — Module 3 Plan Execution (Stream A) Design
+
+**Date:** 2026-04-28
+**Status:** Design draft. Open for ARIS R1 review before implementation.
+**Author:** Nawfal Saadi (with Claude Opus 4.7)
+**Audience:** persistence-os engineering agent (Stream A subagent dispatch)
+**Predecessor:** [`2026-04-23-persistence-plan-v0.1-design.md`](2026-04-23-persistence-plan-v0.1-design.md), [`2026-04-25-v0.4-substrate-primitives.md`](2026-04-25-v0.4-substrate-primitives.md)
+**Roadmap:** [`2026-04-27-persistence-os-v1.0-roadmap.md`](2026-04-27-persistence-os-v1.0-roadmap.md) — Stream A
+**Phase 1 dependency:** v0.5.1 merged on `main` at `306af43` (931 + 7)
+**Target tag:** `v0.6.0a1`
+**Target branch:** `feat/v0.6-plan-execution`
+**NeSy 2026 relevance:** load-bearing — Module 3 execution is the Plan AST's runnable layer; Prop 4 paper claim depends on it.
+
+---
+
+## 1. One-paragraph summary
+
+Module 3 today ships the parse / walk / dispatch / coerce layers for content-addressed plan ASTs (931 LOC, 8 internal files including the v0.4 `_dispatch.py` seam). Stream A extends Module 3 with the **execution layer**: three new internal files (`_optimize.py`, `_skill_library.py`, `_promotion.py`) that turn a parsed Plan AST into a callable, optimizable, promotable artifact. MIPROv2 is the optimizer of record (DSPy-compatible wrapper); the skill library is content-addressed via the existing fact store; 4-gate promotion is the audit-recorded transition that lets a candidate plan enter the library. The design ships under the `Dispatcher` seam — execution handlers register against the same `:llm-call` / `:tool-call` / `:transact` / `:branch` tags. **Each new file is the smallest committable extension to the existing dispatcher, not a parallel system.**
+
+---
+
+## 2. Why this design
+
+The roadmap pivot ([§3 Strategic frame](2026-04-27-persistence-os-v1.0-roadmap.md)) made Module 3 execution load-bearing for the v1.0 paper claim. Today the substrate parses plans, walks them, dispatches per-tag handlers, and coerces non-EDN attrs through the coercion registry. What it does **not** do:
+
+1. **Execute a plan.** `Dispatcher.dispatch(node, env)` calls registered handlers in walk order but has no notion of "did the plan succeed?" or "what's the result?" — handler results are returned as a flat list. The execution layer needs a result envelope with success/failure semantics + provenance trail.
+2. **Optimize a plan.** No prompt or hyperparameter tuning. MIPROv2 is the canonical answer (DSPy ecosystem), but no wrapper exists.
+3. **Promote a skill.** No registry of "validated plans I trust." Without this, the skill library claim is vapor.
+
+Plus one structural lesson from the v0.4 substrate-primitives redesign: **find the existing affordance before adding.** The dispatcher seam is already there. Don't add a parallel execution surface — extend the dispatcher.
+
+### What this design does NOT do
+
+- **No new dispatcher.** `Dispatcher` from v0.4 stays. Execution registers handlers against the same registry.
+- **No replacement for `_walk.py`.** Walk order semantics (parent-before-children DFS) preserved. Execution layer is `walk → dispatch → result-collect`, not a re-implementation.
+- **No coupling to a specific LLM.** `:llm-call` handler routes through `:llm/handler-id` registry; MIPROv2 calls the same registry. Model-pluggable.
+- **No new canonical version.** `PLAN_CANONICAL_VERSION = 1` stays. Execution-layer additions are observational (provenance), not structural.
+- **No MCTS.** Stream B ships MCTS as `v0.6.5` extension on top of this layer. This is the substrate; MCTS is the search.
+
+---
+
+## 3. Scope
+
+Three new internal files, one new public surface, zero canonical-form change.
+
+| # | File | Public API | Status |
+|---|---|---|---|
+| 1 | `src/persistence/plan/_optimize.py` | `optimize(plan, *, training_set, metric, optimizer="miprov2-v1") -> OptimizedPlan` | NEW |
+| 2 | `src/persistence/plan/_skill_library.py` | `SkillLibrary(db).register(plan, gate_record)`, `SkillLibrary(db).lookup(skill_id)` | NEW |
+| 3 | `src/persistence/plan/_promotion.py` | `promote(candidate_plan, db, *, gates) -> PromotionRecord` (4-gate criterion) | NEW |
+| 4 | `src/persistence/plan/__init__.py` | re-exports + `__all__` extension | EXTENDED |
+
+No new sub-package. No new `:` namespaces beyond `:plan/optimizer`, `:plan/skill-id`, `:plan/promotion-gate` provenance keys. No new tag in Plan AST (MCTS adds `:branch mcts` in Stream B; Stream A adds **none**).
+
+### Out of scope (explicit deferrals)
+
+- **MCTS.** Stream B (`v0.6.5`).
+- **Operator approval gate (G4) hard-promotion.** Stream A ships G4 as a **stub** that logs the gate as `:plan/promotion-gate-g4 :stub` and accepts. Stream D REPL replaces the stub with the `inspect` op's actual approval flow. Documented in [§7](#7-four-gate-promotion-criterion).
+- **DSPy module wrappers beyond MIPROv2.** Boostrap, BootstrapFewShotWithRandomSearch, etc. all out of scope; only MIPROv2 ships in v0.6.0a1. Add as needed in v0.6.x point releases.
+- **Multi-process skill library backed by Postgres.** Stays in-memory + fact-store-backed in v0.6.0a1. Phase 3 NeSy 2027 promotion.
+- **Skill-versioning conflict resolution.** v0.6.0a1 uses content-addressed skill ids — re-registration of an existing skill is a no-op (same hash). Skill renaming / aliasing deferred.
+
+---
+
+## 4. Execution result envelope
+
+### Problem
+
+`Dispatcher.dispatch(node, env)` returns `list[Any]` — a flat list of handler returns in walk order. No success/failure semantics. No provenance. No way to say "the plan failed at node X."
+
+### Decision
+
+Wrap dispatch in an `execute()` function that returns `ExecutionResult`:
+
+```python
+@dataclass(frozen=True)
+class ExecutionResult:
+    plan_id: str                       # content-addressed Plan AST root id
+    status: Literal["ok", "failed"]
+    leaf_results: list[LeafResult]     # one per dispatched node, walk order
+    provenance: Provenance             # typed Provenance from v0.4
+    failure: FailureInfo | None        # populated iff status == "failed"
+
+@dataclass(frozen=True)
+class LeafResult:
+    node_id: str                       # content-addressed leaf id
+    tag: str                           # ":llm-call" etc.
+    handler_id: str                    # registered handler key
+    result: Any                        # handler return
+    duration_ms: int
+
+@dataclass(frozen=True)
+class FailureInfo:
+    failed_node_id: str
+    failed_tag: str
+    error_class: str
+    error_repr: str                    # __repr__, NOT str() — error_class + reproduction-ready
+```
+
+### Where it lives
+
+`src/persistence/plan/_optimize.py` — same file as the optimizer because the optimizer's metric needs `ExecutionResult` to compute. Co-locating saves a file and matches the v0.4 "smallest committable extension" rule.
+
+Re-exported from `src/persistence/plan/__init__.py`:
+
+```python
+__all__ = [..., "ExecutionResult", "LeafResult", "FailureInfo", "execute", "optimize"]
+```
+
+### Walk-order failure semantics
+
+If any handler raises, dispatch halts at that node, the partial leaf-results list is preserved, `status="failed"`, `failure` populated. Successor nodes are NOT executed (early-stop semantics). Audit log records the partial walk via Module 2's effect runtime — same as today's behavior.
+
+---
+
+## 5. The `optimize()` API
+
+```python
+def optimize(
+    plan: Node,
+    *,
+    training_set: list[dict],          # list of {"inputs": ..., "expected": ...}
+    metric: Callable[[ExecutionResult, dict], float],
+    optimizer: str = "miprov2-v1",     # ":plan/optimizer" provenance key
+    miprov2_kwargs: dict | None = None,
+) -> OptimizedPlan: ...
+```
+
+```python
+@dataclass(frozen=True)
+class OptimizedPlan:
+    plan: Node                         # the optimized AST
+    baseline_plan_id: str              # content-addressed root of input plan
+    optimizer: str                     # ":plan/optimizer" value
+    optimizer_call_hash: str           # canonical hash of (optimizer, training_set hash, metric source hash)
+    score: float                       # final metric value on training_set
+    score_baseline: float              # metric on input plan, same training_set
+```
+
+### MIPROv2 integration boundary
+
+`_optimize.py` imports `dspy` at function-call time (NOT module level — keeps Module 3 importable without DSPy installed):
+
+```python
+def optimize(...):
+    try:
+        import dspy
+        from dspy.teleprompt import MIPROv2
+    except ImportError as e:
+        raise OptimizerNotAvailable(
+            f"MIPROv2 optimizer requires `dspy`. Install: pip install dspy-ai. ({e})"
+        )
+    ...
+```
+
+DSPy version pin: `dspy-ai >= 2.5.0` (MIPROv2 stable since 2.5). Add as **optional** dependency in `pyproject.toml`:
+
+```toml
+[project.optional-dependencies]
+optimize = ["dspy-ai >= 2.5.0"]
+```
+
+CI suite: install `persistence[optimize]` for the `_optimize.py` test path; baseline suite stays clean of DSPy.
+
+### What MIPROv2 sees
+
+A Plan AST converted to a DSPy `Module` via a thin adapter (`_optimize.py:_plan_to_dspy_module`). The adapter:
+
+1. Walks the AST.
+2. For each `:llm-call` node, instantiates a DSPy `Predict` or `ChainOfThought` signature based on the node's attrs.
+3. Returns a callable DSPy module whose `forward(**inputs)` runs the dispatcher and returns the final leaf result.
+
+MIPROv2 then optimizes prompts + few-shot examples against the training_set + metric. After convergence, the adapter inverse-converts the optimized DSPy module back to a Plan AST (provenance-tagged with optimizer call hash).
+
+### Provenance pinning
+
+Every node in the optimized AST carries:
+
+```edn
+{:plan/optimizer "miprov2-v1"
+ :plan/optimizer-call <canonical-hash>
+ :plan/baseline <input-plan-id>
+ :plan/training-set-hash <canonical-hash>}
+```
+
+The canonical hash of `(optimizer, training_set_canonical, metric_source_canonical)` makes optimizer calls deterministic-by-record — same inputs → same hash → same provenance. Reproducibility hook for paper §6 numeric tables.
+
+---
+
+## 6. The skill library
+
+```python
+class SkillLibrary:
+    """Content-addressed skill registry backed by the fact store.
+    Skills are tagged Plan ASTs whose `skill_id` is derived from the
+    AST's content hash + a stable namespace prefix.
+    """
+    def __init__(self, db: DB) -> None: ...
+
+    def register(
+        self,
+        plan: Node,
+        promotion_record: PromotionRecord,
+    ) -> str:
+        """Register `plan` as a skill. Returns the skill_id.
+        Re-registration of an existing skill_id is a no-op (same content hash).
+        """
+
+    def lookup(self, skill_id: str) -> tuple[Node, PromotionRecord] | None:
+        """O(1) skill_id → (Plan AST, promotion record) lookup.
+        Returns None if not registered.
+        """
+
+    def list_skills(self, *, tag_filter: str | None = None) -> list[str]:
+        """Enumerate all registered skill_ids; optional filter by Plan AST root tag."""
+```
+
+### Storage shape
+
+Each skill registration writes 1 datom to the fact store:
+
+```edn
+[skill_id :skill/plan plan_id]                    ; e.g. :skill/plan :plan/<sha256>
+[skill_id :skill/promotion-record promotion_id]   ; reverse-lookup to gates
+[skill_id :skill/registered-at <:clock/now>]
+```
+
+`skill_id` namespace: `":skill/" + first_16_hex_chars(plan_id)` — collision-resistant short id.
+
+### Why fact-store-backed
+
+- Free for free: existing bitemporal indices, audit chain, replay byte-identity.
+- Skill registration shows up in audit log as 3 facts → reconstruct skill library from any historical timestamp via `db.asOf(t)`.
+- No new storage backend, no new schema migration.
+
+---
+
+## 7. Four-gate promotion criterion
+
+A candidate Plan AST `P` enters the skill library iff all four gates pass:
+
+### G1 — Replay byte-identity over held-out trajectories
+
+`P` runs against ≥ N held-out test trajectories (default N=10, configurable). For each trajectory, the resulting `ExecutionResult.leaf_results` must replay byte-identical to the original under Module 4's replay engine. **One divergent byte = G1 fail.**
+
+Defends Prop 4 (Replay byte-identity): a promoted skill is replay-stable, period.
+
+### G2 — Effect-handler audit-chain unbroken
+
+After running `P`, the audit log must verify end-to-end via `audit.verify_chain()`. **Any chain break = G2 fail.** This catches handlers that emit unrecorded effects (the canonical replay-poisoning bug).
+
+Defends Prop 2 (effect handler audit invariant).
+
+### G3 — MIPROv2 score improvement vs baseline ≥ ε
+
+`P_optimized.score - P_optimized.score_baseline >= ε` where ε defaults to `0.05` (configurable). Skills that don't improve don't promote.
+
+Defends the substrate's claim that optimization is meaningful — promoted skills are demonstrably better than the baseline plan they came from.
+
+### G4 — Operator approval (REPL `inspect` flow)
+
+**Stream A ships G4 as a stub:** `gate_g4_stub(record) -> {"approved": True, "approver": ":stub", "rationale": "Stream A stub — Stream D replaces"}`. The promotion record carries the stub marker explicitly so Stream D's REPL `inspect` op can re-run G4 against any stub-promoted skill.
+
+**Stream D replaces the stub** with: an operator opens REPL `inspect skill_id`, reviews G1/G2/G3 records + the Plan AST diff vs baseline, and either approves (writes a `:plan/promotion-gate-g4 :approved` fact) or rejects (writes `:rejected` + reason). Capability-gated: only operator tokens can write G4 facts.
+
+Defends the substrate's claim that promoted skills are operator-vetted, not just metric-vetted.
+
+### Promotion record shape
+
+```python
+@dataclass(frozen=True)
+class PromotionRecord:
+    candidate_plan_id: str
+    g1_replay_byte_identity: bool
+    g1_held_out_count: int
+    g2_audit_chain_verified: bool
+    g3_score_delta: float
+    g3_score_threshold: float
+    g4_approver: str                   # ":stub" in Stream A, operator token id in Stream D
+    g4_approved: bool
+    g4_rationale: str
+    promoted_at: int                   # :clock/now millis
+    promotion_id: str                  # canonical hash of all gates + candidate_plan_id
+```
+
+Re-derivable from audit log alone (Module 1 + Module 2 invariants).
+
+---
+
+## 8. Subagent task decomposition
+
+Stream A subdivides into 7 tasks (mirrors v0.5-txn Phase B model: 8 tasks B1-B8 / 12 commits / 2-stage review per task).
+
+| Task | Description | Files | Tests |
+|---|---|---|---|
+| **A1** | `ExecutionResult` + `LeafResult` + `FailureInfo` dataclasses + `execute(plan, dispatcher) → ExecutionResult` wrapper | `_optimize.py` (skeleton) | `test_execute_result_envelope.py` |
+| **A2** | `_plan_to_dspy_module` adapter (forward direction) + tests with mocked DSPy | `_optimize.py` | `test_plan_to_dspy_adapter.py` |
+| **A3** | `optimize()` end-to-end + inverse adapter (DSPy → Plan AST) + provenance pinning | `_optimize.py` | `test_optimize_e2e.py` (mocked LLM) |
+| **A4** | `SkillLibrary.register/lookup/list_skills` over fact store | `_skill_library.py` | `test_skill_library.py` |
+| **A5** | G1 + G2 gates (`gate_g1_replay_byte_identity`, `gate_g2_audit_chain`) | `_promotion.py` | `test_promotion_g1_g2.py` |
+| **A6** | G3 score-delta gate + G4 stub + `promote()` orchestration | `_promotion.py` | `test_promotion_g3_g4_stub.py` |
+| **A7** | Integration test: parse → optimize → promote → register → lookup, full audit chain reconstruction | `tests/integration/test_v0_6_plan_execution.py` | (new) |
+
+Per-task discipline:
+- Fresh subagent per task (reads this design doc + immediate prior commit).
+- Two-stage review per task: spec-reviewer + code-quality-reviewer.
+- TDD strict.
+- Pyright + ruff clean before commit.
+
+---
+
+## 9. ARIS gate
+
+| Round | Scope | Pass criterion |
+|---|---|---|
+| **R1 design** | This document | Mean ≥ 8.5 / min ≥ 7.0 across 3-4 reviewers |
+| **R2 code quality** | Branch tip after A1-A7 | Mean ≥ 8.5 / min ≥ 7.0; W1 fix-pass for MAJORs |
+| **R3 paper fitness** | New paper §5.X paragraph in `paper/tex/persistence-nesy-2026.tex` | Skipped per v0.4 / v0.5.1 precedent — Stream H runs paper-side R3 once at v1.0 |
+
+Tag `v0.6.0a1` after R1+R2 pass + W1 fix-pass.
+
+### Pass-then-skip warrant for R3
+
+R3 is skipped at stream level for the same reason as v0.4.0a1 + v0.5.1: this stream does not change the wording of any v0.7-paper proposition. New paper-side material (Prop 6 MCTS, Module 7 REPL, numeric tables) lands in Stream H and gets one paper-side ARIS R3 covering all v1.0 deltas at once.
+
+---
+
+## 10. Risk + mitigation
+
+| Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|
+| MIPROv2 inverse-adapter loses provenance round-trip | Medium | +1 day | Property test: optimize → unparse → parse → assert structural identity (modulo provenance keys). |
+| DSPy version churn breaks adapter | Medium | +2 days | Pin `dspy-ai >= 2.5.0, < 3.0.0` exact range. Re-pin per release. |
+| G1 held-out trajectories unavailable in test env (need real LLM rollouts) | Low | +1 day | Module 4 ships replay; G1 uses recorded trajectories from `bench/` corpus, not live LLM calls. |
+| Skill library content-addressed id collisions | Very low | n/a | SHA-256, 16 hex chars = 64 bits = collision at ~2^32 skills. Roadmap caps in low thousands. |
+| G4 stub leaks into v1.0 | Medium | paper-claim weakening | Stream G integration test asserts "no stub markers in skill library" before v1.0.0 tag. |
+
+---
+
+## 11. Hard cutoffs
+
+- **2026-05-04:** Stream A close. `v0.6.0a1` tagged. Stream B (MCTS) starts immediately.
+- **2026-05-15:** Hard cutoff for Stream A overrun → must finish before paper rewrite (Stream H) starts thinking about §5.X.
+- **2026-05-28:** v1.0.0 tag (Stream G) — Stream A's surface must be R4-clean by then.
+
+---
+
+## 12. What ships next
+
+After this design lands and ARIS R1 passes:
+
+1. **Branch.** `git checkout -b feat/v0.6-plan-execution` from `main` HEAD `306af43`.
+2. **Impl plan.** `docs/plans/2026-04-28-v0.6.0a1-plan-execution-impl.md` — task-by-task interface specs (Tasks A1-A7).
+3. **Subagent dispatch.** Per-task agent + 2-stage review per task, following the v0.5-txn Phase B execution model.
+4. **R1+R2.** Once branch tip is stable, parallel ARIS reviewers + W1 fix-pass.
+5. **Tag.** `v0.6.0a1` local-only per repo convention.
+6. **Memory.** Serena `v0.6.0a1-plan-execution-shipped` + auto-memory MEMORY.md entry + vault tx + conductor STATUS append.
+
+This design is ready for ARIS R1 once the user confirms the open questions in §13 (if any). Proceed to impl plan on confirmation.
+
+---
+
+## 13. Open questions
+
+1. **MIPROv2 metric signature.** Current design: `Callable[[ExecutionResult, dict], float]` where dict is the training-example. Alternate: take a training-set-wide aggregate. Pinning to per-example for v0.6.0a1 (DSPy convention); if real benchmarks need aggregate, defer to v0.6.1.
+2. **G3 epsilon default.** Picked `0.05` arbitrarily. Real-world MIPROv2 deltas at convergence often >> 0.05; could go to `0.02` for tighter gating. **Recommend keeping at 0.05** — over-permissive is fine for v0.6.0a1; tighten in v0.6.x once we have eval data.
+3. **Skill library namespace.** Picked `":skill/"` prefix + 16 hex chars. Alternate: human-readable slugs from optimizer training-set name. **Recommend content-addressed only for v0.6.0a1**; human-readable names are an aliasing concern, deferable.
+
+These are not blockers. The design ships under the listed pins; revisions land in v0.6.x point releases.

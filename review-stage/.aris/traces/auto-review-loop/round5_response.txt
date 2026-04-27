@@ -1,0 +1,21 @@
+Score: **7.8/10** → **almost** (content still ~8+, but current draft is *submission-noncompliant* on page budget).
+
+## Critical remaining weaknesses (ordered)
+1. **Hard page-limit violation (desk-reject risk).** NeSy 2026 CFP says full papers “**should not exceed 10 pages, excluding references**” (`https://2026.nesyconf.org/call-for-papers/`). Your current build has body text on the same page where references start (i.e., body > 10pp). In my local build, `References` appears on PDF page 11, *after* Conclusion text (`paper/tex/persistence-nesy-2026.pdf`).  
+2. **Trim introduced at least one shaky logical dependency.** Fact claims “the concurrency invariant Proposition~\ref{prop:noop} implicitly depends on” transaction-id uniqueness (`paper/tex/persistence-nesy-2026.tex:177`). Prop `noop` is framed around replay determinism + cache keys + recorded RNG consumption; tying it to tx-id allocation reads incorrect/overclaimed.  
+3. **“Designed” REPL subsection is needlessly vendor-specific.** “Claude Code client” in REPL design (`paper/tex/persistence-nesy-2026.tex:201`) is a reviewer distraction and avoidable branding.  
+4. **Readability pressure is now the main scientific risk.** The aggressive densification made the abstract and several paragraphs “high entropy”; reviewers may miss the NeSy-throughline despite it being present.
+
+## Minimum fixes to reach “ready”
+1. **Make body ≤ 10 pages exactly.** Highest-yield cut (also least risky to propositions): trim *end-of-paper* content so `References` starts on a fresh page with no body spill. Concretely:
+   - Collapse or delete **Case studies** paragraph (`paper/tex/persistence-nesy-2026.tex:262`) → replace with 1–2 sentences, or move entirely to camera-ready.
+   - Shorten **Conclusion** by ~3–5 lines (`paper/tex/persistence-nesy-2026.tex:274`) by removing repeated version/test-count boilerplate (it already appears in Abstract/Intro/Eval posture).
+   These two usually recover ~0.4–0.6 pages and are the most reliable way to pull the spill off page 11.
+2. **Fix the Prop~`noop` dependency sentence** in Fact (`paper/tex/persistence-nesy-2026.tex:177`): either delete the proposition reference or restate it as a Fact-store concurrency invariant (without claiming it is required for replay determinism).
+3. **De-brand REPL line** (`paper/tex/persistence-nesy-2026.tex:201`): replace with “thread-routing IDE client” / “operator console” wording.
+
+## Direct answers to your questions
+1. **Did the cut damage propositions/citations/NeSy framing?** Propositions still read intact (prop:plan xfail-scope sentence is there; prop:noop step-index cache key is there). NeSy framing survives, but it’s now easier for a reviewer to skim past it because density is very high.
+2. **Is 10.4pp body “fine in practice”?** For NeSy 2026, I would treat it as **not fine**: CFP language is explicit (“should not exceed 10 pages”), and you’re visibly over (body text on the references page). Don’t gamble—cut ~0.4pp.
+3. **Verdict for the 2026-06-09 abstract deadline:** **ready** (deadline is for abstract submission). Verdict for the **2026-06-16 late full-paper submission:** **almost** until the page-limit fix is done.
+4. **Anything we lost that we shouldn’t have?** Dropping the adoption path is fine. The main “over-cut” risk is not missing technical detail, it’s reviewer comprehension: the abstract + evaluation posture are doing too much at once. The only concrete “shouldn’t have” I see is the new Prop~`noop` dependency phrasing in Fact and the vendor mention in REPL.

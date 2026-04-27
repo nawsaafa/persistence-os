@@ -1,0 +1,58 @@
+# Anonymization restore manifest — private file, NOT included in submission bundle
+# Camera-ready restoration window: 2026-07-08 → 2026-07-20
+# Source: paper/tex/persistence-nesy-2026.tex (post-Round-2 / Round-3 prep)
+#
+# Format: LINE_ANCHOR | KIND | RESTORE_PAYLOAD | NOTES
+# (Line numbers reference the anonymized snapshot at this round; re-locate by section anchor before restore.)
+
+[1] §4.4 prop:plan (CHANGELOG ref) ----------------------------------------
+KIND:   commit-sha citation
+ORIG_LOC: end of Proposition prop:plan body, after "...argued in the corresponding ship commit's CHANGELOG."
+PAYLOAD: "argued in the ship commit \C{190668a}'s CHANGELOG."
+APPLY:  insert SHA `190668a` inline in place of "the corresponding ship commit's"
+
+[2] §6.3 regulator-replay licensing -------------------------------------
+KIND:   open-data license
+ORIG_LOC: §6.3 first paragraph, "...released together under a permissive open-data license before camera-ready."
+PAYLOAD: "released together under CC-BY-4.0 before camera-ready."
+APPLY:  replace "a permissive open-data license" with "CC-BY-4.0"
+
+[3] §6.4 Case B title ------------------------------------------------
+KIND:   deployment-name
+ORIG_LOC: §6.4 lead bold "Case B --- production algorithmic-trading deployment (reported with numbers)."
+PAYLOAD: "Case B --- Adaptive Trader v2 (production algorithmic-trading deployment, reported with numbers)."
+APPLY:  insert "Adaptive Trader v2" as the named deployment
+
+[4] §6.4 Case B verbatim block -----------------------------------------
+KIND:   asset-symbols
+ORIG_LOC: \begin{verbatim}...\end{verbatim} block following Case B title
+PAYLOAD: replace placeholders inside the verbatim listing
+  "ASSET-1" → "BTCUSDT"
+  "ASSET-2" → "ETHUSDT"
+APPLY:  literal substitution inside verbatim
+
+[5] §6.4 Case B baseline numbers ---------------------------------------
+KIND:   venue + capital + PnL
+ORIG_LOC: §6.4 second paragraph "A 13-day pre-Persistence dry-run baseline closed at profit factor 0.43..."
+PAYLOAD: extend the existing sentence with: "...on Adaptive Trader v2 over Binance Futures with a $400 USDT notional, closing at -$26.87 PnL ---"
+APPLY:  fold venue + capital + final PnL back in alongside profit-factor 0.43
+
+[6] §6.4 Case B companion-paper attribution ---------------------------
+KIND:   deployment-name
+ORIG_LOC: §6.4 second paragraph closing "A companion paper will report the extended live-capital evaluation."
+PAYLOAD: "A companion paper on Adaptive Trader v2 will report the extended live-capital evaluation."
+APPLY:  attribute the companion paper to Adaptive Trader v2
+
+[7] §6.5 Reproduction posture licensing ------------------------------
+KIND:   licensing line
+ORIG_LOC: §6.5 trailing "Licensing details deferred to camera-ready."
+PAYLOAD: "Runtime: AGPL-3.0. Paper + benchmark harness + regulator-replay dataset: CC-BY-4.0."
+APPLY:  replace the deferral sentence with the full licensing line
+
+[8] §8 Conclusion trailing release block (currently dropped) ----------
+KIND:   release line
+ORIG_LOC: end of §8 Conclusion (was an in-source comment line, now stripped from the .tex)
+PAYLOAD: "We release the Phase-1 runtime under AGPL-3.0, with paper artifacts (benchmark harness, 50-trajectory synthetic regulator-replay dataset) under CC-BY-4.0."
+APPLY:  add as a final paragraph in §8 before \acks{}
+
+# End of manifest — 8 entries, all surface-level redactions; no proposition wording or numerical claim is anonymized.

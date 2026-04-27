@@ -159,22 +159,19 @@ def execute(
         nonlocal failure
         if failure is not None:
             return
-        # Inline private-attribute peek into the dispatcher rather than
-        # going through the public ``dispatch()`` method. Reasons:
-        #   1. We need per-node visibility (which node failed, partial
-        #      leaf_results) — `dispatch()` returns a flat list and
-        #      swallows the node↔result mapping.
-        #   2. We need to `try/except` the handler call so we can record
-        #      a `FailureInfo` instead of letting the exception escape.
-        # `Dispatcher._handlers` is a documented internal attribute of
-        # the same package; any future refactor that renames it will
-        # surface here as a single tight coupling.
-        handler = dispatcher._handlers.get(node.tag)
+        # We invoke the handler ourselves rather than going through
+        # `dispatch()`: per-node failure capture (which node failed +
+        # partial leaf_results) requires wrapping the call in a
+        # `try/except`, which `dispatch()` does not do.
+        handler = dispatcher.get_handler(node.tag)
         if handler is None:
             return
         try:
             result = handler(node, env)
-        except BaseException as exc:  # noqa: BLE001 — capture-then-record contract
+        except Exception as exc:  # noqa: BLE001 — capture-then-record contract
+            # Narrow to `Exception` (NOT `BaseException`): KeyboardInterrupt,
+            # SystemExit, GeneratorExit are control-flow signals, not
+            # handler failures. They propagate out of execute() unchanged.
             failure = FailureInfo(
                 failed_node_id=node.id,
                 failed_tag=node.tag,

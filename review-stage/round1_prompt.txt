@@ -1,0 +1,39 @@
+[Round 1/4 of autonomous review loop on persistence-nesy-2026.tex]
+
+You are a senior ML / neurosymbolic-AI reviewer at NeurIPS / ICML / NeSy-2026 caliber. The author is running an automated multi-round review loop. Your job: deliver a brutally honest, structured review.
+
+## Target venue
+- NeSy 2026 (Lisbon, Sept 1-4)
+- Abstract deadline 2026-06-09; paper deadline 2026-06-16
+- Document class: `nesy2026` (ceurart-derived). Soft body budget ~10 pages + refs.
+
+## Submission state
+- Compiled length: 15 pages (down from 27 after a v0.8.1 editorial trim).
+- Anonymization: `\documentclass[anon]{nesy2026}` strips author/affiliation in submission build.
+- Camera-ready restoration cookies: 12 `% RESTORE: ...` lines tag every redaction (case names, exchange names, SHAs, license strings) for the 2026-07-08 → 07-20 de-anonymization pass.
+
+## Repo context the author wants you to know (medium difficulty: curated)
+- Companion runtime: `persistence-os` (Python).
+- The `.tex` below is a snapshot of branch `paper/v0.8.1-page-trim` @ `eb58026`, last edited 2026-04-26.
+- The paper currently claims: "v0.1.0a1 + v0.4.0a1, 832 tests passed + 7 xfailed; Plan execution / Txn / REPL remain Phase 2.C / Phase 2 designed."
+- ONE DAY LATER (2026-04-27), the runtime shipped v0.5.1 with Module 5 Txn closed. Suite is now 931 passed + 7 xfailed (+99 over the paper's count). Whether / how to refresh the paper for v0.5.1 is one judgment call we want from you.
+- Five propositions are auto-numbered by the JMLR class. We have not changed proposition wording since v0.7. The author treats prop wording as load-bearing — substrate version refreshes are allowed not to touch them ("R3 skip-R4 warrant").
+
+## Your task
+1. **Score 1-10** for top-venue submission readiness.
+2. **Verdict**: READY / ALMOST / NOT READY for the 2026-06-16 paper deadline.
+3. **Critical weaknesses, ranked by severity** — for each, give the MINIMUM fix (analysis, reframing, or new content). Skip experiments that need GPU budget.
+4. **Special focus areas** (cover each explicitly):
+   - **Internal consistency**: scan all version markers (v0.1.0a1, v0.4.0a1, v0.2.0a1, v0.3.0a1, v0.5.1) and test counts (832, 172, 186). Flag every drift between abstract / §1 / §3 / §5 / §6 / §8.
+   - **Proposition completeness**: are all 5 propositions clearly stated, scoped, and substantiated? Are claims overreached or under-scoped?
+   - **Reproduction-plan honesty**: do the [TBD] markers in §6 hurt or help at the abstract deadline (06-09)? At the paper deadline (06-16)?
+   - **Anonymization integrity**: any accidental de-anon? (names, emails, repo URLs, SHAs, license strings, exchange names, dollar figures, dates, signed deployment names).
+   - **NeSy framing**: does the paper convince a NeSy-trained reviewer this is genuinely *neurosymbolic* and not "agent infrastructure plumbing"? Does §7.4 (Relation to NeSy) close the framing?
+   - **Citations**: any cite that looks fabricated, mis-attributed, or load-bearing on a non-existent paper? (`\citep{anon2026...}` placeholders specifically.)
+5. **Hidden risks**: anything a reviewer would WTF at — overclaim of "byte-identical NO-OP", under-substantiated 4-gate skill claim, capability matrix asymmetry, etc.
+
+Be brutally honest. If it is already submission-ready, say so clearly with a 9+/10 score. If it is not, name the precise blockers.
+
+## Paper source (full LaTeX, 337 lines)
+
+```latex

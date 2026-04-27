@@ -259,6 +259,35 @@ def test_execute_failure_uses_repr_not_str():
     assert "payload" in res.failure.error_repr
 
 
+def test_execute_does_not_swallow_keyboard_interrupt():
+    """KeyboardInterrupt is a control-flow signal, NOT a handler failure.
+    It must propagate out of execute() unchanged so callers (and the
+    interactive runtime) can act on it. Same for SystemExit / GeneratorExit.
+    """
+    leaf = Node(tag=":llm-call")
+    d = Dispatcher()
+
+    def boom(n, env):
+        raise KeyboardInterrupt()
+
+    d.register(":llm-call", boom)
+    with pytest.raises(KeyboardInterrupt):
+        execute(leaf, d)
+
+
+def test_execute_does_not_swallow_system_exit():
+    """SystemExit must propagate the same way — it's how callers tear down."""
+    leaf = Node(tag=":llm-call")
+    d = Dispatcher()
+
+    def boom(n, env):
+        raise SystemExit(2)
+
+    d.register(":llm-call", boom)
+    with pytest.raises(SystemExit):
+        execute(leaf, d)
+
+
 # --- Edge case 5: walker raises UnimplementedNodeKindError ---------------- #
 
 

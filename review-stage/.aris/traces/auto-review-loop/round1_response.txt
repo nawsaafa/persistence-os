@@ -1,0 +1,127 @@
+**1) Score / Verdict**
+- **Readiness score: 5/10** (strong idea + some real mechanized invariants, but presentation/consistency/evidence are not yet at “confident accept” level).
+- **Verdict for 2026-06-16:** **ALMOST** (salvageable without GPUs, but only if you aggressively fix internal inconsistencies + tighten the NeSy framing + ship at least one non-[TBD] evaluation slice).
+
+---
+
+**2) Critical weaknesses (ranked) + minimum fix**
+
+1) **Over page budget (15p vs ~10p soft) → triggers reviewer impatience + “workshop padding” vibes**
+   - **Minimum fix:** cut to **≤10 pages body** by (a) shrinking abstract by ~40–50%, (b) collapsing Related Work to a tighter “positioning” subsection + matrix, (c) moving the whole “Evaluation—Reproduction Plan” to **1 page** with a single table, and (d) deleting the long Case B verbatim plan block (keep 3–5 lines + a figure pointer).
+
+2) **Internal inconsistency about what is shipped (Plan is both shipped and “designed”)**
+   - This is the biggest trust-killer: reviewers will mark “claims slippery”.
+   - **Minimum fix:** introduce a single global legend used everywhere: **Shipped (S)** vs **Designed (D)** vs **Partially shipped (P: parse/spec only)**, then update **Table 1, Fig 1, §1, §5, §6** to match.
+
+3) **NeSy framing still reads like “agent infra substrate” more than neurosymbolic contribution**
+   - §7.4 helps, but it’s mostly definitional; it doesn’t create the “aha, this is NeSy” moment.
+   - **Minimum fix:** add **one concrete, end-to-end neurosymbolic vignette** that is *already shipped* and *checkable*: e.g., “Spec-driven self-healing tool call loop” as a symbolic contract + neural generator, with a crisp guarantee (“business logic never sees unconformed values; repair loop emits structured counterexample”). Put it as a small figure + 6–10 lines of pseudocode and cite it repeatedly as the running example.
+
+4) **“We prove five propositions” is over-strong given what’s actually shown**
+   - Right now, propositions are “mechanically checked by tests + arguments”, not formal proofs.
+   - **Minimum fix:** change phrasing globally to **“we state five propositions and mechanically validate them against the reference artifact”** (or “machine-checked properties”), and for each proposition add a 1–2 sentence proof sketch *plus* the exact enforcement hook (test + runtime guard).
+
+5) **Reproduction-plan heavy; too many [TBD]s for a NeSy deadline submission**
+   - At NeSy, you can get away with “work in progress” *only if* there’s at least one nontrivial evaluation artifact beyond unit tests.
+   - **Minimum fix (no GPUs):** include **one measured CPU-only table** by the deadline:
+     - microbench of Fact/branch/as_of/append throughput (InMemory + SQLite) on 1k/10k/100k datoms, OR
+     - regulator-replay benchmark on a **small synthetic corpus you can generate deterministically** (even 10–20 trajectories), reporting reconstruction rate + failure modes.
+   - Then keep the rest as “camera-ready plan”.
+
+---
+
+**3) Special focus areas (explicit)**
+
+**A) Internal consistency: version markers + test counts (drift map)**
+You currently have multiple “truths” about versions/modules:
+
+- **Abstract / §1 / §8 / §6.5** repeatedly: **“v0.1.0a1 + v0.4.0a1; 832 passed + 7 xfailed; five modules shipped incl Plan minimal; Txn/REPL/Plan-exec Phase 2.C.”**
+- **§3 invariant (3)**: explicitly **Plan parse/walk/spec shipped at “Phase 2.B v0.2.0a1”** (good, but now Plan is “shipped”).
+- **§5 Implementation intro** says: “Phase 1 ships four modules (Fact/Effect/Spec/Replay); Phase 2 ships remaining three (Plan/Txn/REPL)” — **contradicts** the abstract + §1 (“Plan minimal shipped”).
+- **Table 1 capability matrix** marks **Declarative plan AST as ∘ (designed)** — **contradicts** §1 + §3 + §5.5 (“Plan parse/walk/spec-validation shipped”).
+- **Figure 1** caption says solid includes “minimal Plan shipped”, but the Plan box is styled **dashed (designed)** — self-contradiction inside the same figure.
+- **Test counts:** consistent at the top-level (832 + 7 xfailed) across abstract/§1/§6/§8, but you also state:
+  - **Spec:** “186 tests” (appears in §3 invariant (5), §7.4)
+  - **Plan:** “172 plan-module tests” (§5.5)
+  These are fine *if* you present them as *subsuite counts* and don’t imply they sum to 832.
+
+**Minimum fix:** add a single “Reference artifact” line early (§1 or end of abstract) that defines:
+- the **repo version** (one string),
+- the **module shipping status** (S/P/D),
+- the **test suite status** (passed/xfailed),
+and then remove all contradictory phrasing.
+
+**About the 2026-04-27 runtime release (v0.5.1; 931 passed + 7 xfailed):**
+- If the submission artifact you ship with the paper is now **v0.5.1 (dated 2026-04-27)**, the PDF must not claim **832** or “Txn remains Phase 2”.
+- **Judgment call:** I would **refresh the paper to v0.5.1** (because it *improves credibility*) *but* keep proposition wording unchanged and add a one-liner: “Proposition statements unchanged since v0.7; validations rerun on v0.5.1.” If you don’t refresh, you must explicitly say: “Paper evaluates v0.4.0a1 snapshot; newer releases exist but are out of scope.”
+
+---
+
+**B) Proposition completeness (5 propositions)**
+You have five propositions and they are *mostly* scoping themselves correctly, but there are two reviewer-trigger points:
+
+- **Prop 2 (Well-formedness):** you call it “linear time” in the abstract, but in the proposition you state **O(|H|·|K|)**. For fixed |K|=15 that’s linear in |H|, but reviewers will nitpick.
+  - **Minimum fix:** say “linear in stack size for fixed catalog” everywhere.
+
+- **Prop 4 (Plan content address):** you claim “128-bit” while writing `sha256(... )[:32]`. That’s only unambiguous if you mean **32 hex chars** (not 32 bytes).
+  - **Minimum fix:** define `id(n)` precisely as either `hexdigest()[:32]` or `digest()[:16]` in math text.
+
+- **Prop 5 (Replay determinism / NO-OP):** the proposition has a strong condition (“per-step rng-consumption pattern recorded”), then claims Phase 1 strengthens NO-OP to byte-identical. But elsewhere replay is described as “cached responses keyed by args-hash,” which sounds like determinism comes from caching, not RNG recording.
+  - **Minimum fix:** tighten the model: explicitly define what is cached (by step index? by op+args? includes random/clock?) and what “trajectory_hash” covers. Then the NO-OP claim becomes obviously true under stated assumptions.
+
+Overall: the propositions are “good workshop-level mechanized properties”, but **they need sharper preconditions and consistent phrasing** to avoid being read as overclaims.
+
+---
+
+**C) Reproduction-plan honesty ([TBD] impact at 06-09 vs 06-16)**
+- **At abstract deadline (2026-06-09):** having [TBD]s is survivable *if* the abstract emphasizes what is **already verified** (mechanized invariants) and does **not** promise big benchmark wins. Your abstract currently promises *four* benchmarks and a production case study; that’s too much.
+  - **Minimum fix for 06-09:** remove “production case study” from the abstract; keep it as “planned”.
+
+- **At paper deadline (2026-06-16):** a paper with *zero* real evaluation beyond unit/property tests risks “not enough empirical substance”.
+  - **Minimum fix for 06-16:** include **one real measured evaluation** (CPU-only), and downgrade the rest to “camera-ready plan”.
+
+---
+
+**D) Anonymization integrity (accidental de-anon)**
+Big risk: you have many `% RESTORE: ...` comment lines containing **case names, exchange names, SHAs, license strings, dollar figures**.
+
+Even if they don’t render in the PDF, **many venues treat the full submission bundle (including source) as part of the anonymized artifact**; reviewers can open `.tex`. Those comments can be a policy violation.
+
+- **Minimum fix:** do *not* ship RESTORE lines in the anonymized submission bundle. Put them in a private file not uploaded, or gate them with a build-time flag that is not included in the anon package. Comments are not a safe anonymization mechanism.
+
+Other minor anonymization risk:
+- “in-house thread-routing Claude Code client” hints at a specific internal toolchain; probably not identifying, but it reads “industry artifact” and invites scrutiny. Consider rewriting to “internal client”.
+
+---
+
+**E) NeSy framing (does §7.4 close it?)**
+- Current status: **partially**. You clearly separate “symbolic substrate” vs “neural leaves,” but a NeSy-trained reviewer will still ask: “Where is the *neuro-symbolic interaction* beyond storage/audit?”
+- The strongest NeSy hook you already have is **spec-driven self-healing** (symbolic constraint → neural repair loop). The second is **plan-as-data with content identity** (symbolic editable program; neural leaves).
+- **Minimum fix:** promote one of these as the *primary* NeSy contribution with a worked example + failure mode analysis.
+
+---
+
+**F) Citations (fabricated / placeholder risk)**
+From the `.tex` alone, the risk flags are:
+- Keys like `\citep{anon2026camo,anon2026agenther,anon2025agentracer,anon2025aap}` look like placeholders; if the bib entries aren’t real, this is fatal.
+- You cite both `memento2026skills` and `n1n2026memento` (note the inconsistent key pattern). This often indicates broken/placeholder bib entries.
+- `bieniusa2026multiverse` reads suspiciously like either (a) a real older STM citation with wrong year, or (b) a placeholder.
+- **Minimum fix:** run a “citation integrity pass” before submission: every cited key must resolve to a real bibliographic record; remove or relabel placeholders as “Anonymous (under review)” only if the venue allows it.
+
+---
+
+**4) Hidden risks / “WTF” reviewer reactions**
+- **“Byte-identical NO-OP”**: reviewers will try to break it with `clock/now`, environment reads, non-logged randomness, nondeterministic serialization, dict ordering, Python version differences. If the claim survives only under a very controlled harness, it must be scoped that way **in the abstract**.
+- **“Derived from a single substrate”**: several properties are actually **configuration contracts** (e.g., audit universality depends on wrap coverage; well-formedness is necessary but not sufficient for safety). Overstating “derived” reads philosophical rather than technical.
+- **Capability matrix fairness**: marking CAMO “partial” and Persistence “stronger” without numbers invites pushback; at least add a sentence: “Stronger only for the NO-OP structural identity case on toy agents; distributional fidelity pending per-step RNG recording.”
+- **EDN choice**: some reviewers will see EDN as niche/avoidance. You need a one-liner justification: “EDN chosen for homoiconicity + stable canonicalization; JSON subset supported.”
+- **Production case study**: including profit factor and trading language while all numbers are [TBD] will read like marketing. In an anonymized submission, it also raises confidentiality/anonymity questions.
+
+---
+
+**Bottom line**
+This is a legitimately interesting substrate paper with real mechanized invariants, but it’s not yet submission-clean: **shipping-status contradictions + anonymization via comments + too many TBDs + weak “NeSy punch”** are the core blockers.
+
+If you want, I can propose an exact cut plan to get from 15p → 10p without losing the five propositions, and a minimal CPU-only evaluation table that best supports the thesis.
+EXIT=0
+2026-04-27T13:52:19Z

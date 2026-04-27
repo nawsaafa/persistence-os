@@ -1,0 +1,69 @@
+[Round 6 of autonomous review loop = Loop 2 Round 3]
+[MAX_ROUNDS = 4 per loop; Loop 2 has 2 rounds remaining unused after this]
+
+## Round Memo (score progression: cumulative across both loops)
+
+| Loop | Round | Score | Verdict   | Key arc                                       |
+|------|-------|-------|-----------|-----------------------------------------------|
+| 1    | 1     | 5.0   | almost    | Initial draft — 4 critical weaknesses         |
+| 1    | 2     | 6.0   | almost    | RESTORE strip; cache-key align; Plan figure   |
+| 1    | 3     | 7.0   | almost    | de-anon Case B; microbench median+IQR; tone   |
+| 2    | 1     | 8.0   | almost    | finer de-anon; "stronger than CAMO" rescoping |
+| 2    | 2     | 7.8   | almost    | -0.2 wording regressions; page violation hard |
+| 2    | 3     | ?     | ?         | ← THIS REVIEW                                 |
+
+## What changed since L2R2
+
+**L2R2 flagged 3 surgical fixes; all three landed in commit `2567f3d` on `paper/v0.9-aris-refresh`:**
+
+1. **§5.1 Fact / Prop:noop overclaim (line 177).** Was: "the concurrency invariant Proposition~\ref{prop:noop} implicitly depends on (16 threads × 50 transacts → 800 unique tx ids, zero collisions)." Now: "giving the Fact store a single-writer concurrency invariant (16 threads × 50 transacts → 800 unique tx ids, zero collisions)." Decoupled from Prop:noop entirely — the tx-id atomicity is a Fact-store property, not a Replay precondition.
+
+2. **§5.7 REPL / vendor debrand (line 201).** Was: "thread-routing Claude Code client". Now: "thread-routing operator console". Vendor-distraction removed.
+
+3. **Page budget — body now exactly 10pp.**
+   - §6.4 Case studies collapsed: 4-case paragraph (B + A/C/D) → 1 paragraph "Phase 1 has shipped on four anonymized neurosymbolic deployments — a regulated-finance decision agent (playbook AST × LLM decision leaves), a project-finance assessment SaaS (audit-reconstructible scoring), a licensed insurance comparator (bitemporal client state), and a multi-tenant hospitality operations agent (CI-replayable production trajectories). Persistence-instrumented numbers and DPO-pair extraction are [TBD — camera-ready], gated on per-step rng-recording (Phase 2)."
+   - §7 Discussion: dropped "Privacy architecture" paragraph entirely (kept Limitations + Relation to neurosymbolic AI). The privacy story is not the proposition contract; it was the most droppable piece.
+   - §8 Conclusion: dropped version/test-count boilerplate (already in Abstract + §1 + §6 Posture); dropped headline-pair restatement of Prop 2 + Prop 5 (already in Abstract); kept core claim sentence + 5 propositions sentence + Future Work.
+
+**Verified locally with Tectonic 0.16.9:**
+- pdfinfo: 12 pages total
+- Page 10 ends with §8 Conclusion's final "Z3-discharged verify leaves~\citep{fan2024proofofthought}." citation
+- Page 11 starts with "References"
+- Body = 10pp exactly. NeSy 2026 ≤10pp body rule SATISFIED.
+
+## Critical preservation (still unchanged from L2R2)
+
+- 5 propositions in document order (prop:branch, prop:wellformed, prop:tamper, prop:plan, prop:noop). Wording unchanged since v0.7. PLAN_CANONICAL_VERSION=1 invariance.
+- 19 §2 citations.
+- Anonymization clean (no SHAs, branch names, deployment names, $ figures, license strings in PDF text).
+- Microbench median+IQR with run-to-run variance disclaimer.
+- "Stronger than CAMO" still rescoped to NO-OP setting in abstract + §2.4.
+
+## Specific questions
+
+1. **Score** updated for Loop 2 Round 3?
+2. **Verdict.** Given (a) all 3 L2R2 fixes landed, (b) body now exactly 10pp NeSy-compliant, (c) propositions preserved, (d) anonymization clean, (e) all numeric eval honestly labeled [TBD camera-ready] for the 2026-07-20 window — is the paper **READY** for the 2026-06-16 NeSy 2026 late full-paper submission deadline (with abstract due 2026-06-09)?
+3. **Anything actually wrong now?** Specific, blocking issues only — not preference/density/wishlist items.
+4. **If still ALMOST: minimum delta to READY.** Concrete file/line edits.
+
+---
+
+## Full updated paper.tex
+
+```latex
+$(cat /Users/nawfalsaadi/Projects/persistence-os/paper/tex/persistence-nesy-2026.tex)
+```
+
+## Full references.bib
+
+```bibtex
+$(cat /Users/nawfalsaadi/Projects/persistence-os/paper/tex/references.bib)
+```
+
+You are a senior NeurIPS/ICML/NeSy reviewer. Be brutally honest. If READY, say so clearly.
+
+Output format:
+- Score: X/10
+- Verdict: ready / almost / not ready
+- Direct answers to the 4 questions above
+- If almost or not ready: minimum-fix file/line edits

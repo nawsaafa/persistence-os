@@ -239,7 +239,7 @@ REPL will expose a capability-gated WebSocket extending a thread-routing Claude 
 
 \subsection{Phase-1 microbench (CPU-only, this submission)}\label{sec:eval-microbench}
 
-A small CPU-only slice runs at submission time on the bundled artifact, verifying that the three core substrate operations stay practical at the corpus sizes Phase-1 targets. Numbers are over 50 runs on a single 8-core x86\_64 machine, no GPU; reproduce with \C{pytest -q tests/bench/}. Run-to-run variance is dominated by GC and OS scheduling at sub-millisecond scale; reported median + IQR is the more robust read here.
+Numbers are over 50 runs on a single 8-core x86\_64 machine, no GPU; reproduce with \C{pytest -q tests/bench/}. Variance at sub-millisecond scale is dominated by GC and OS scheduling, hence median + IQR.
 
 \begin{table}[ht]
 \centering
@@ -267,7 +267,7 @@ A small CPU-only slice runs at submission time on the bundled artifact, verifyin
 
 \textbf{Privacy architecture.} The authoritative datom log runs on operator-controlled infrastructure; projections are regenerable. Phase 1 ships chain \emph{integrity} (SHA-256 + \C{verify\_chain}); cryptographic \emph{authenticity} via per-transaction ed25519 is Phase 2. \C{:privacy :local} on \C{:llm-call} routes to local models (Qwen, DeepSeek, Llama); \C{:visibility :private} on skills enforces never-to-cloud; telemetry exits to an operator-controlled OpenTelemetry collector with no SaaS egress.
 
-\textbf{Relation to neurosymbolic AI.} The substrate is symbolic, agency is neural, and they couple through three concrete contracts beyond storage-and-audit: spec-driven self-healing (\sectionref{sec:specs}), plan-as-data with content identity (\sectionref{sec:plans}), and replay determinism over neural leaves (\sectionref{sec:replay}). The shipped substrate carries accountability, composition, and formal guarantees; the neural layer carries expressiveness. This positions Persistence between pure-neural (no guarantees) and pure-symbolic (no expressiveness) approaches as a candidate substrate for neurosymbolic systems beyond LLM agents.
+\textbf{Relation to neurosymbolic AI.} Substrate symbolic, agency neural, coupled through three contracts beyond storage-and-audit: spec-driven self-healing (\sectionref{sec:specs}), plan-as-data with content identity (\sectionref{sec:plans}), and replay determinism over neural leaves (\sectionref{sec:replay}). The substrate carries accountability and formal guarantees; the neural layer carries expressiveness --- positioning Persistence between pure-neural (no guarantees) and pure-symbolic (no expressiveness) as a candidate substrate for neurosymbolic systems beyond LLM agents.
 
 \section{Conclusion}\label{sec:conclusion}
 

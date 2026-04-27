@@ -5,16 +5,19 @@ full architectural spec and the paper §4.1 for formal definitions.
 
 Public surface:
 
-- :class:`Datom`   — the 8-tuple immutable fact
-- :class:`DB`      — append-only log + query API
+- :class:`CausalDAG`  — result of DB.causal_history (seeds + parents map)
+- :class:`Datom`      — the 8-tuple immutable fact
+- :class:`DB`         — append-only log + query API
 - :class:`DBView`  — snapshot view + entity projection
 - :class:`Store`   — storage backend protocol
 - :class:`InMemoryStore` / :class:`SQLiteStore` — reference backends
 - :func:`load_migrations` — list of ``(name, sql)`` DDL blobs
+- :class:`Provenance`  — typed schema for ``Datom.provenance``
+- :func:`provenance_from_dict` — coerce a free-form dict to :class:`Provenance`
 """
 
-from persistence.fact.datom import Datom, Op
-from persistence.fact.db import DB, DBView
+from persistence.fact.datom import Datom, Op, Provenance, provenance_from_dict
+from persistence.fact.db import CausalDAG, DB, DBView
 from persistence.fact.projection import (
     DictProjection,
     ProjectionAdapter,
@@ -25,6 +28,7 @@ from persistence.fact.store import InMemoryStore, SQLiteStore, Store, load_migra
 from persistence.fact.wire import datom_to_wire, wire_to_datom
 
 __all__ = [
+    "CausalDAG",
     "DB",
     "DBView",
     "Datom",
@@ -32,6 +36,8 @@ __all__ = [
     "InMemoryStore",
     "Op",
     "ProjectionAdapter",
+    "Provenance",
+    "provenance_from_dict",
     "SQLiteStore",
     "Store",
     "datom_to_wire",

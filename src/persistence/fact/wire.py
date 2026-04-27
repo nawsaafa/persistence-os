@@ -119,7 +119,7 @@ def datom_to_wire(datom: Datom) -> dict[str, Any]:
         ":datom/valid-from": datom.valid_from,
         ":datom/valid-to": datom.valid_to,
         ":datom/op": ":" + datom.op,
-        ":datom/provenance": _provenance_to_wire(datom.provenance),
+        ":datom/provenance": _provenance_to_wire(datom.provenance),  # type: ignore[arg-type]  # D2 ripple — see db.py:251
         ":datom/invalidated-by": datom.invalidated_by,
     }
     # Boundary invocation — R3 F8. Raise if the spec is unhappy; better a
@@ -176,8 +176,8 @@ def wire_to_datom(wire: dict[str, Any]) -> Datom:
         tx_time=_coerce_datetime(tx_time),
         valid_from=_coerce_datetime(valid_from),
         valid_to=_coerce_datetime(valid_to) if valid_to is not None else None,
-        op=op,
-        provenance=_provenance_from_wire(wire.get(":datom/provenance", {})),
+        op=op,  # type: ignore[arg-type]  # D2 ripple — op coerced from wire str; see db.py:251
+        provenance=_provenance_from_wire(wire.get(":datom/provenance", {})),  # type: ignore[arg-type]  # D2 ripple — see db.py:251
         invalidated_by=wire.get(":datom/invalidated-by"),
     )
 

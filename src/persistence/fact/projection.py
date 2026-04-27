@@ -4,8 +4,8 @@ Per paper §5.1: the projection is a *disposable* cache. Burn it down,
 rebuild from the log. This module ships:
 
 - :class:`ProjectionAdapter` — a Protocol any backend (Kuzu, mem0, Postgres
-  materialized view, in-process dict) can satisfy with two methods, ``reset``
-  and ``apply``.
+  materialized view, in-process dict) can satisfy with three methods,
+  ``reset``, ``apply``, and ``fork``.
 - :class:`DictProjection`    — the simplest imaginable adapter, an
   entity → attrs dict, used by the CLI demo and the Memory Palace
   integration plan as the initial seed.
@@ -15,6 +15,30 @@ rebuild from the log. This module ships:
 Real Kuzu / mem0 adapters are a separate concern — see
 ``docs/memory-palace-integration.md`` for the wiring pattern. This module
 provides the seam and a working in-memory reference.
+
+Backend conformance contract for ``fork()`` — introduced in v0.4.0a1:
+
+    Backend implementers (e.g. ``QdrantProjectionAdapter``,
+    ``KuzuProjectionAdapter``) MUST satisfy these properties to claim
+    ProjectionAdapter conformance:
+
+    1. fork(branch_id) MUST allocate a fresh physical target (new
+       collection, new DB path) — never share state with the parent.
+    2. The fresh target's name SHOULD encode branch_id for traceability
+       (e.g. ``qdrant_collection_<branch_id>``).
+    3. apply(datom) on the forked adapter MUST write to the new physical
+       target, NOT the parent's.
+    4. Re-projection upgrades (new embedding model) use the same pattern:
+       allocate fresh target, rebuild(db, fresh_adapter), atomically swap
+       (``QdrantClient.update_collection_aliases`` or equivalent),
+       drop old.
+
+    Conformance is verified in the backend's own test suite via
+    integration tests against real Qdrant / Kuzu / etc. The substrate
+    test suite (tests/fact/test_projector_fork.py) only verifies the
+    in-memory DictProjection.
+
+    See also :class:`ProjectionAdapter` for the caller-side contract.
 """
 
 from __future__ import annotations
@@ -28,18 +52,25 @@ from persistence.fact.db import DB, DBView
 class ProjectionAdapter(Protocol):
     """Any sink that can materialize datoms into a queryable projection.
 
-    Implementations only need two methods. Contract:
+    Implementations need three methods. Contract:
 
-      reset()          — clear the projection; subsequent apply() calls
-                         rebuild it from scratch.
-      apply(datom)     — stream a single datom into the projection. Called
-                         in log insertion order. Implementations are free to
-                         discard retracts, build indexes, call out to Kuzu /
-                         mem0, etc.
+      reset()                  — clear the projection; subsequent apply()
+                                 calls rebuild it from scratch.
+      apply(datom)             — stream a single datom into the projection.
+                                 Called in log insertion order.
+      fork(branch_id)          — return a NEW empty adapter pointing at a
+                                 fresh sink (new collection, new dict, etc.).
+                                 Caller is responsible for calling
+                                 rebuild(branched_db, forked_adapter) to
+                                 populate the fork. The fresh sink's name
+                                 SHOULD encode branch_id for traceability.
+                                 Adapters that do not support branching
+                                 should raise NotImplementedError.
     """
 
     def reset(self) -> None: ...
     def apply(self, datom: Datom) -> None: ...
+    def fork(self, branch_id: str) -> "ProjectionAdapter": ...
 
 
 class DictProjection:
@@ -65,36 +96,47 @@ class DictProjection:
         self._retracts.clear()
         self._winning.clear()
 
-    def apply(self, d: Datom) -> None:
+    def apply(self, datom: Datom) -> None:
         from persistence.fact.db import _freeze  # avoid import cycle at top
 
-        key = (d.a, _freeze(d.v), d.valid_from)
-        if d.op == "retract":
-            self._retracts.add((d.e,) + key)
-            attrs = self._entities.get(d.e)
-            if attrs and attrs.get(d.a) == d.v:
+        key = (datom.a, _freeze(datom.v), datom.valid_from)
+        if datom.op == "retract":
+            self._retracts.add((datom.e,) + key)
+            attrs = self._entities.get(datom.e)
+            if attrs and attrs.get(datom.a) == datom.v:
                 # Drop the attribute if the retract closes the currently
                 # winning assert. The rebuild pass re-plays from the start
                 # so later asserts can still overwrite.
-                winning = self._winning.get((d.e, d.a))
-                if winning == (d.valid_from, d.tx):
-                    attrs.pop(d.a, None)
-                    self._winning.pop((d.e, d.a), None)
+                winning = self._winning.get((datom.e, datom.a))
+                if winning == (datom.valid_from, datom.tx):
+                    attrs.pop(datom.a, None)
+                    self._winning.pop((datom.e, datom.a), None)
             return
 
         # op == "assert"
-        if (d.e,) + key in self._retracts:
+        if (datom.e,) + key in self._retracts:
             # The log emitted the retract after this assert in a rebuild
             # that streams forward — but for in-order streaming, retracts
             # appear *after* their assert only when a later transaction
             # emits them. Safe to skip here because the retract handler
             # will drop the entry.
             pass
-        attrs = self._entities.setdefault(d.e, {})
-        cur = self._winning.get((d.e, d.a))
-        if cur is None or (d.valid_from, d.tx) > cur:
-            attrs[d.a] = d.v
-            self._winning[(d.e, d.a)] = (d.valid_from, d.tx)
+        attrs = self._entities.setdefault(datom.e, {})
+        cur = self._winning.get((datom.e, datom.a))
+        if cur is None or (datom.valid_from, datom.tx) > cur:
+            attrs[datom.a] = datom.v
+            self._winning[(datom.e, datom.a)] = (datom.valid_from, datom.tx)
+
+    def fork(self, branch_id: str) -> "DictProjection":
+        """Return a fresh empty DictProjection.
+
+        The branch_id is accepted for Protocol parity but not used by
+        DictProjection — the in-memory dict has no physical naming.
+        Backend adapters (Qdrant, Kuzu) use branch_id to derive
+        collision-free physical target names.
+        """
+        del branch_id  # unused by in-memory impl; documented contract
+        return DictProjection()
 
     # ---- Query surface ---------------------------------------------------
     def get(self, e: str) -> dict:
@@ -113,14 +155,14 @@ def rebuild(db: DB, adapter: ProjectionAdapter) -> None:
     calling ``rebuild_view`` on ``db.since(t)`` manually.
     """
     adapter.reset()
-    for d in db.log():
-        adapter.apply(d)
+    for datom in db.log():
+        adapter.apply(datom)
 
 
 def rebuild_view(view: DBView, adapter: ProjectionAdapter) -> None:
     """Feed a pre-filtered view into the adapter. Does NOT call reset()."""
-    for d in view.datoms:
-        adapter.apply(d)
+    for datom in view.datoms:
+        adapter.apply(datom)
 
 
 __all__ = ["DictProjection", "ProjectionAdapter", "rebuild", "rebuild_view"]

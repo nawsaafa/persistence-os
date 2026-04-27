@@ -70,6 +70,44 @@ def _hash_fact(fact: dict) -> str:
     return hashlib.sha256(blob).hexdigest()[:16]
 
 
+@dataclass(frozen=True, slots=True)
+class CausalDAG:
+    """Result of DB.causal_history: seeds + immediate-parent map.
+
+    seeds:    list of Datoms returned by history(e), the entry points.
+    parents:  dict mapping a datom's substrate-internal canonical id
+              (f"{d.e}|{d.a}|{d.tx}") to the list of parent hashes
+              pulled from provenance.parent_provenance_hash (or its
+              alias :prev-hash). Empty for seeds that have no parent.
+
+    The parent hashes are opaque strings — typically AuditEntry ids
+    from the effect handler's Merkle chain. Resolving them to actual
+    AuditEntries (or further datoms) is the caller's responsibility:
+    the substrate does NOT maintain a hash → entry index in v0.4.0a1.
+
+    Mutability note: ``seeds`` and ``parents`` are exposed as their natural
+    mutable types (``list``, ``dict``) for ergonomic consumption. The
+    dataclass is ``frozen=True, slots=True`` for attribute-assignment
+    protection but does NOT recursively freeze the containers — treat as
+    read-only by convention. v0.5 may switch to ``tuple`` + ``Mapping`` if
+    multi-level walking surfaces a need.
+    """
+    seeds: list[Datom]
+    parents: dict[str, list[str]]
+
+
+def _datom_canonical_id(d: Datom) -> str:
+    """Stable identifier for a Datom in the causal DAG bookkeeping.
+
+    Returns f"{e}|{a}|{tx}". This is a substrate-internal identity for
+    walker bookkeeping ONLY — it is NOT the same as
+    `audit.AuditEntry.id` (which is content-hashed) and is NOT the
+    target of `provenance.parent_provenance_hash` (which references
+    AuditEntry ids).
+    """
+    return f"{d.e}|{d.a}|{d.tx}"
+
+
 @dataclass
 class DB:
     """An append-only datom log, read through the bitemporal query API.
@@ -209,7 +247,18 @@ class DB:
                     valid_from=vf,
                     valid_to=vt,
                     op=op,
-                    provenance=prov,
+                    # Note: the `# type: ignore[arg-type]` directive is on the
+                    # `provenance=prov` line below (pyright reads it from the
+                    # last logical line of the statement). Rationale, parallel
+                    # to the field-default ignore in datom.py: prov is a free-
+                    # form dict by construction (caller-supplied prov_base +
+                    # prompt_hash), structurally compatible with Provenance at
+                    # runtime but not statically typed as such. D2's typed
+                    # schema is a documentation/typecheck aid; transact() does
+                    # not coerce via provenance_from_dict because that
+                    # rearranges prompt_hash into extra and changes the
+                    # persisted shape.
+                    provenance=prov,  # type: ignore[arg-type]
                 )
             )
 
@@ -261,6 +310,43 @@ class DB:
             (d for d in self.store.all_datoms() if d.e == e),
             key=lambda d: d.tx,
         )
+
+    def causal_history(self, e: str, max_depth: int = 16) -> CausalDAG:
+        """Return seeds + immediate parent hashes from provenance.
+
+        For each datom in ``history(e)``, extract
+        ``provenance.parent_provenance_hash`` (or its alias
+        ``:prev-hash`` from the audit handler) and record it in the
+        parents map keyed by the datom's substrate-internal canonical
+        id (e|a|tx).
+
+        The walk is **single-level** in v0.4.0a1: parent hashes
+        reference AuditEntry ids from the effect handler's Merkle
+        chain, which the substrate does not index. Multi-level walks
+        require AuditEntry resolution and are out of substrate scope
+        until v0.5 (or downstream callers like ai-box-vault's
+        ``/vault/why`` endpoint).
+
+        ``max_depth`` is accepted for forward-compatibility with
+        future multi-level walking; in v0.4.0a1 any value >= 1 yields
+        the same result. ``max_depth=0`` yields no parents at all.
+        """
+        seeds = self.history(e)
+        parents: dict[str, list[str]] = {}
+        if max_depth < 1:
+            return CausalDAG(seeds=seeds, parents=parents)
+        for d in seeds:
+            cid = _datom_canonical_id(d)
+            # Read both keys: the typed-Provenance schema (D2) uses
+            # parent_provenance_hash; legacy raw provenance dicts emitted
+            # before D2 coercion (e.g. by transact() and the audit handler
+            # via D4 aliasing) carry the same value at top-level under
+            # the colon-keyword form ":prev-hash". They are the same chain.
+            parent_hash = d.provenance.get("parent_provenance_hash") \
+                or d.provenance.get(":prev-hash")
+            if parent_hash:
+                parents.setdefault(cid, []).append(parent_hash)
+        return CausalDAG(seeds=seeds, parents=parents)
 
     def since(self, t: datetime) -> "DBView":
         """Transaction-time delta — feeds incremental sync / replication."""
@@ -406,4 +492,4 @@ def _find_prior_assert(
     return None
 
 
-__all__ = ["DB", "DBView", "RetroactiveCorrectionError"]
+__all__ = ["CausalDAG", "DB", "DBView", "RetroactiveCorrectionError"]

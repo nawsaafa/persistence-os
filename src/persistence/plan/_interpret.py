@@ -1,61 +1,16 @@
-"""Depth-first walker for persistence.plan AST. No executors in v0.1."""
-from __future__ import annotations
+"""Back-compat re-export shim. The walker lives in `_walk.py` as of v0.4.
 
-from typing import Callable
+This shim keeps any existing import path `from persistence.plan._interpret import walk`
+working; it will be removed in v0.5 after grep-verifying zero in-tree references.
+Verified zero in-tree callers as of v0.4.0a1; retained for downstream consumers
+who imported ``persistence.plan._interpret`` before the rename. Slated for removal
+in v0.5+.
 
-from persistence.plan._ast import Node
-from persistence.plan._errors import UnimplementedNodeKindError
+Scope note: only `walk` is re-exported. Module-private constants like
+`_UNIMPLEMENTED_KINDS` and `_UPGRADE_MESSAGES` were never part of the
+public surface and are NOT re-exported — import from `_walk` directly
+if you need them.
+"""
+from persistence.plan._walk import walk
 
-#: Node kinds that raise UnimplementedNodeKindError when walked in leaf
-#: position. :code needs a sandbox (v0.2); :branch needs MCTS (Phase 3).
-_UNIMPLEMENTED_KINDS = frozenset({":code", ":branch"})
-
-_UPGRADE_MESSAGES = {
-    ":code": ":code execution lands in v0.2 with e2b/docker sandbox harness",
-    ":branch": ":branch speculative search lands in Phase 3 with MCTS outer loop",
-}
-
-
-def walk(
-    node: Node,
-    visitor: Callable[[Node, tuple[str, ...]], None] | None = None,
-) -> list[str]:
-    """Depth-first traversal. Returns ordered list of :ids visited.
-
-    Args:
-        node: root Node to walk.
-        visitor: optional callback(node, path) called per node. ``path`` is the
-            breadcrumb of tags from root. No side effects in v0.1.
-
-    Returns:
-        List of ``:id`` strings in depth-first, parent-before-children order.
-
-    Raises:
-        UnimplementedNodeKindError: walker encountered :code or :branch in
-            leaf position. Message names the v0.x that ships real support.
-    """
-    trace: list[str] = []
-    _walk_recursive(node, (), visitor, trace)
-    return trace
-
-
-def _walk_recursive(
-    node: Node,
-    path: tuple[str, ...],
-    visitor: Callable[[Node, tuple[str, ...]], None] | None,
-    trace: list[str],
-) -> None:
-    # Raise BEFORE recording so :id trace does not include unimplemented nodes.
-    if node.tag in _UNIMPLEMENTED_KINDS and not node.children:
-        raise UnimplementedNodeKindError(
-            f"{node.tag} is not supported in persistence.plan v0.1. "
-            f"{_UPGRADE_MESSAGES[node.tag]}"
-        )
-
-    current_path = path + (node.tag,)
-    trace.append(node.id)
-    if visitor is not None:
-        visitor(node, current_path)
-
-    for child in node.children:
-        _walk_recursive(child, current_path, visitor, trace)
+__all__ = ["walk"]

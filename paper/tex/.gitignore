@@ -1,0 +1,21 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.synctex(busy)
+
+# Tectonic / latexmk caches
+.tectonic-cache/
+
+# PDF outputs (committed manually if needed; default-ignored to keep repo clean)
+*.pdf
+
+# Editor + OS detritus
+.DS_Store
+*.swp

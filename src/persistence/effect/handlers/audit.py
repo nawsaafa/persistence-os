@@ -592,6 +592,22 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
                                   at the wire boundary — no test needs
                                   changes because :datom/v is not itself
                                   the :audit/verdict slot.
+
+                                  Dual-namespace policy: keys in this map
+                                  use EDN colon-keyword form (``:source``,
+                                  ``:prev-hash``, ``:handler-chain``...)
+                                  EXCEPT ``parent_provenance_hash`` which
+                                  uses bare-snake_case so the typed
+                                  :class:`persistence.fact.Provenance`
+                                  TypedDict (D2) can read the chain
+                                  pointer by its typed field name. Both
+                                  ``":prev-hash"`` and
+                                  ``"parent_provenance_hash"`` carry the
+                                  same value; they serve different
+                                  readers — :func:`audit.verify_chain`
+                                  follows the colon-keyword form,
+                                  :meth:`persistence.fact.DB.causal_history`
+                                  (D5) follows the bare form.
     - ``:datom/invalidated-by`` → None.
     """
     inst = _recorded_at_to_inst(entry.recorded_at)
@@ -608,6 +624,11 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
         ":confidence": 1.0,
         ":signature": entry.id,
         ":prev-hash": entry.prev_hash,
+        # bare-snake_case (not ":prev-hash") so Provenance TypedDict readers
+        # (D2+) find the chain pointer under its typed field name; the
+        # colon-keyword form above keeps audit.verify_chain working unchanged.
+        # See the docstring's Dual-namespace policy paragraph above for why.
+        "parent_provenance_hash": entry.prev_hash,
         ":handler-chain": list(entry.handler_chain),
         ":policy-id": entry.policy_id,
         ":principal": _principal_to_keyword_map(entry.principal),

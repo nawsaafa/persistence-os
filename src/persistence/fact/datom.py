@@ -22,9 +22,87 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, TypedDict
 
 Op = Literal["assert", "retract"]
+
+
+class Provenance(TypedDict, total=False):
+    """Typed provenance schema for Datom.provenance (v0.4.0a1).
+
+    All keys are optional (total=False) so existing free-form dict
+    callers remain valid at runtime; the TypedDict purely documents
+    the conventional schema for static type checkers and code readers.
+
+    Required by convention (enforced at the few sites that read these):
+      source                   — origin descriptor (e.g. "test", "audit:bankability-v3")
+
+    Optional named keys (lifted from the formerly-free-form dict):
+      tx_time                  — ISO-8601 timestamp; redundant with Datom.tx_time but appears in wire form
+      handler_id               — registered effect-handler name (Ferrari/brains pin: model-pluggable)
+      canonical_call           — sha256 hex of canonical EDN of {model, prompt, tools, params}
+      parent_provenance_hash   — equivalent to audit handler's :prev-hash; walks the causal DAG backwards
+      superseded_by_tx         — Phase-1 companion-retract sentinel
+
+    Backend-specific overflow:
+      extra                    — dict of any additional keys not lifted into the schema
+    """
+
+    source: str
+    tx_time: str
+    handler_id: Optional[str]
+    canonical_call: Optional[str]
+    parent_provenance_hash: Optional[str]
+    superseded_by_tx: Optional[int]
+    extra: dict[str, Any]
+
+
+#: Set of keys lifted to top-level Provenance fields by `provenance_from_dict`.
+#: Adding a key here also requires extending the Provenance TypedDict.
+_PROVENANCE_KNOWN_KEYS = frozenset({
+    "source",
+    "tx_time",
+    "handler_id",
+    "canonical_call",
+    "parent_provenance_hash",
+    "superseded_by_tx",
+})
+
+
+def provenance_from_dict(raw: dict) -> Provenance:
+    """Coerce a free-form dict to a Provenance TypedDict.
+
+    Known keys (see _PROVENANCE_KNOWN_KEYS) lift to top-level fields;
+    everything else lands in ``extra``. Pre-existing ``extra`` keys are
+    preserved and merged with newly-uncategorized top-level keys.
+
+    The wire format and canonical hash are unchanged because this only
+    rearranges where keys live in the dict — Provenance is a dict at
+    runtime, and the canonical form serializes both shapes identically
+    (sort_keys=True flattens any structural difference).
+
+    Not used by ``DB.transact()`` — see explanation at ``db.py:250-260`` re:
+    preserving the persisted wire shape. Provided as a convenience for callers
+    who construct a :class:`Datom` directly with caller-shaped provenance dicts
+    and want to canonicalize the layout to the typed schema.
+    """
+    if not raw:
+        return {}
+
+    out: Provenance = {}
+    extra: dict = dict(raw.get("extra", {}))
+
+    for k, v in raw.items():
+        if k == "extra":
+            continue
+        if k in _PROVENANCE_KNOWN_KEYS:
+            out[k] = v
+        else:
+            extra[k] = v
+
+    if extra:
+        out["extra"] = extra
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,7 +130,15 @@ class Datom:
     valid_from: datetime
     valid_to: Optional[datetime]
     op: Op
-    provenance: dict = field(default_factory=dict)
+    # D3 type suppression: pyright strict mode cannot reconcile `dict` as the
+    # default_factory for a TypedDict-typed field because TypedDict is nominally
+    # distinct from `dict` at the static level.  At runtime the distinction
+    # vanishes — TypedDict IS a dict subclass, so `field(default_factory=dict)`
+    # produces a valid empty Provenance.  The wire-roundtrip canonical-hash test
+    # (`tests/fact/test_provenance_schema.py::test_wire_roundtrip_preserves_canonical_hash`)
+    # pins this identity end-to-end.  See the parallel suppression at
+    # `src/persistence/fact/db.py:250-260` for the same pattern at the call site.
+    provenance: Provenance = field(default_factory=dict)  # type: ignore[assignment]
     invalidated_by: Optional[int] = None
 
     def __post_init__(self) -> None:
@@ -104,4 +190,4 @@ class Datom:
                     self.provenance["source"] = stripped_src
 
 
-__all__ = ["Datom", "Op"]
+__all__ = ["Datom", "Op", "Provenance", "provenance_from_dict"]

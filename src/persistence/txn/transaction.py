@@ -212,26 +212,32 @@ def _run(
         # Commit gate 1: spec validation BEFORE allocating tx-id.
         _spec_validate_writes(tx.write_set)
 
-        # Commit gate 2: MVCC conflict check.
-        touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
-        if any_datoms_since(db, t_start, touched):
-            attempt += 1
-            continue
-
-        # Apply atomically as one db.transact() — write_set + commit datom.
+        # Commit gates 2+3: conflict check AND transact must be atomic.
+        # Without the lock, two threads can both pass the MVCC check before
+        # either writes, then both commit — losing increments (B7 concurrency
+        # bug). Holding store._lock across check+write collapses the window
+        # to zero: a thread that passes the check is guaranteed to commit
+        # before any other thread's check runs.
         commit_id = str(_uuid.uuid4())  # noqa: wall-clock
         facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
-        if facts:
-            db.transact(
-                facts,
-                provenance={
-                    ":persistence.txn/commit-id": commit_id,
-                    ":persistence.txn/started-at": t_start.isoformat(),
-                    ":persistence.txn/committed-at": db._clock().isoformat(),
-                    ":persistence.txn/retry-count": attempt,
-                    ":persistence.txn/non-deterministic-retry": deadline is not None,
-                },
-            )
+        with db.store._lock:
+            touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
+            if any_datoms_since(db, t_start, touched):
+                attempt += 1
+                continue
+
+            # Apply atomically as one db.transact() — write_set + commit datom.
+            if facts:
+                db.transact(
+                    facts,
+                    provenance={
+                        ":persistence.txn/commit-id": commit_id,
+                        ":persistence.txn/started-at": t_start.isoformat(),
+                        ":persistence.txn/committed-at": db._clock().isoformat(),
+                        ":persistence.txn/retry-count": attempt,
+                        ":persistence.txn/non-deterministic-retry": deadline is not None,
+                    },
+                )
         tx.commit_id = commit_id
 
         # Replay effect intents through the real handler stack.

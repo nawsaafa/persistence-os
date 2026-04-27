@@ -10,7 +10,7 @@ Phase A ships ``ref`` and ``new_ref``. Phase B adds ``dosync`` and
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from persistence.txn.errors import RefValueNotImmutable
 from persistence.txn.ref import Ref, is_immutable_value
@@ -71,6 +71,107 @@ import contextlib
 import functools
 
 
+class _DosyncHandle:
+    """Returned by ``db.dosync(max_retries=..., deadline=...)`` (parenthesized form).
+
+    Acts as BOTH a context manager (``with db.dosync(...) as tx:``) AND a
+    decorator factory (``@db.dosync(...)``), matching Clojure's dosync
+    dual-mode idiom.  Without this, ``@db.dosync(max_retries=0)`` would
+    receive a contextlib._GeneratorContextManager object as the decorated
+    function, which is not callable as a decorator.
+    """
+
+    def __init__(self, db: Any, max_retries: int, deadline: Any) -> None:
+        self._db = db
+        self._max_retries = max_retries
+        self._deadline = deadline
+        self._cm: Any = None  # lazily built on __enter__
+
+    # ── decorator-factory usage: @db.dosync(max_retries=N) def f(tx): ...
+    def __call__(self, func: Any) -> Any:
+        from persistence.txn.transaction import _run
+
+        @functools.wraps(func)
+        def runner(*args: Any, **kwargs: Any) -> Any:
+            def with_tx(tx: Any) -> Any:
+                return func(tx, *args, **kwargs)
+            return _run(
+                self._db, with_tx,
+                max_retries=self._max_retries,
+                deadline=self._deadline,
+            )
+        return runner
+
+    # ── context-manager usage: with db.dosync(deadline=T) as tx: ...
+    def __enter__(self) -> Any:
+        self._cm = _build_dosync_cm(self._db)
+        return self._cm.__enter__()
+
+    def __exit__(self, *exc: Any) -> Any:
+        return self._cm.__exit__(*exc)
+
+
+def _build_dosync_cm(db: Any) -> Any:
+    """Build the contextmanager object for the CM form of dosync."""
+    @contextlib.contextmanager
+    def cm() -> Any:
+        from persistence.txn.transaction import Transaction
+        from persistence.txn.intents import set_dosync_guard, clear_dosync_guard, is_in_dosync
+        from persistence.txn.errors import NestedDosyncNotSupported
+
+        from persistence.txn.transaction import (
+            _build_commit_fact,
+            _build_write_facts,
+            _spec_validate_writes,
+        )
+        from persistence.txn.conflict import any_datoms_since
+        from persistence.txn.errors import TxnRetryExhausted
+        import uuid as _uuid
+
+        if is_in_dosync():
+            raise NestedDosyncNotSupported(
+                "nested dosync is not supported in v0.5.0a1"
+            )
+        t_start = db._clock()
+        tx = Transaction(db=db, t_start=t_start, attempt=0)
+        token = set_dosync_guard()
+        try:
+            yield tx
+        finally:
+            clear_dosync_guard(token)
+        # Commit path (only reached on clean exit; exceptions from
+        # the with-block body skip this).
+        _spec_validate_writes(tx.write_set)
+        commit_id = str(_uuid.uuid4())  # noqa: wall-clock
+        facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
+        with db.store._lock:
+            touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
+            if any_datoms_since(db, t_start, touched):
+                raise TxnRetryExhausted(
+                    "dosync context-manager detected conflict on commit; "
+                    "use the @db.dosync decorator form for retry-on-conflict"
+                )
+            if facts:
+                db.transact(
+                    facts,
+                    provenance={
+                        ":persistence.txn/commit-id": commit_id,
+                        ":persistence.txn/started-at": t_start.isoformat(),
+                        ":persistence.txn/committed-at": db._clock().isoformat(),
+                        ":persistence.txn/retry-count": 0,
+                        ":persistence.txn/non-deterministic-retry": False,
+                    },
+                )
+        tx.commit_id = commit_id
+        from persistence.effect.runtime import _active as _effect_active
+        rt = _effect_active.get()
+        if rt is not None:
+            for intent in tx.effect_intent_log:
+                rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
+
+    return cm()
+
+
 def _dosync(
     self: Any,
     body_or_none: Optional[Callable] = None,
@@ -97,94 +198,23 @@ def _dosync(
         max_retries if max_retries is not None else DEFAULT_MAX_RETRIES
     )
 
-    # Detect: bare-decorator form `@db.dosync` (body_or_none is the
-    # function to decorate, no parens) vs. parenthesized form
-    # `@db.dosync(deadline=...)` or context-manager `db.dosync()`.
-
+    # Bare-decorator form: @db.dosync def f(tx): ...
     if callable(body_or_none) and max_retries is None and deadline is None:
-        # Bare decorator: @db.dosync def f(tx): ...
         body = body_or_none
 
         @functools.wraps(body)
-        def runner(*args, **kwargs):
-            # The decorated body must take `tx` as the first arg; we
-            # pass it positionally and forward any user-provided extras.
-            def with_tx(tx):
+        def runner(*args: Any, **kwargs: Any) -> Any:
+            def with_tx(tx: Any) -> Any:
                 return body(tx, *args, **kwargs)
             return _run(self, with_tx, max_retries=effective_max_retries, deadline=deadline)
         return runner
 
-    # Either parenthesized decorator factory or context-manager builder.
-    if max_retries is not None or deadline is not None or body_or_none is None:
-        @contextlib.contextmanager
-        def cm():
-            from persistence.txn.transaction import Transaction
-            from persistence.txn.intents import set_dosync_guard, clear_dosync_guard, is_in_dosync
-            from persistence.txn.errors import NestedDosyncNotSupported
-
-            from persistence.txn.transaction import (
-                _build_commit_fact,
-                _build_write_facts,
-                _spec_validate_writes,
-            )
-            from persistence.txn.conflict import any_datoms_since
-            from persistence.txn.errors import TxnRetryExhausted
-            import uuid as _uuid
-
-            if is_in_dosync():
-                raise NestedDosyncNotSupported(
-                    "nested dosync is not supported in v0.5.0a1"
-                )
-            t_start = self._clock()
-            tx = Transaction(db=self, t_start=t_start, attempt=0)
-            token = set_dosync_guard()
-            try:
-                yield tx
-            finally:
-                clear_dosync_guard(token)
-            # Commit path (only reached on clean exit; exceptions from
-            # the with-block body skip this).
-            _spec_validate_writes(tx.write_set)
-            touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
-            if any_datoms_since(self, t_start, touched):
-                # CM form has no body callable to retry; raise.
-                raise TxnRetryExhausted(
-                    "dosync context-manager detected conflict on commit; "
-                    "use the @db.dosync decorator form for retry-on-conflict"
-                )
-            commit_id = str(_uuid.uuid4())  # noqa: wall-clock
-            facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
-            if facts:
-                self.transact(
-                    facts,
-                    provenance={
-                        ":persistence.txn/commit-id": commit_id,
-                        ":persistence.txn/started-at": t_start.isoformat(),
-                        ":persistence.txn/committed-at": self._clock().isoformat(),
-                        ":persistence.txn/retry-count": 0,
-                        ":persistence.txn/non-deterministic-retry": False,
-                    },
-                )
-            tx.commit_id = commit_id
-            from persistence.effect.runtime import _active as _effect_active
-            rt = _effect_active.get()
-            if rt is not None:
-                for intent in tx.effect_intent_log:
-                    rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
-
-        # If body_or_none is None — context-manager build site.
-        if body_or_none is None:
-            return cm()
-
-        # Otherwise: parenthesized decorator factory.
-        body = body_or_none
-
-        @functools.wraps(body)
-        def runner(*args, **kwargs):
-            def with_tx(tx):
-                return body(tx, *args, **kwargs)
-            return _run(self, with_tx, max_retries=effective_max_retries, deadline=deadline)
-        return runner
+    # Parenthesized form: db.dosync() / db.dosync(max_retries=N, deadline=T).
+    # When used as @db.dosync(...), Python applies the result as a decorator,
+    # so _DosyncHandle.__call__ fires.  When used as `with db.dosync(...) as tx:`,
+    # _DosyncHandle.__enter__/__exit__ fire.  Both paths are correct.
+    if body_or_none is None:
+        return _DosyncHandle(self, effective_max_retries, deadline)
 
     raise RuntimeError("unreachable: dosync invocation pattern not recognised")
 

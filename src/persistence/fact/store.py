@@ -138,7 +138,9 @@ class InMemoryStore:
 
     def __init__(self) -> None:
         self._log: list[Datom] = []
-        self._lock = threading.Lock()
+        # RLock (reentrant): _run() holds it across conflict-check + db.transact();
+        # allocate_and_append re-acquires on the same thread — safe with RLock.
+        self._lock = threading.RLock()
 
     def append(self, datoms: Iterable[Datom]) -> None:
         with self._lock:

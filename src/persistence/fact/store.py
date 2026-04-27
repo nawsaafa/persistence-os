@@ -215,7 +215,10 @@ class SQLiteStore:
         # BEGIN IMMEDIATE actually starts a reserved-write transaction
         # (the default implicit mode would start a deferred one).
         self._conn.isolation_level = None
-        self._lock = threading.Lock()
+        # RLock matches InMemoryStore: _run() in persistence.txn holds this
+        # across the conflict-check + db.transact() sequence; the inner
+        # allocate_and_append re-acquires on the same thread.
+        self._lock = threading.RLock()
         self._apply_migrations()
 
     def _apply_migrations(self) -> None:

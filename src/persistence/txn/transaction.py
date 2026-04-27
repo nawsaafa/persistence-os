@@ -117,11 +117,15 @@ class Transaction:
         self.read_set.add(ref)
         if ref in self.write_set:
             return self.write_set[ref]
-        # Snapshot read at t_start. The convention for ref-as-value:
-        # the entity's ``:value`` attribute holds the ref's value.
+        # Snapshot read at t_start. The ref's value lives under the
+        # ``ref.spec_attr`` attribute name (default ``"value"`` preserves
+        # v0.5.0a1 behavior bit-for-bit). Two refs sharing an eid but
+        # carrying different ``spec_attr`` resolve to different attribute
+        # values on the same entity — this is the per-ref-attribute
+        # contract introduced in v0.5.1 (rev O / N3).
         view = self.db.as_of(self.t_start)
         entity_attrs = view.entity(ref.eid)
-        return entity_attrs.get(WRITE_ATTR) if entity_attrs else None
+        return entity_attrs.get(ref.spec_attr) if entity_attrs else None
 
     def alter(self, ref: Ref, fn: Callable, *args: Any) -> Any:
         """Read ``ref`` at snapshot, apply ``fn(snapshot_value, *args)``,
@@ -139,36 +143,49 @@ class Transaction:
 
 
 DEFAULT_MAX_RETRIES = 256
-WRITE_ATTR = "value"  # ref values stored under this attribute (Datom strips leading ":" from `a`)
+WRITE_ATTR = "value"  # default ``Ref.spec_attr`` (Datom strips leading ":" from `a`)
 
 
 def _spec_validate_writes(write_set: dict) -> None:
     """Run spec.conform over each write before tx-id allocation.
 
-    For v0.5.0a1, the only spec we apply is the per-ref :value spec
-    if registered. Calls without a registered spec pass through.
+    v0.5.1 (rev O / N3): each ref carries its own ``spec_attr`` (default
+    ``"value"``); we look up that key in the registry and conform the
+    write against it. Refs with no spec registered for their attr pass
+    through untouched. This generalises the v0.5.0a1 single-global-spec
+    behavior — the default ``spec_attr="value"`` makes unannotated
+    callers identical to before.
+
     Raises ``persistence.spec.SpecError`` on failure (caller propagates;
     no tx-id is burned).
     """
     keys = set(_registered_keys())
-    spec_key = WRITE_ATTR
-    if spec_key not in keys:
-        return
-    for _ref, value in write_set.items():
+    for ref, value in write_set.items():
+        spec_key = ref.spec_attr
+        if spec_key not in keys:
+            continue
         result = _spec_conform(spec_key, value)
         if not result.is_ok:
-            from persistence.spec import SpecError
-            raise SpecError(result)
+            # ``SpecError`` lives in ``_registry`` and is not re-exported
+            # through ``persistence.spec.__all__`` (see N1 commentary in
+            # ``_build_commit_provenance``). Use the submodule path.
+            from persistence.spec._registry import SpecError
+            raise SpecError(result)  # type: ignore[arg-type]
 
 
 def _build_write_facts(tx: "Transaction") -> list[dict]:
-    """Build the list-of-fact-dicts payload for db.transact()."""
+    """Build the list-of-fact-dicts payload for db.transact().
+
+    v0.5.1 (rev O / N3): each fact's ``a`` is ``ref.spec_attr`` (default
+    ``"value"``), so per-ref attribute names land on the Datom store
+    directly. Datom strips a leading ``":"`` if present.
+    """
     now = tx.db._clock()
     facts: list[dict] = []
     for ref, value in tx.write_set.items():
         facts.append({
             "e": ref.eid,
-            "a": WRITE_ATTR,
+            "a": ref.spec_attr,
             "v": value,
             "valid_from": now,
         })

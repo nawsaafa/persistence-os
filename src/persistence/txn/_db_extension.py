@@ -36,15 +36,26 @@ def _get_db_id(db: Any) -> str:
     return db_id
 
 
-def _ref(self: Any, eid: str) -> Ref:
-    """DB.ref(eid) — handle to existing/future entity by id."""
+def _ref(self: Any, eid: str, *, spec_attr: str = "value") -> Ref:
+    """DB.ref(eid, *, spec_attr="value") — handle to existing/future entity by id.
+
+    ``spec_attr`` (v0.5.1, keyword-only) names which write-spec the ref's
+    writes are validated against AND which entity-attribute name the
+    value lives under. Default ``"value"`` preserves v0.5.0a1 behavior
+    bit-for-bit. See ``Ref`` docstring for the eq/hash invariant.
+    """
     if not isinstance(eid, str):
         raise TypeError(f"eid must be str, got {type(eid).__name__}")
-    return Ref(eid=eid, db_id=_get_db_id(self))
+    return Ref(eid=eid, db_id=_get_db_id(self), spec_attr=spec_attr)
 
 
-def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
-    """DB.new_ref(initial=...) — allocate a fresh UUID4 entity-id.
+def _new_ref(
+    self: Any,
+    initial: Optional[Any] = None,
+    *,
+    spec_attr: str = "value",
+) -> Ref:
+    """DB.new_ref(initial=..., *, spec_attr="value") — allocate a fresh UUID4 entity-id.
 
     The ``initial`` parameter is validated as immutable and then
     DISCARDED in v0.5.0a1 — the Ref returned does NOT carry the
@@ -57,6 +68,8 @@ def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
 
     Accepted ``initial`` types (when provided): pyrsistent.PMap /
     PVector / PSet, frozen built-in, or frozen dataclass instance.
+
+    ``spec_attr`` (v0.5.1, keyword-only) — see ``DB.ref`` for semantics.
     """
     if initial is not None and not is_immutable_value(initial):
         raise RefValueNotImmutable(
@@ -65,7 +78,7 @@ def _new_ref(self: Any, initial: Optional[Any] = None) -> Ref:
             f"or wrap in pyrsistent.pmap/pvector/pset."
         )
     eid = str(uuid.uuid4())  # uuid4; uuid7 not in stdlib until 3.13+  # noqa: wall-clock
-    return Ref(eid=eid, db_id=_get_db_id(self))
+    return Ref(eid=eid, db_id=_get_db_id(self), spec_attr=spec_attr)
 
 
 

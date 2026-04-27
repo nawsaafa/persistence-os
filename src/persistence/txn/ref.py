@@ -1,13 +1,21 @@
 """Ref — immutable handle to an entity-id in a specific DB / branch."""
 from __future__ import annotations
 
-from dataclasses import dataclass, is_dataclass
+import re
+from dataclasses import dataclass, field, is_dataclass
 from decimal import Decimal
 from typing import Any
 
 from pyrsistent import PMap, PSet, PVector, pmap, pvector
 
 from persistence.txn.errors import RefValueNotImmutable
+
+
+# Valid EDN keyword name shape (no leading colon — colon is the keyword
+# sigil, stripped at the Datom-store boundary). Matches alphanum + the
+# punctuation used in namespaced keyword names: ``./_-``. Used in
+# ``Ref.__post_init__`` to reject invalid ``spec_attr`` values.
+_SPEC_ATTR_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9./_-]*")
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,14 +29,41 @@ class Ref:
 
     Equality and hashing are over ``(eid, db_id)`` — two Refs to the same
     entity-id in the same DB compare equal regardless of construction
-    site.
+    site. ``spec_attr`` is deliberately excluded from eq/hash via
+    ``field(compare=False)``: it labels which write-spec applies and
+    which entity-attribute name the value lives under, but two refs
+    naming the same entity in the same DB are the *same identity* even
+    if one was constructed with a custom ``spec_attr``.
+
+    ``spec_attr`` defaults to ``"value"``, preserving v0.5.0a1 behavior
+    bit-for-bit for unannotated callers (the global ``WRITE_ATTR``).
     """
 
     eid: str
     db_id: str
+    spec_attr: str = field(default="value", compare=False)
+
+    def __post_init__(self) -> None:
+        # Validate ``spec_attr`` shape eagerly: the Datom store enforces
+        # only the leading-colon-strip rule on its ``a`` field, so without
+        # this guard a malformed ``spec_attr`` would land as a wire-form
+        # attribute name only at commit time. EDN keyword names are
+        # alphanum + ``./_-``. Reject leading colon, whitespace, empty
+        # string. Raises ``ValueError`` rather than spec-layer SpecError
+        # because this is a structural invariant of Ref itself, not of
+        # any registered write-spec.
+        if not isinstance(self.spec_attr, str) or not _SPEC_ATTR_PATTERN.fullmatch(
+            self.spec_attr
+        ):
+            raise ValueError(
+                f"Ref.spec_attr {self.spec_attr!r} must be a valid EDN keyword "
+                "name (alphanum + ./_-, no leading colon, no whitespace, non-empty)"
+            )
 
     def __repr__(self) -> str:
-        return f"Ref({self.eid!r}, db={self.db_id!r})"
+        if self.spec_attr == "value":
+            return f"Ref({self.eid!r}, db={self.db_id!r})"
+        return f"Ref({self.eid!r}, db={self.db_id!r}, spec_attr={self.spec_attr!r})"
 
 
 # Built-in immutable types accepted directly as ref values.

@@ -26,17 +26,27 @@ from persistence.plan._coerce import (
 from persistence.plan._errors import ParseError, UnimplementedNodeKindError
 from persistence.plan._walk import walk
 from persistence.plan._dispatch import Dispatcher, Handler
+from persistence.plan._execute import (
+    ExecutionResult,
+    FailureInfo,
+    LeafResult,
+    execute,
+)
 from persistence.plan._parse import parse, unparse
 
 __all__ = [
     "Coercion",
     "Dispatcher",
+    "ExecutionResult",
+    "FailureInfo",
     "Handler",
     "ID_HEX_WIDTH",
+    "LeafResult",
     "Node",
     "ParseError",
     "PLAN_CANONICAL_VERSION",
     "UnimplementedNodeKindError",
+    "execute",
     "lookup_coercion",
     "parse",
     "register_coercion",

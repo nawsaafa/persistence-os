@@ -204,6 +204,10 @@ class TestFromEdnRoundTripPreservesVerifyChain:
             principal={":agent": "dfi"},
             run_id=str(uuid.uuid4()),
             parent=None,
+            # v0.5.1 N2: AuditEntry now carries ``txn_commit``; include
+            # it explicitly so the helper-side hash matches the
+            # dataclass-side ``to_dict()`` which sees the default None.
+            txn_commit=None,
         )
         # ARIS Round 6 R6-G3: use the shared ``_canonicalise_content``
         # helper instead of duplicating the canonicalisation rule

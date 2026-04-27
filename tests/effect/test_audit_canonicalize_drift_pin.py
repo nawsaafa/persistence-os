@@ -62,6 +62,10 @@ def _base_content(**overrides) -> dict:
         principal={},
         run_id=str(uuid.uuid4()),
         parent=None,
+        # v0.5.1 N2: AuditEntry now carries a typed ``txn_commit`` field;
+        # the drift-pin test parameters must include it so the dataclass
+        # side and the helper side both observe the same content shape.
+        txn_commit=None,
     )
     content.update(overrides)
     return content

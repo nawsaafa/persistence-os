@@ -247,7 +247,16 @@ def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
 
     No-op when no runtime is active (intents queue but never fire — the
     caller is responsible for setting up the runtime if it wants effects
-    to run). Future home of the N2 typed ``txn_commit`` kwarg.
+    to run).
+
+    v0.5.1 N2: passes ``commit_id`` via the typed ``txn_commit`` kwarg
+    instead of stuffing ``"_txn_commit"`` into the intent's kwargs dict.
+    The audit handler pops the sentinel before hashing args, so the
+    same intent replayed across two different commits now produces the
+    same ``args_hash`` (closes the v0.5.0a1 corruption where args_hash
+    was polluted by commit_id). ``dict(intent.kwargs)`` defensively
+    copies so the audit handler's in-place ``args.pop`` never reaches
+    back to ``intent.kwargs``.
     """
     from persistence.effect.runtime import _active as _effect_active
 
@@ -255,7 +264,7 @@ def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
     if rt is None:
         return
     for intent in tx.effect_intent_log:
-        rt.perform(intent.op, {**intent.kwargs, "_txn_commit": commit_id})
+        rt.perform(intent.op, dict(intent.kwargs), txn_commit=commit_id)
 
 
 def _commit_attempt(tx: "Transaction") -> bool:

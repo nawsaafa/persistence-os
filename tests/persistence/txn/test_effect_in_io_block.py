@@ -15,7 +15,7 @@ def _identity_handler() -> Handler:
     return Handler(
         name="identity",
         wraps={":noop"},
-        clauses={":noop": lambda args, k, ctx: args.get("value", None)},
+        clauses={":noop": lambda args, *_: args.get("value", None)},
     )
 
 

@@ -7,7 +7,6 @@ from persistence.txn.intents import (
     set_dosync_guard,
     clear_dosync_guard,
 )
-from persistence.txn import EffectInIoBlock
 
 
 def test_effect_intent_captures_op_and_kwargs():

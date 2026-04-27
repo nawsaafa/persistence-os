@@ -228,7 +228,7 @@ def _run(
 
             # Apply atomically as one db.transact() — write_set + commit datom.
             if facts:
-                db.transact(
+                db.transact_batch(
                     facts,
                     provenance={
                         ":persistence.txn/commit-id": commit_id,

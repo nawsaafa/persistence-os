@@ -152,7 +152,7 @@ def _build_dosync_cm(db: Any) -> Any:
                     "use the @db.dosync decorator form for retry-on-conflict"
                 )
             if facts:
-                db.transact(
+                db.transact_batch(
                     facts,
                     provenance={
                         ":persistence.txn/commit-id": commit_id,

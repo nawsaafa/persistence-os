@@ -227,7 +227,7 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
         # exercises it in v0.5.0a1). The submodule path is what
         # ``tests/plan/test_parse.py`` uses.
         from persistence.spec._registry import SpecError
-        raise SpecError(result)
+        raise SpecError(result)  # type: ignore[arg-type]
 
     return {
         ":persistence.txn/commit-id": commit_id,

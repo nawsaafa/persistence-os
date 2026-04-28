@@ -29,9 +29,6 @@ __all__ = [
 #: ``MAX_PLAN_DEPTH // 2`` (design §6 two-layer guard).
 MAX_PLAN_DEPTH: int = 32
 
-#: Tags whose Nodes MUST be leaves; empty in v0.6.5 (forward-compat).
-_LEAF_REQUIRED_TAGS: frozenset[str] = frozenset()
-
 
 @dataclass(frozen=True, slots=True)
 class SubstituteLeafAction:
@@ -85,7 +82,7 @@ def _action_hash(action: Action) -> str:
             "skill_id": action.skill_id,
         }
     else:
-        raise ValueError(f"unknown action kind: {type(action).__name__}")
+        raise ValueError(f"unknown action kind: {type(action).__name__}")  # pyright: ignore[reportUnreachable]
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -187,7 +184,7 @@ def apply_action(
     elif isinstance(action, ComposeWithSkillAction):
         new_plan = _apply_compose_with_skill(plan, action, skill_library)
     else:
-        raise ValueError(f"unknown action kind: {type(action).__name__}")
+        raise ValueError(f"unknown action kind: {type(action).__name__}")  # pyright: ignore[reportUnreachable]
     new_depth = _plan_depth(new_plan)
     if new_depth > MAX_PLAN_DEPTH:
         raise PlanDepthExceeded(

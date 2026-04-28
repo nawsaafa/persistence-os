@@ -169,6 +169,14 @@ class _PlanCycleDetected(ValueError):
     :func:`_classify_apply_failure` maps it to ``"compose_creates_cycle"``."""
 
 
+class _SkillNotRegistered(ValueError):
+    """``ComposeWithSkillAction`` referenced a ``skill_id`` not present in
+    the SkillLibrary, or no library was passed. Subclass of ``ValueError``
+    so the loop's existing catch handles it;
+    :func:`_classify_apply_failure` maps it to ``"skill_not_registered"``
+    by isinstance — no fragile message-substring match."""
+
+
 def _collect_node_ids(node: Node, acc: set[str]) -> None:
     """In-place DFS collect of ``Node.id`` over ``node`` and descendants."""
     acc.add(node.id)
@@ -183,10 +191,12 @@ def _apply_compose_with_skill(
 ) -> Node:
     """Wrap subtree at ``target_path`` inside the looked-up skill plan (design §6)."""
     if skill_library is None:
-        raise ValueError("ComposeWithSkillAction requires skill_library")
+        raise _SkillNotRegistered(
+            "ComposeWithSkillAction requires skill_library"
+        )
     looked_up = skill_library.lookup(action.skill_id)
     if looked_up is None:
-        raise ValueError(
+        raise _SkillNotRegistered(
             f"ComposeWithSkillAction: skill_id {action.skill_id!r} not registered"
         )
     skill_plan, _record = looked_up
@@ -635,7 +645,7 @@ def _populate_children(
         try:
             new_plan = apply_action(plan, action, skill_library=skill_library)
         except (ValueError, IndexError, PlanDepthExceeded) as exc:
-            reason = _classify_apply_failure(action, exc)
+            reason = _classify_apply_failure(exc)
             output_value = _datoms._reject_record(
                 action, node.plan_id, reason, error=exc
             )
@@ -677,16 +687,14 @@ def _populate_children(
     return successes, prev_hash
 
 
-def _classify_apply_failure(action: Action, exc: BaseException) -> str:
+def _classify_apply_failure(exc: BaseException) -> str:
     """Map an ``apply_action`` raise to a design §13 reject ``reason`` tag."""
     if isinstance(exc, PlanDepthExceeded):
         return "plan_too_deep"
     if isinstance(exc, _PlanCycleDetected):
         return "compose_creates_cycle"
-    if isinstance(action, ComposeWithSkillAction):
-        msg = str(exc)
-        if "skill_library" in msg or "not registered" in msg:
-            return "skill_not_registered"
+    if isinstance(exc, _SkillNotRegistered):
+        return "skill_not_registered"
     return "plan_construction_raised"
 
 

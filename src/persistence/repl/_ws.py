@@ -60,8 +60,14 @@ from ._session import Session, make_session
 logger = logging.getLogger(__name__)
 
 
-# OpHandler signature: (session, db, params) -> result
-OpHandler = Callable[[Session, Any, dict], Awaitable[Any]]
+# OpHandler signature: (session, db, params, *, server=None) -> result
+#
+# Handlers that mutate session state (D4 rewind, D5 branch) read the
+# ``server`` keyword to register the new ``Session`` in
+# ``server._active_sessions[session.session_id]``; the dispatcher's
+# post-op re-read picks it up on the next message. Handlers that don't
+# need it (D3 inspect, D6 edit pre-confirm) ignore the kwarg.
+OpHandler = Callable[..., Awaitable[Any]]
 
 
 class _OpError(Exception):
@@ -215,7 +221,7 @@ class WSServer:
             return session
 
         try:
-            result = await op_handler(session, self.db, req.params)
+            result = await op_handler(session, self.db, req.params, server=self)
             await ws.send_json(make_response(req.id, result))
         except _OpError as e:
             await ws.send_json(make_error_response(req.id, e.code, e.message, e.data))

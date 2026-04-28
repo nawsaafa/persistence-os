@@ -385,26 +385,30 @@ class TestMethodNotFound:
 
 
 # ===========================================================================
-# 5. Skeleton ops raise NotImplementedError (4)
+# 5. Skeleton ops raise NotImplementedError (1 — D6 only)
 # ===========================================================================
+# D3/D4/D5 ship inspect/rewind/branch; only ``repl/edit`` remains stubbed
+# pending D6. The full op-level test coverage moved to
+# ``test_inspect.py`` / ``test_rewind.py`` / ``test_branch.py``.
 class TestSkeletonOpsNotImplemented:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize(
-        "method",
-        ["repl/inspect", "repl/edit", "repl/rewind", "repl/branch"],
-    )
-    async def test_post_auth_skeleton_op_returns_internal_error(
-        self, client, db, clock_fixed, method
+    async def test_post_auth_edit_returns_internal_error(
+        self, client, db, clock_fixed
     ):
         tok = _stored_token_str(db, clock_fixed)
         async with client.ws_connect("/ws") as ws:
             await _auth(ws, tok)
             await ws.send_json(
-                {"jsonrpc": "2.0", "id": 20, "method": method, "params": {}}
+                {
+                    "jsonrpc": "2.0",
+                    "id": 20,
+                    "method": "repl/edit",
+                    "params": {},
+                }
             )
             resp = await ws.receive_json()
         assert "error" in resp
-        # NotImplementedError → ERR_INTERNAL_ERROR (D3/D4/D5/D6 will overwrite).
+        # NotImplementedError → ERR_INTERNAL_ERROR (D6 will overwrite).
         assert resp["error"]["code"] == ERR_INTERNAL_ERROR
 
 

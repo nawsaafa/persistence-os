@@ -242,6 +242,23 @@ def test_g3_negative_delta_returns_false() -> None:
     assert gate_g3_score_delta(0.70, 0.80, epsilon=0.05) is False
 
 
+def test_g3_ieee754_boundary_is_exact_not_within_tolerance() -> None:
+    """Pin the contract: G3 uses exact ``>=`` against ``epsilon``, NOT a
+    within-tolerance compare. ``0.85 - 0.80`` evaluates to
+    ``0.04999999999999993`` under IEEE-754, which is ``< 0.05`` exactly.
+
+    A future contributor adding ``math.isclose`` or a tolerance-based
+    compare would silently flip this case to True; the test locks the
+    current semantic so the change surfaces here. Caller-level rounding
+    (e.g. quantize to 4 decimals before passing) is the right place to
+    handle near-boundary values, NOT inside the gate.
+    """
+    # Sanity: confirm the IEEE-754 expectation.
+    assert (0.85 - 0.80) < 0.05
+    # And the gate honors the exact comparison.
+    assert gate_g3_score_delta(0.85, 0.80, epsilon=0.05) is False
+
+
 # --- gate_g4_stub ---------------------------------------------------------- #
 
 
@@ -354,6 +371,36 @@ def test_promote_all_gates_pass_returns_record_with_stub_approver() -> None:
 
 
 # --- promote() — case 2: G1 fails ------------------------------------------ #
+
+
+def test_promote_empty_held_out_trajectories_raises_g1_failure() -> None:
+    """Empty held-out corpus → ``GateFailure`` from G1.
+
+    G1 emits a ``UserWarning`` for the empty-list branch (per A6 fix-pass
+    pin) and returns False; ``promote()`` then raises GateFailure
+    indicating G1. Pin both signals together so the orchestrator cannot
+    silently swallow either: the warning AND the GateFailure are part
+    of the contract.
+    """
+    plan = _candidate_plan()
+    with pytest.warns(UserWarning, match="empty held_out_trajectories"):
+        with pytest.raises(GateFailure) as excinfo:
+            promote(
+                plan,
+                db=_g2_pass_db(),
+                optimized_score=0.90,
+                baseline_score=0.80,
+                held_out_trajectories=[],
+                replay_engine=_ByteIdenticalReplayStub(),
+                audit_window=_FULL_AUDIT_WINDOW,
+                promoted_at_ms=1_700_000_000_000,
+            )
+    assert "G1" in str(excinfo.value)
+    partial = getattr(excinfo.value, "partial_record", None)
+    assert partial is not None
+    # G1 failed under coverage gate; downstream gates not run.
+    assert partial.g1_replay_byte_identity is False
+    assert partial.g1_held_out_count == 0
 
 
 def test_promote_g1_fail_raises_with_partial_record() -> None:

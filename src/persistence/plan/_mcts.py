@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Literal, Protocol, Union, runtime_checkable
@@ -839,9 +840,19 @@ def mcts_search(
             else:
                 simple_regret_streak = 0
         # all_evaluations_failed: every attempted evaluator call raised.
-        # Surface as termination only after at least one attempt.
+        # Surface as termination only after at least one attempt. Design
+        # §18 + impl plan §B7: emit ``UserWarning`` so callers don't
+        # silently consume a winner==initial_plan result.
         if eval_attempts > 0 and eval_attempts == eval_failures:
             terminated_by = "all_evaluations_failed"
+            warnings.warn(
+                f"mcts_search terminated by all_evaluations_failed: "
+                f"every evaluator call raised "
+                f"({eval_failures} failures over {eval_attempts} attempts); "
+                f"winner = initial_plan",
+                UserWarning,
+                stacklevel=2,
+            )
             break
 
         path: list[tuple[MCTSNode, MCTSEdge]] = []
@@ -964,18 +975,27 @@ def mcts_search(
         iter_index += 1
 
     # --- Winner selection ---
-    winner_edge = _pick_winner_edge(root)
-    if winner_edge is None:
+    # Design §11 / impl plan §B7: when termination is
+    # ``all_evaluations_failed`` the winner falls back to
+    # ``initial_plan`` regardless of whether root accumulated children
+    # (root edges all have visits=0; their q is meaningless).
+    if terminated_by == "all_evaluations_failed":
         winner_plan = initial_plan
         winner_plan_id = initial_plan.id
         root_q = 0.0
     else:
-        winner_plan = plan_by_id[winner_edge.child_plan_id]
-        winner_plan_id = winner_edge.child_plan_id
-        n_sa = winner_edge.visits_through_edge
-        root_q = (
-            (winner_edge.total_value_through_edge / n_sa) if n_sa > 0 else 0.0
-        )
+        winner_edge = _pick_winner_edge(root)
+        if winner_edge is None:
+            winner_plan = initial_plan
+            winner_plan_id = initial_plan.id
+            root_q = 0.0
+        else:
+            winner_plan = plan_by_id[winner_edge.child_plan_id]
+            winner_plan_id = winner_edge.child_plan_id
+            n_sa = winner_edge.visits_through_edge
+            root_q = (
+                (winner_edge.total_value_through_edge / n_sa) if n_sa > 0 else 0.0
+            )
 
     return MCTSResult(
         winner=winner_plan,

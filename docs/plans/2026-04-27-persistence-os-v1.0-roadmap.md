@@ -102,6 +102,12 @@ Three options were on the table for how Stream B threads MCTS into the walker:
 
 **Stream B implication:** the design doc at `docs/plans/2026-05-03-v0.6.5-mcts-design.md` (TBD) MUST encode (a) as the contract. The "dispatcher key is the only delta" claim from earlier ADR text was true under (c) only; under (a) the delta is one dispatcher key + a contract (handler signature + child-subtree invariant), no walker code changes.
 
+#### Amendment 2026-04-28 (Stream B v0.6.5 design)
+
+The Stream B design at `docs/plans/2026-04-28-v0.6.5-mcts-design.md` (the actual filename Stream B landed under, earlier-than-the-TBD-date placeholder above) ships under a **path-(i) variant**: option (a) `:branch` handler-registration is reaffirmed as the v1.0 contract but **deferred from v0.6.5 to v0.6.6**. Rationale: the structural-substitution path (MCTS produces a winning Plan AST → caller substitutes the winner subtree into the candidate Plan AST and dispatches as a normal non-leaf `:branch`) defends Prop 6 without requiring the dispatcher seam in v0.6.5. v0.6.5 ships `mcts_search()` returning a complete root plan; v0.6.6 wires the `:branch` handler that delegates to `mcts_search`.
+
+This amendment is consistent with the option-(a) decision above — the contract semantics do not change, only the v-tag that lands the dispatcher handler. v0.6.5's Prop 6 claim rests on the search-internal Merkle chain via `mcts/prev-hash` (see Stream B design §13), independent of dispatcher integration. See Stream B design ADR-12 for full rationale.
+
 ### What both ADRs preserve
 
 - Zero canonical-form change to existing modules. `PLAN_CANONICAL_VERSION = 1`.
@@ -180,12 +186,13 @@ PUCT-style tree search over the homoiconic Plan AST. State is content-addressed 
 
 > *Proposition 6 (MCTS provenance reconstructibility).* For any MCTS rollout `R` produced by `Module 3.X` over a content-addressed Plan AST, every node visited carries a `parent_provenance_hash` such that the full search trajectory can be reconstructed from the audit log alone, without re-executing the LLM evaluator.
 
-Defense outline:
-- Plan AST nodes are content-addressed (Module 3 invariant).
-- Each MCTS expansion is a Plan AST mutation (Module 3 dispatcher).
-- Each expansion is recorded as a `:plan/mcts-expand` fact (Module 1 invariant).
-- Each evaluator call is recorded as a `:llm/canonical-call` audit entry (Module 2 invariant).
-- Therefore the rollout = audit log slice between two timestamps. Q.E.D. by composition of Props 1, 2, 4.
+Defense outline (**revised 2026-04-28** to match Stream B v0.6.5 design):
+- Plan AST nodes are content-addressed (Module 3 invariant; `Node.id` = sha256 of canonical-JSON).
+- Each MCTS expansion produces a new content-addressed Plan AST via `apply_action` (pure function in `_mcts.py`). No dispatcher seam in v0.6.5 — the `:branch` handler that closes roadmap §3.3 option (a) is deferred to v0.6.6 (see §3.3 amendment 2026-04-28).
+- Each cache-miss expansion is recorded as a `:mcts/iteration` datom with `phase="expand"`, full action-payload `output`, and a `mcts/prev-hash` slot linking it to the prior datom in the search trajectory.
+- Each cache-miss evaluator call is recorded as a `:mcts/iteration` datom with `phase="evaluate"` (or `phase="reject"` on raise / non-finite / None / Protocol violation).
+- Together, the `:mcts/iteration` datoms form a **search-internal Merkle chain** via `mcts/prev-hash` — distinct from the effect-handler audit chain (`audit/*` prefix) that G2 validates. Tampering with any iteration datom invalidates all subsequent `prev-hash` values; **`parent_provenance_hash` in this proposition's wording denotes `mcts/prev-hash`**.
+- Q.E.D. by Prop 1 (datom append-only on Module 1) + the search-internal Merkle chain via `mcts/prev-hash`. NOT by composition with Prop 2 (effect-handler audit chain) — that chain is a separate concern in v0.6.5 (lifting MCTS provenance into the audit handler stack is a v1.0+ refactor).
 
 ### Module 7 REPL (Stream D) — proposition surface
 

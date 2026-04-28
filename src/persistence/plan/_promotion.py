@@ -1,13 +1,23 @@
-"""Promotion gates G1 (replay byte-identity) + G2 (audit-chain) (v0.6.0a1, A6).
+"""Promotion gates G1+G2+G3+G4 + ``promote()`` orchestrator (v0.6.0a1).
 
-A6 lands the first two of four promotion gates as **internal helpers**;
-A7 will add G3, the G4 stub, and the ``promote()`` orchestrator that
-calls all four and produces a ``PromotionRecord``. A6 does NOT export
-anything publicly — :mod:`persistence.plan.__init__` is A7's surface.
+A6 landed G1 (replay byte-identity) and G2 (audit-chain) as **internal
+helpers**. A7 lands the remaining surface:
+
+- :class:`PromotionRecord` — frozen+slots dataclass that carries the
+  outcome of all four gates plus a content-addressed ``promotion_id``.
+- :func:`gate_g3_score_delta` — score-delta gate (the value claim).
+- :func:`gate_g4_stub` — operator-approval stub. Stream D's REPL (Module
+  7) replaces the stub with a real operator-token path; Stream G's
+  integration test asserts no stub markers before the v1.0.0 tag.
+- :func:`promote` — orchestrates G1 → G2 → G3 → G4. On any gate failure
+  raises :class:`persistence.plan.GateFailure` with a ``partial_record``
+  attribute reflecting which gates ran (and what their results were)
+  before the failure. Pure orchestration: no IO beyond what the gates
+  themselves do (G1 calls the replay engine, G2 reads ``db.log()``).
 
 Gate semantics — pinned by
 ``docs/plans/2026-04-28-v0.6.0a1-plan-execution-design.md`` §7 and
-``docs/plans/2026-04-28-v0.6.0a1-plan-execution-impl.md`` §2.A6:
+``docs/plans/2026-04-28-v0.6.0a1-plan-execution-impl.md`` §2.A6 / §2.A7:
 
 - **G1** — Replay byte-identity over held-out trajectories. The candidate
   Plan AST is replayed against ≥ ``min_count`` recorded trajectories;
@@ -17,6 +27,21 @@ Gate semantics — pinned by
   ``AuditEntry`` instances from ``:audit/...`` datoms in the DB and
   feeds them to :func:`persistence.effect.verify_chain`. **Any chain
   break = G2 fail.** Defends Prop 2.
+- **G3** — Score delta. ``optimized_score - baseline_score >= epsilon``
+  → True. Sub-threshold deltas can't justify promotion; this is the
+  value-claim gate.
+- **G4** — Operator approval. Stream A ships a stub that always
+  approves; Stream D wires it to a Module 7 REPL operator-token path.
+
+``promote()`` runs **G1 → G2 → G3 → G4**. Cheap-to-expensive ordering
+isn't the right axis here — G1 + G2 are the *correctness* gates (no
+amount of value justifies promoting a candidate that can't replay or
+sits on a broken audit chain), G3 is the value gate, G4 is the human-
+in-the-loop gate that necessarily comes last. Either ordering works
+under the contract (failures still surface a ``GateFailure`` with a
+partial record); this one matches design-doc §7's enumeration order
+and minimises late surprise (broken correctness should not be hidden
+behind an early G3 win).
 
 Engine-wiring decision (impl plan calls G1's parameter ``replay_engine:
 ReplayEngine``). :mod:`persistence.replay` exposes module-level functions
@@ -31,20 +56,24 @@ ReplayEngine``). :mod:`persistence.replay` exposes module-level functions
 
 References:
     docs/plans/2026-04-28-v0.6.0a1-plan-execution-design.md §7
-    docs/plans/2026-04-28-v0.6.0a1-plan-execution-impl.md §2.A6
+    docs/plans/2026-04-28-v0.6.0a1-plan-execution-impl.md §2.A6 / §2.A7
     src/persistence/effect/handlers/audit.py (verify_chain, datom_to_audit_entry)
     src/persistence/replay/engine.py (replay, compare)
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import warnings
-from typing import Any, Iterable, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, Protocol, runtime_checkable
 
 from persistence.effect import datom_to_audit_entry, verify_chain
 from persistence.effect.handlers.audit import AuditEntry
 from persistence.fact.datom import Datom
 from persistence.fact.db import DB
 from persistence.plan._ast import Node
+from persistence.plan._errors import GateFailure
 from persistence.replay.trajectory import Trajectory
 
 
@@ -337,3 +366,440 @@ def gate_g2_audit_chain(
         )
     )
     return verify_chain(entries)
+
+
+# ---------------------------------------------------------------------------
+# G3 — score delta
+# ---------------------------------------------------------------------------
+
+
+#: Default epsilon for the G3 score-delta gate. Pinned by impl plan
+#: §2.A7 ("``optimized - baseline < epsilon`` → fail"). Exposed as a
+#: module constant so the test drift-pin and the design doc reference
+#: the same source.
+_DEFAULT_G3_EPSILON: float = 0.05
+
+
+def gate_g3_score_delta(
+    optimized_score: float,
+    baseline_score: float,
+    *,
+    epsilon: float = _DEFAULT_G3_EPSILON,
+) -> bool:
+    """G3 — ``optimized - baseline >= epsilon`` → True (value claim).
+
+    The value-claim gate. Sub-threshold deltas (including negative
+    deltas) can't justify promotion regardless of how cleanly G1 + G2
+    pass. Boundary semantics: ``>=`` accepts exactly at ``epsilon`` —
+    flipping to ``>`` would make the contract noisy at the threshold,
+    and the design doc's "≥ epsilon" wording is canonical.
+
+    Parameters
+    ----------
+    optimized_score
+        Score of the candidate (post-optimization) plan on the
+        validation set. Same metric as ``baseline_score``.
+    baseline_score
+        Score of the pre-optimization (or current production) plan on
+        the same validation set.
+    epsilon
+        Minimum positive delta. Default ``0.05`` per impl plan §2.A7.
+
+    Returns
+    -------
+    ``True`` iff ``optimized_score - baseline_score >= epsilon``;
+    ``False`` otherwise.
+    """
+    return (optimized_score - baseline_score) >= epsilon
+
+
+# ---------------------------------------------------------------------------
+# G4 — operator approval (stub for Stream A; replaced by Stream D)
+# ---------------------------------------------------------------------------
+
+
+#: Stream A's G4 stub-approver name. Pinned at module level so the
+#: Stream G integration test can scan persisted promotion records for
+#: this exact string before the v1.0.0 tag and reject any that still
+#: carry it.
+_G4_STUB_APPROVER: str = "stub"
+
+#: Stream A's G4 stub rationale. Pinned for the same reason as
+#: ``_G4_STUB_APPROVER`` — Stream G's regression test compares
+#: verbatim.
+_G4_STUB_RATIONALE: str = "Stream A stub — Stream D replaces"
+
+
+def gate_g4_stub() -> dict:
+    """G4 stub — always approves. Stream D's REPL replaces.
+
+    The substrate-level operator-approval gate. Real wiring lands in
+    Stream D (Module 7 REPL): an operator-token capability check on
+    ``persistence.repl`` that reads the operator's signed promote
+    request, verifies the token, and returns
+    ``{"approved": True, "approver": "<token-subject>", "rationale":
+    "<operator note>"}`` (or False with a denial rationale).
+
+    The stub returns a fixed-shape dict so callers can substitute the
+    real implementation by passing ``g4_fn=<real-fn>`` to
+    :func:`promote` once Stream D ships, with no contract drift.
+
+    Returns
+    -------
+    Exactly:
+    ``{"approved": True, "approver": "stub",
+       "rationale": "Stream A stub — Stream D replaces"}``.
+
+    Stream G integration test before the v1.0.0 tag MUST reject any
+    persisted ``PromotionRecord`` whose ``g4_approver == "stub"`` —
+    that's the marker.
+    """
+    return {
+        "approved": True,
+        "approver": _G4_STUB_APPROVER,
+        "rationale": _G4_STUB_RATIONALE,
+    }
+
+
+# ---------------------------------------------------------------------------
+# PromotionRecord + promote() orchestrator
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class PromotionRecord:
+    """Outcome of a promotion attempt — all four gates' results.
+
+    Frozen so the caller can hash / cache / log without worrying about
+    silent mutation; ``slots=True`` saves the dataclass dict footprint
+    (one record per promotion, but each record is small and hot in
+    Module 7 REPL listings).
+
+    Field-by-field semantics:
+
+    - ``candidate_plan_id``: the Plan AST's content hash (``Node.id``).
+      Together with the gate fields this is the input to the
+      ``promotion_id`` canonical hash.
+    - ``g1_*``: G1 outcome. ``g1_held_out_count`` is the size of the
+      held-out corpus the gate ran against (NOT the count of replays
+      that succeeded — G1 short-circuits on first divergence).
+    - ``g2_audit_chain_verified``: G2 outcome.
+    - ``g3_score_delta``: ``optimized_score - baseline_score`` as
+      observed at gate time. Recorded even on G3 failure so the
+      partial record carries the actual delta.
+    - ``g3_score_threshold``: the ``epsilon`` G3 was run with.
+    - ``g4_*``: G4 outcome. ``g4_approver`` is ``"stub"`` in Stream A;
+      Stream D's REPL replaces with the operator token's subject.
+    - ``promoted_at``: caller-supplied milliseconds-since-epoch (no
+      ``time.time()`` fallback — repo discipline, Phase B precedent).
+    - ``promotion_id``: sha256 hex of canonical-JSON over the dict
+      pinned by impl plan §2.A7 lines 540–553. Deterministic: same
+      gate outcomes + same plan + same timestamp → same id.
+
+    Drift-pin to A5: this dataclass MUST satisfy
+    :class:`persistence.plan._skill_library._PromotionRecordLike`
+    structurally — A5 only reads ``promotion_id``, but the
+    runtime_checkable protocol is what
+    :class:`persistence.plan.SkillLibrary` types its
+    ``register(promotion_record=...)`` argument against, and A7's
+    drift-pin test asserts the isinstance relation.
+    """
+
+    candidate_plan_id: str
+    g1_replay_byte_identity: bool
+    g1_held_out_count: int
+    g2_audit_chain_verified: bool
+    g3_score_delta: float
+    g3_score_threshold: float
+    g4_approver: str
+    g4_approved: bool
+    g4_rationale: str
+    promoted_at: int
+    promotion_id: str
+
+
+def _compute_promotion_id(
+    *,
+    candidate_plan_id: str,
+    g1_replay_byte_identity: bool,
+    g1_held_out_count: int,
+    g2_audit_chain_verified: bool,
+    g3_score_delta: float,
+    g3_score_threshold: float,
+    g4_approver: str,
+    g4_approved: bool,
+    g4_rationale: str,
+    promoted_at: int,
+) -> str:
+    """SHA-256 hex of canonical-JSON over the impl-plan §2.A7 dict.
+
+    Same canonical-JSON rule as :class:`Node.id` and
+    :func:`persistence.plan._optimize._compute_optimizer_call_hash`
+    (sort_keys, separators=(",",":"), allow_nan=False). The digest is
+    stable across runs and machines — same gate outcomes + same plan +
+    same timestamp → same ``promotion_id``.
+
+    Returns
+    -------
+    64-char lowercase hex digest.
+    """
+    payload = {
+        "candidate_plan_id": candidate_plan_id,
+        "g1_replay_byte_identity": g1_replay_byte_identity,
+        "g1_held_out_count": g1_held_out_count,
+        "g2_audit_chain_verified": g2_audit_chain_verified,
+        "g3_score_delta": g3_score_delta,
+        "g3_score_threshold": g3_score_threshold,
+        "g4_approver": g4_approver,
+        "g4_approved": g4_approved,
+        "g4_rationale": g4_rationale,
+        "promoted_at": promoted_at,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _build_promotion_record(
+    *,
+    candidate_plan_id: str,
+    g1_replay_byte_identity: bool,
+    g1_held_out_count: int,
+    g2_audit_chain_verified: bool,
+    g3_score_delta: float,
+    g3_score_threshold: float,
+    g4_approver: str,
+    g4_approved: bool,
+    g4_rationale: str,
+    promoted_at: int,
+) -> PromotionRecord:
+    """Build a :class:`PromotionRecord` with the canonical ``promotion_id``.
+
+    Helper so :func:`promote` can build both successful and partial
+    records through one site — keeps the hash-input dict in one place,
+    matching :func:`_compute_promotion_id`.
+    """
+    promotion_id = _compute_promotion_id(
+        candidate_plan_id=candidate_plan_id,
+        g1_replay_byte_identity=g1_replay_byte_identity,
+        g1_held_out_count=g1_held_out_count,
+        g2_audit_chain_verified=g2_audit_chain_verified,
+        g3_score_delta=g3_score_delta,
+        g3_score_threshold=g3_score_threshold,
+        g4_approver=g4_approver,
+        g4_approved=g4_approved,
+        g4_rationale=g4_rationale,
+        promoted_at=promoted_at,
+    )
+    return PromotionRecord(
+        candidate_plan_id=candidate_plan_id,
+        g1_replay_byte_identity=g1_replay_byte_identity,
+        g1_held_out_count=g1_held_out_count,
+        g2_audit_chain_verified=g2_audit_chain_verified,
+        g3_score_delta=g3_score_delta,
+        g3_score_threshold=g3_score_threshold,
+        g4_approver=g4_approver,
+        g4_approved=g4_approved,
+        g4_rationale=g4_rationale,
+        promoted_at=promoted_at,
+        promotion_id=promotion_id,
+    )
+
+
+def _raise_gate_failure(message: str, partial_record: PromotionRecord) -> None:
+    """Raise :class:`GateFailure` carrying ``partial_record`` as an attr.
+
+    :class:`GateFailure` inherits ``RuntimeError(message)`` only — no
+    custom signature. We attach ``partial_record`` after construction
+    so the exception's class doesn't need to change. Callers retrieve
+    it via ``getattr(exc, "partial_record", None)``.
+    """
+    exc = GateFailure(message)
+    exc.partial_record = partial_record  # type: ignore[attr-defined]
+    raise exc
+
+
+def promote(
+    candidate_plan: Node,
+    *,
+    db: DB,
+    optimized_score: float,
+    baseline_score: float,
+    held_out_trajectories: list[Trajectory],
+    replay_engine: ReplayEngine,
+    audit_window: tuple[int, int],
+    epsilon: float = _DEFAULT_G3_EPSILON,
+    min_g1_count: int = _DEFAULT_MIN_COUNT,
+    promoted_at_ms: int,
+    g4_fn: Callable[[], dict] = gate_g4_stub,
+) -> PromotionRecord:
+    """Run all four promotion gates and return a :class:`PromotionRecord`.
+
+    Order: **G1 → G2 → G3 → G4**. The first gate to fail aborts with a
+    :class:`GateFailure` whose ``partial_record`` attribute carries the
+    state of the gates that ran (the failing gate's outcome is recorded
+    on the partial record; gates that did not run keep their default
+    sentinel — ``False`` for bools, ``0.0`` / ``0`` for the score-delta
+    fields).
+
+    Pure orchestration. No IO beyond:
+
+    - G1 calls ``replay_engine.replay`` / ``replay_engine.compare`` per
+      held-out trajectory.
+    - G2 walks ``db.log()`` once.
+
+    No new datoms are written. Persisting the result is the caller's
+    job (typically :meth:`persistence.plan.SkillLibrary.register`).
+
+    Parameters
+    ----------
+    candidate_plan
+        The Plan AST under evaluation.
+    db
+        Fact store for G2's audit-chain check. Read-only here.
+    optimized_score
+        Candidate's score on the validation set (G3 input).
+    baseline_score
+        Pre-optimization plan's score on the same set (G3 input).
+    held_out_trajectories
+        Recorded trajectories for G1's byte-identity check.
+    replay_engine
+        Anything satisfying :class:`ReplayEngine`. Production callers
+        pass an adapter around :mod:`persistence.replay`; tests pass a
+        stub.
+    audit_window
+        ``(start_ms, end_ms)`` inclusive — milliseconds since the Unix
+        epoch — for G2's chain check.
+    epsilon
+        G3 threshold. Default ``0.05`` (impl plan §2.A7).
+    min_g1_count
+        G1 corpus minimum. Default ``10`` (design doc §7).
+    promoted_at_ms
+        Caller-supplied promotion timestamp. **Keyword-only, no
+        default** — repo discipline forbids ``time.time()`` fallback.
+        Source TBD by Module 7 REPL or a ``:clock/now`` effect handler.
+    g4_fn
+        G4 callable. Default :func:`gate_g4_stub` (Stream A); Stream D
+        passes a real operator-token check. Must return a dict with
+        keys ``approved`` (bool), ``approver`` (str), ``rationale`` (str).
+
+    Returns
+    -------
+    PromotionRecord
+        On all-gates-pass.
+
+    Raises
+    ------
+    GateFailure
+        On any gate failure. The exception's ``partial_record``
+        attribute carries the state at failure-time.
+    """
+    candidate_plan_id = candidate_plan.id
+    audit_window_start, audit_window_end = audit_window
+
+    # G1 ---------------------------------------------------------------
+    g1_count = len(held_out_trajectories)
+    g1_pass = gate_g1_replay_byte_identity(
+        candidate_plan,
+        held_out_trajectories=held_out_trajectories,
+        replay_engine=replay_engine,
+        min_count=min_g1_count,
+    )
+    if not g1_pass:
+        partial = _build_promotion_record(
+            candidate_plan_id=candidate_plan_id,
+            g1_replay_byte_identity=False,
+            g1_held_out_count=g1_count,
+            g2_audit_chain_verified=False,
+            g3_score_delta=0.0,
+            g3_score_threshold=epsilon,
+            g4_approver="",
+            g4_approved=False,
+            g4_rationale="",
+            promoted_at=promoted_at_ms,
+        )
+        _raise_gate_failure("G1 replay byte-identity failed", partial)
+
+    # G2 ---------------------------------------------------------------
+    g2_pass = gate_g2_audit_chain(
+        db,
+        audit_window_start=audit_window_start,
+        audit_window_end=audit_window_end,
+    )
+    if not g2_pass:
+        partial = _build_promotion_record(
+            candidate_plan_id=candidate_plan_id,
+            g1_replay_byte_identity=True,
+            g1_held_out_count=g1_count,
+            g2_audit_chain_verified=False,
+            g3_score_delta=0.0,
+            g3_score_threshold=epsilon,
+            g4_approver="",
+            g4_approved=False,
+            g4_rationale="",
+            promoted_at=promoted_at_ms,
+        )
+        _raise_gate_failure("G2 audit chain failed", partial)
+
+    # G3 ---------------------------------------------------------------
+    g3_delta = optimized_score - baseline_score
+    g3_pass = gate_g3_score_delta(
+        optimized_score, baseline_score, epsilon=epsilon
+    )
+    if not g3_pass:
+        partial = _build_promotion_record(
+            candidate_plan_id=candidate_plan_id,
+            g1_replay_byte_identity=True,
+            g1_held_out_count=g1_count,
+            g2_audit_chain_verified=True,
+            # Record the actual delta so the caller can see how far
+            # below threshold the candidate landed — debugging signal.
+            g3_score_delta=g3_delta,
+            g3_score_threshold=epsilon,
+            g4_approver="",
+            g4_approved=False,
+            g4_rationale="",
+            promoted_at=promoted_at_ms,
+        )
+        _raise_gate_failure("G3 score delta below threshold", partial)
+
+    # G4 ---------------------------------------------------------------
+    # The g4_fn contract: dict with keys ``approved`` (bool),
+    # ``approver`` (str), ``rationale`` (str). Stream A's stub is the
+    # default; Stream D's REPL operator-token check substitutes here.
+    g4_result = g4_fn()
+    g4_approved = bool(g4_result["approved"])
+    g4_approver = str(g4_result["approver"])
+    g4_rationale = str(g4_result["rationale"])
+    if not g4_approved:
+        partial = _build_promotion_record(
+            candidate_plan_id=candidate_plan_id,
+            g1_replay_byte_identity=True,
+            g1_held_out_count=g1_count,
+            g2_audit_chain_verified=True,
+            g3_score_delta=g3_delta,
+            g3_score_threshold=epsilon,
+            g4_approver=g4_approver,
+            g4_approved=False,
+            g4_rationale=g4_rationale,
+            promoted_at=promoted_at_ms,
+        )
+        _raise_gate_failure("G4 not approved", partial)
+
+    # All four gates passed.
+    return _build_promotion_record(
+        candidate_plan_id=candidate_plan_id,
+        g1_replay_byte_identity=True,
+        g1_held_out_count=g1_count,
+        g2_audit_chain_verified=True,
+        g3_score_delta=g3_delta,
+        g3_score_threshold=epsilon,
+        g4_approver=g4_approver,
+        g4_approved=True,
+        g4_rationale=g4_rationale,
+        promoted_at=promoted_at_ms,
+    )

@@ -51,7 +51,7 @@ References:
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional, Protocol
+from typing import Optional, Protocol, runtime_checkable
 
 from persistence.fact.db import DB
 from persistence.plan._ast import Node
@@ -78,6 +78,7 @@ _SKILL_ID_PREFIX: str = "skill/"
 _SKILL_ID_HEX_WIDTH: int = 16
 
 
+@runtime_checkable
 class _PromotionRecordLike(Protocol):
     """Structural type for what SkillLibrary consumes from a promotion record.
 
@@ -93,6 +94,12 @@ class _PromotionRecordLike(Protocol):
     satisfy the protocol structurally. A bare class-attr declaration
     would imply mutability and pyright would reject frozen dataclasses
     as incompatible.
+
+    ``@runtime_checkable`` so A7's drift-pin test can assert
+    ``isinstance(record, _PromotionRecordLike)`` — the cheapest way to
+    make A7's ``PromotionRecord`` shape-check against A5's expectations
+    at test-collection time. Same decoration pattern :class:`ReplayEngine`
+    uses in :mod:`persistence.plan._promotion`.
     """
 
     @property

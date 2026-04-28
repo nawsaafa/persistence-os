@@ -24,6 +24,7 @@ from persistence.plan._coerce import (
     unregister_coercion,
 )
 from persistence.plan._errors import (
+    GateFailure,
     OptimizerNotAvailable,
     ParseError,
     UnimplementedNodeKindError,
@@ -45,6 +46,15 @@ from persistence.plan._metric_registry import (
 )
 from persistence.plan._optimize import OptimizedPlan, optimize
 from persistence.plan._parse import parse, unparse
+from persistence.plan._promotion import (
+    PromotionRecord,
+    ReplayEngine,
+    gate_g1_replay_byte_identity,
+    gate_g2_audit_chain,
+    gate_g3_score_delta,
+    gate_g4_stub,
+    promote,
+)
 from persistence.plan._skill_library import SkillLibrary
 
 __all__ = [
@@ -52,6 +62,7 @@ __all__ = [
     "Dispatcher",
     "ExecutionResult",
     "FailureInfo",
+    "GateFailure",
     "Handler",
     "ID_HEX_WIDTH",
     "LeafResult",
@@ -61,14 +72,21 @@ __all__ = [
     "OptimizerNotAvailable",
     "ParseError",
     "PLAN_CANONICAL_VERSION",
+    "PromotionRecord",
+    "ReplayEngine",
     "SkillLibrary",
     "TrainingExample",
     "UnimplementedNodeKindError",
     "execute",
+    "gate_g1_replay_byte_identity",
+    "gate_g2_audit_chain",
+    "gate_g3_score_delta",
+    "gate_g4_stub",
     "lookup_coercion",
     "lookup_metric",
     "optimize",
     "parse",
+    "promote",
     "register_coercion",
     "register_metric",
     "unparse",

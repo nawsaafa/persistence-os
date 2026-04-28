@@ -162,6 +162,11 @@ class WSServer:
         self.static_dir = static_dir if static_dir is not None else _default_static_dir()
         self.app = web.Application()
         self.app.router.add_get("/", self._serve_index)
+        # D8: vanilla-JS UI assets served from the same origin so the
+        # WS handshake (Origin check) and the asset fetch share the
+        # same port. No build step.
+        self.app.router.add_get("/style.css", self._serve_css)
+        self.app.router.add_get("/app.js", self._serve_js)
         self.app.router.add_get("/ws", self._handle_ws)
         # Active sessions keyed by session_id. Surfaced for testability
         # and so D4/D5 ops can swap the session record after rewind /
@@ -196,6 +201,26 @@ class WSServer:
                 content_type="text/html",
             )
         return web.FileResponse(index_path)
+
+    async def _serve_css(self, request: web.Request) -> web.Response:
+        """Serve ``static/style.css`` (D8). Returns 404 if absent so a
+        deleted static dir degrades gracefully without crashing the
+        server.
+        """
+        p = self.static_dir / "style.css"
+        if not p.exists():
+            return web.Response(status=404, text="not found")
+        return web.FileResponse(p)
+
+    async def _serve_js(self, request: web.Request) -> web.Response:
+        """Serve ``static/app.js`` (D8). Returns 404 if absent so a
+        deleted static dir degrades gracefully without crashing the
+        server.
+        """
+        p = self.static_dir / "app.js"
+        if not p.exists():
+            return web.Response(status=404, text="not found")
+        return web.FileResponse(p)
 
     async def _handle_ws(self, request: web.Request) -> web.WebSocketResponse:
         """Accept a WS upgrade and dispatch messages.

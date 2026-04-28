@@ -20,6 +20,10 @@ class MetricNotRegistered(KeyError):
     """`MetricRef` lookup miss in the metric registry."""
 
 
+class PlanDepthExceeded(ValueError):
+    """`apply_action` produced a Plan AST whose depth exceeds MAX_PLAN_DEPTH."""
+
+
 class GateFailure(RuntimeError):
     """A promotion gate (G1/G2/G3/G4) returned False; raised by `promote()`.
 

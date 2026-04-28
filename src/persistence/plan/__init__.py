@@ -28,6 +28,7 @@ from persistence.plan._errors import (
     MetricNotRegistered,
     OptimizerNotAvailable,
     ParseError,
+    PlanDepthExceeded,
     UnimplementedNodeKindError,
 )
 from persistence.plan._walk import walk
@@ -57,9 +58,20 @@ from persistence.plan._promotion import (
     promote,
 )
 from persistence.plan._skill_library import SkillLibrary
+from persistence.plan._mcts import (
+    Action,
+    AddStepAction,
+    ComposeWithSkillAction,
+    MAX_PLAN_DEPTH,
+    SubstituteLeafAction,
+    apply_action,
+)
 
 __all__ = [
+    "Action",
+    "AddStepAction",
     "Coercion",
+    "ComposeWithSkillAction",
     "Dispatcher",
     "ExecutionResult",
     "FailureInfo",
@@ -67,6 +79,7 @@ __all__ = [
     "Handler",
     "ID_HEX_WIDTH",
     "LeafResult",
+    "MAX_PLAN_DEPTH",
     "MetricNotRegistered",
     "MetricRef",
     "Node",
@@ -74,11 +87,14 @@ __all__ = [
     "OptimizerNotAvailable",
     "ParseError",
     "PLAN_CANONICAL_VERSION",
+    "PlanDepthExceeded",
     "PromotionRecord",
     "ReplayEngine",
     "SkillLibrary",
+    "SubstituteLeafAction",
     "TrainingExample",
     "UnimplementedNodeKindError",
+    "apply_action",
     "execute",
     "gate_g1_replay_byte_identity",
     "gate_g2_audit_chain",

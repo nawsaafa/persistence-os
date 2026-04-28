@@ -24,6 +24,18 @@ class PlanDepthExceeded(ValueError):
     """`apply_action` produced a Plan AST whose depth exceeds MAX_PLAN_DEPTH."""
 
 
+class ExpanderContractError(ValueError):
+    """`Expander.propose` returned proposals violating the prior-sum-to-1.0 contract.
+
+    Raised by the MCTS search loop (B6) on every cache-miss expansion
+    when ``abs(sum(prior for _, prior in proposals) - 1.0) >= _PRIOR_TOL``
+    (design §8). Empty proposal lists are exempt (terminal-node signal).
+    Subclasses ``ValueError`` so callers can ``except ValueError`` if
+    they want to bundle expander-contract failures with other invalid-
+    input errors.
+    """
+
+
 class GateFailure(RuntimeError):
     """A promotion gate (G1/G2/G3/G4) returned False; raised by `promote()`.
 

@@ -3,13 +3,15 @@
 B1: Action ADT + canonical hash + pure ``apply_action`` + depth guard.
 B2: ``MCTSConfig`` frozen dataclass + ``__post_init__`` validation.
 B3: ``MCTSNode`` + ``MCTSEdge`` non-frozen dataclasses (slots=True).
+B4: ``Expander`` Protocol + ``_StaticExpander`` + ``LLMExpander`` (design §8).
 """
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Callable, Literal, Protocol, Union, runtime_checkable
 
 from persistence.plan._ast import Node
 from persistence.plan._errors import PlanDepthExceeded
@@ -21,6 +23,8 @@ __all__ = [
     "Action",
     "AddStepAction",
     "ComposeWithSkillAction",
+    "Expander",
+    "LLMExpander",
     "MAX_PLAN_DEPTH",
     "MCTSConfig",
     "MCTSEdge",
@@ -33,6 +37,12 @@ __all__ = [
 #: ``ComposeWithSkillAction`` additionally pre-checks against
 #: ``MAX_PLAN_DEPTH // 2`` (design §6 two-layer guard).
 MAX_PLAN_DEPTH: int = 32
+
+#: Tolerance for the ``Expander`` prior-sum-to-1.0 contract (design §8).
+#: The MCTS loop (B6) asserts ``abs(sum(priors) - 1.0) < _PRIOR_TOL`` on
+#: every cache miss; failure raises ``ExpanderContractError``. Empty
+#: proposal lists are exempt (terminal-node signal; design §10).
+_PRIOR_TOL: float = 1e-6
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,4 +317,90 @@ class MCTSNode:
         return 0.0 if self.visits == 0 else self.total_value / self.visits
 
 
-# B4-B9 to follow
+# --- B4: Expander Protocol + implementations (design §8, ADR-5) --------- #
+
+
+@runtime_checkable
+class Expander(Protocol):
+    """Proposes ``(action, prior)`` pairs at expansion time (design §8).
+
+    Implementations are typically LLM-backed but the Protocol shape is
+    open: deterministic stubs satisfy it for tests, symbolic expanders
+    satisfy it for v0.7+, and "always propose skill X" fixtures satisfy
+    it for closed-loop integration tests.
+
+    The expander MUST return softmax-normalized priors (sum to 1.0
+    within ``_PRIOR_TOL``). MCTS does NOT re-normalize — the expander
+    owns the policy distribution; MCTS owns the tree. Empty sequence =
+    terminal-node signal (no prior-sum check); the MCTS loop marks the
+    ``MCTSNode`` as ``is_terminal`` and skips further selection.
+    """
+
+    def propose(self, plan: Node, *, k: int) -> Sequence[tuple[Action, float]]:
+        """Return at most ``k`` ``(action, prior)`` pairs for ``plan``."""
+        ...
+
+
+class LLMExpander:
+    """Production wiring; the LLM provider closure is the caller's concern.
+
+    The constructor takes a ``provider: Callable[[Node, int], Sequence[
+    tuple[Action, float]]]`` that the caller wires to whichever LLM
+    dispatch path is appropriate (Anthropic / Bedrock / etc.). MCTS does
+    NOT own the registry seam (design §17 ADR-5: registry indirection
+    rejected in W1). The provider is responsible for prompt composition,
+    JSON-mode response parsing, and softmax-normalizing priors. The MCTS
+    loop (B6) validates ``sum(priors) ≈ 1.0`` on cache miss; this class
+    is pure delegation.
+    """
+
+    __slots__ = ("_provider",)
+
+    def __init__(
+        self,
+        provider: Callable[[Node, int], Sequence[tuple[Action, float]]],
+    ) -> None:
+        self._provider = provider
+
+    def propose(self, plan: Node, *, k: int) -> Sequence[tuple[Action, float]]:
+        """Delegate to the wired provider closure (design §8)."""
+        return self._provider(plan, k)
+
+
+class _StaticExpander:
+    """Test-only stub. Pinned signature mirrors ``LLMExpander`` for B-series fixtures.
+
+    ``proposals`` is keyed by ``plan.id`` (the content-addressed Plan AST
+    hash). On unknown ``plan.id``, ``on_unknown="empty"`` returns ``()``
+    (terminal-node signal); ``on_unknown="raise"`` raises ``KeyError``.
+    Returned sequence is truncated to at most ``k`` entries — the
+    caller's beam-width hint is honoured deterministically by slicing
+    the head of the pinned proposal list.
+    """
+
+    __slots__ = ("_proposals", "_on_unknown")
+
+    def __init__(
+        self,
+        proposals: dict[str, Sequence[tuple[Action, float]]],
+        *,
+        on_unknown: Literal["empty", "raise"] = "empty",
+    ) -> None:
+        self._proposals = proposals
+        self._on_unknown = on_unknown
+
+    def propose(self, plan: Node, *, k: int) -> Sequence[tuple[Action, float]]:
+        """Look up by ``plan.id``; truncate to ``k``; honour ``on_unknown``."""
+        pinned = self._proposals.get(plan.id)
+        if pinned is None:
+            if self._on_unknown == "raise":
+                raise KeyError(plan.id)
+            return ()
+        # Tuple-construction materialises the Sequence so the caller
+        # cannot accidentally consume a single-pass iterator (design §8
+        # forbids generator returns; the Sequence contract is the
+        # minimal correct one).
+        return tuple(pinned[:k])
+
+
+# B5-B9 to follow

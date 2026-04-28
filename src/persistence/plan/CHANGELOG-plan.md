@@ -1,5 +1,62 @@
 # persistence.plan CHANGELOG
 
+## v0.6.0a1 (2026-04-28) — Plan execution + optimization + 4-gate promotion
+
+Stream A of the v1.0 ferrari-first roadmap — closes the
+"plan as data → plan as runnable program" boundary.
+
+### Added
+
+- **`_execute.py`** — `execute(plan, db, *, dispatcher=None) → ExecutionResult`
+  with frozen `LeafResult` / `FailureInfo` envelopes. Per-leaf failure
+  capture; only handler-thrown exceptions of an explicitly-allowed set
+  propagate.
+- **`_metric_registry.py`** — `register_metric` / `lookup_metric` /
+  `unregister_metric` with `MetricRef` and `MetricNotRegistered`.
+- **`TrainingExample`** + `_canonicalize_training_set(...)` —
+  deterministic ordering + canonical EDN form for reproducible DSPy
+  optimization.
+- **`_optimize.py`** — `_plan_to_dspy_module` forward adapter (lazy DSPy
+  import; `OptimizerNotAvailable` when missing); inverse adapter rebuilds
+  a `Node` AST with provenance pinning. `optimize(plan, training_set,
+  metric, *, db, max_demos=...) → OptimizedPlan` end-to-end MIPROv2
+  wrapper. Caller-injectable dispatcher (W1.A4).
+- **`_skill_library.py`** — `SkillLibrary` with `register` / `lookup` /
+  `list_skills`. Cross-instance idempotency via fact-store log scan;
+  conflicting content raises. `_PromotionRecordLike` `@runtime_checkable`
+  Protocol decouples this surface from `PromotionRecord`.
+- **`_promotion.py`** — four gates (`gate_g1_replay_byte_identity`,
+  `gate_g2_audit_chain`, `gate_g3_score_delta`, `gate_g4_stub`) and a
+  `promote()` orchestrator. `PromotionRecord` is `@dataclass(frozen=True,
+  slots=True)` with content-addressed `promotion_id`.
+- **`GateFailure`** moved to `_errors.py` as a typed class with
+  class-level `partial_record: Any` attribute.
+
+### W1 fix-pass (post-ARIS R2)
+
+- W1.A G1 strict-key check on `compare()` dict (`TypeError` on missing
+  `divergence_step`).
+- W1.B G4 `isinstance(approved_raw, bool)` (rejects truthy non-bool).
+- W1.C G2 empty audit window → `False` + `UserWarning`.
+- W1.F-1 `:signature` required in `_datom_to_wire_for_audit` (raises
+  `ValueError` on absence).
+- W1.F-2 Simplified `_raise_gate_failure`.
+- W1.G G1/G2 contracts: `@runtime_checkable` ReplayEngine Protocol;
+  `divergence_step` required key; empty corpus → False+UserWarning;
+  audit-window pull mechanism documented in design doc.
+
+### Preserving changes (id-stability)
+
+`PLAN_CANONICAL_VERSION` unchanged at **1**. No changes to
+`_canonical_dict`, `_coerce`, or `_walk` semantics. All v0.6.0a1
+additions are new modules around the existing AST surface; existing
+`Node.id` hashes are bit-stable across this release.
+
+### Suite
+
+`1018 → 1084 passed, 7 xfailed` (+66 over v0.5.1 baseline; +3 W1
+pin tests).
+
 ## v0.4.0a1 (2026-04-25) — substrate-primitives: Dispatcher + walk rename
 
 ### Added

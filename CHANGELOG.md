@@ -3,6 +3,127 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.6.0a1 — 2026-04-28 (Module 3: Plan — execution + optimization + 4-gate promotion)
+
+Stream A of the v1.0 ferrari-first roadmap. Closes the
+"plan as data → plan as runnable program" boundary by shipping
+`execute()`, `optimize()`, `SkillLibrary`, and the four promotion
+gates (G1/G2/G3/G4) wired through a single `promote()` orchestrator.
+ARIS R1 (design fitness) + R2 (code quality) PASS at mean 8.92 / min 8.4.
+
+### Added
+
+- **`execute(plan, db, *, dispatcher=None) → ExecutionResult`**
+  (`persistence.plan._execute`). Walks a `Node` AST, calls the per-tag
+  `Handler` registered on a `Dispatcher`, and returns a frozen
+  `ExecutionResult(leaves: tuple[LeafResult, ...], failures: tuple[FailureInfo, ...])`.
+  `LeafResult` and `FailureInfo` are `@dataclass(frozen=True, slots=True)`.
+  Failures are caught per-leaf and reported in `failures`; only handler-
+  thrown exceptions of an explicitly-allowed set propagate.
+- **Metric registry** (`persistence.plan._metric_registry`).
+  `register_metric(name, fn)` / `lookup_metric(name) → MetricRef`
+  / `unregister_metric(name)`. Process-local, idempotent re-registration
+  rejected. `MetricNotRegistered` raised on lookup miss (now exported
+  from `persistence.plan`).
+- **`TrainingExample`** + `_canonicalize_training_set(...)`. Sorts
+  examples deterministically and pins the canonical EDN form so DSPy
+  optimization runs are reproducible across re-imports.
+- **`_plan_to_dspy_module(node)`** forward adapter
+  (`persistence.plan._optimize`). Lazy-imports DSPy 2.5+; explicit
+  `OptimizerNotAvailable` when DSPy missing. Inverse adapter
+  rebuilds a `Node` AST from the optimized DSPy program with full
+  provenance pinning back to the source plan id.
+- **`optimize(plan, training_set, metric, *, db, max_demos=...) → OptimizedPlan`**.
+  End-to-end MIPROv2 wrapper: forward → optimize → inverse → emit
+  `:plan/optimization` datom on the source plan's provenance. Caller-
+  injectable dispatcher (W1.A4) keeps the optimizer pure.
+- **`SkillLibrary`** (`persistence.plan._skill_library`).
+  `register(skill_id, node)` / `lookup(skill_id) → Node | None`
+  / `list_skills() → list[str]`. Cross-instance idempotency via fact-
+  store log scan: re-registration of the same `skill_id → Node` content
+  is a no-op; conflicting content raises. Backed by a
+  `_PromotionRecordLike` `@runtime_checkable` Protocol so A5 stays
+  decoupled from A7's `PromotionRecord` dataclass.
+- **`gate_g1_replay_byte_identity(plan, replay_engine, db, *, window=None) → bool`**.
+  Pulls a deterministic replay window, calls
+  `replay_engine.compare(plan, audit_window) → dict` (positional-only
+  via `/`), and returns False on `divergence_step != None`. Strict-key
+  contract: missing `divergence_step` raises `TypeError`. Empty replay
+  corpus → `False` + `UserWarning` (vacuous truth not accepted).
+- **`gate_g2_audit_chain(db, *, window=None) → bool`**. Pulls audit
+  entries in the window via the bitemporal store, requires
+  `provenance[":signature"]` on every entry (raises `ValueError` on
+  absence), then defers to `verify_chain()` for Merkle-prev-hash
+  contiguity. Empty window → `False` + `UserWarning`.
+- **`gate_g3_score_delta(scores_before, scores_after, threshold) → bool`**.
+  Strict IEEE-754 `>=` comparison contract on `score_after - score_before`.
+  Empty-list inputs raise `ValueError` (no vacuous pass).
+- **`gate_g4_stub(g4_fn, *, plan, scores_before, scores_after) → bool`**.
+  Stub for human / regulator approval. Calls `g4_fn(...) → dict`,
+  reads `result["approved"]`, requires strict `bool` (truthy non-bool
+  values raise `TypeError`). Phase-3 NeSy 2027 will replace the stub
+  with the regulator-replay corpus surface (Stream F).
+- **`PromotionRecord`** + **`promote(plan, db, *, replay_engine, scores_before, scores_after, threshold, g4_fn, ...) → PromotionRecord`**.
+  Frozen, `slots=True` dataclass with content-addressed `promotion_id`
+  (canonical-JSON sha256 over 10 keys). `promote()` orchestrates
+  G1 → G2 → G3 → G4 in sequence and raises `GateFailure(message,
+  partial_record)` on the first False gate, where `partial_record`
+  carries the snapshot of which gates ran (and what their outcomes
+  were) before the failure.
+- **`GateFailure`** typed class (`persistence.plan._errors`) with
+  class-level `partial_record: Any` attribute and explicit `__init__`.
+  `Any` retained to avoid an import cycle with `_promotion`; runtime
+  value is always a `PromotionRecord`.
+- **End-to-end integration test**
+  (`tests/integration/test_v0_6_plan_execution.py`):
+  `parse → optimize → promote → register → lookup` on a real DSPy-
+  mocked plan, exercising every public surface added in this release.
+- **18 new commits** on `feat/v0.6-plan-execution`. Suite:
+  `1018 → 1084 passed, 7 xfailed` (+66 over v0.5.1 baseline, +3 W1
+  pin tests on the fix-pass).
+
+### W1 fix-pass (post-ARIS)
+
+Closes 3 R2 MAJORs, 3 R2 MINORs, 1 NIT, and 4 R1 design-doc drifts
+identified by Codex `gpt-5.2` `model_reasoning_effort=high`:
+
+- **W1.A** G1 strict-key membership check on
+  `compare()` dict (raises `TypeError` instead of fail-open on
+  missing `divergence_step`).
+- **W1.B** G4 `isinstance(approved_raw, bool)` check (rejects truthy
+  non-bool values like `"False"` string).
+- **W1.C** G2 empty audit window now warns + returns `False`
+  (`_G2_EMPTY_WINDOW_WARNING`).
+- **W1.D/E/G** Design doc (`docs/plans/2026-04-28-v0.6.0a1-plan-execution-design.md`)
+  tightened: ExecutionResult shape, Π → derivation persistence
+  semantic (full record is in-memory cache; persistent reconstruction
+  is Phase 3 NeSy 2027 scope), G1/G2 spec contracts.
+- **W1.F-1** `:signature` required in `_datom_to_wire_for_audit`
+  (raises `ValueError` on absence — prevents hash-equivalent audit
+  entries with mismatched IDs).
+- **W1.F-2** Simplified `_raise_gate_failure` to direct
+  `raise GateFailure(message, partial_record)`.
+- Doc fixes: `_skill_library.py` docstring (`plan.id → Node` → `skill_id → Node`);
+  `__init__.py` adds `MetricNotRegistered` to public exports;
+  integration teardown narrowed `except Exception:` → `except MetricNotRegistered:`.
+
+### ARIS verdict
+
+- R1 design fitness: PASS (4 MAJORs closed via doc updates).
+- R2 code quality: PASS at mean **8.92** / min **8.4**
+  (correctness 9.3, robustness 9.0, readability 8.7, test coverage
+  9.2, performance 8.4). Gate: mean ≥ 8.5 and min ≥ 7.0.
+- R3 paper fitness: deferred to Stream G cumulative ARIS R4 at v1.0.0.
+
+### References
+
+- Design: `docs/plans/2026-04-28-v0.6.0a1-plan-execution-design.md`
+- Implementation playbook: `docs/plans/2026-04-28-v0.6.0a1-plan-execution-impl.md`
+- Review log: `review-stage/v0.6.0a1-aris/AUTO_REVIEW.md`
+- Plan-module CHANGELOG: `src/persistence/plan/CHANGELOG-plan.md`
+
+---
+
 ## v0.5.1 — 2026-04-27 (Module 5: Txn — rev O narrowings closure)
 
 Closes the 5 carry-forwards from v0.5.0a1 `CHANGELOG-txn.md` § rev O

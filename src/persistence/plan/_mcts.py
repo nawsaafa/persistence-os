@@ -2,12 +2,13 @@
 
 B1: Action ADT + canonical hash + pure ``apply_action`` + depth guard.
 B2: ``MCTSConfig`` frozen dataclass + ``__post_init__`` validation.
+B3: ``MCTSNode`` + ``MCTSEdge`` non-frozen dataclasses (slots=True).
 """
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Union
 
 from persistence.plan._ast import Node
@@ -22,6 +23,8 @@ __all__ = [
     "ComposeWithSkillAction",
     "MAX_PLAN_DEPTH",
     "MCTSConfig",
+    "MCTSEdge",
+    "MCTSNode",
     "SubstituteLeafAction",
     "apply_action",
 ]
@@ -258,4 +261,50 @@ class MCTSConfig:
             raise ValueError(f"MCTSConfig.seed must be an int, got {self.seed!r}")
 
 
-# B3-B9 to follow
+@dataclass(slots=True)
+class MCTSEdge:
+    """One outgoing edge from an ``MCTSNode`` (design §4, §16, ADR-1).
+
+    NOT ``frozen=True`` — ``visits_through_edge`` and
+    ``total_value_through_edge`` are mutated in BACKUP (design §16,
+    step 4). The other fields are de-facto immutable post-construction;
+    the search loop only writes to the two counters."""
+
+    action_hash: str
+    action: Action
+    child_plan_id: str
+    prior: float
+    visits_through_edge: int = 0
+    total_value_through_edge: float = 0.0
+
+
+@dataclass(slots=True)
+class MCTSNode:
+    """A search-tree node keyed by Plan AST ``Node.id`` (design §4, ADR-1).
+
+    NOT ``frozen=True`` — ``visits``, ``total_value``, ``is_terminal``,
+    and the dict-membership of ``children`` mutate during the search
+    loop. ``slots=True`` keeps the per-node footprint small under
+    transposition tables of thousands of plans.
+
+    Note: there is no ``prior`` on the node (priors are softmax-
+    normalized per-parent and live on ``MCTSEdge.prior``) and no parent
+    pointer (the search graph is a DAG over plan ids; BACKUP walks the
+    path traversed in the current iteration — design §4, §16)."""
+
+    plan_id: str
+    visits: int = 0
+    total_value: float = 0.0
+    children: dict[str, MCTSEdge] = field(default_factory=dict)
+    is_terminal: bool = False
+
+    @property
+    def q_value(self) -> float:
+        """Mean evaluator score backed up through this node (design §4).
+
+        Returns ``0.0`` when ``visits == 0`` (cold-start guard; not NaN,
+        not raise)."""
+        return 0.0 if self.visits == 0 else self.total_value / self.visits
+
+
+# B4-B9 to follow

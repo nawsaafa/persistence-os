@@ -71,6 +71,7 @@ from persistence.plan import (
     MetricRef,
     Node,
     PromotionRecord,
+    ReplayEngine,
     SkillLibrary,
     optimize,
     parse,
@@ -189,6 +190,17 @@ class _ByteIdenticalReplayStub:
 
     def compare(self, a: Trajectory, b: Trajectory) -> dict:
         return {"divergence_step": None, "pnl_delta": 0.0}
+
+
+def test_replay_engine_protocol_satisfied_by_stub() -> None:
+    """Cross-task drift pin: A6 made ``ReplayEngine`` ``@runtime_checkable``.
+    Mirror the A6 fix-pass precedent so this integration test surfaces a
+    shape break in the Protocol before the e2e tests would (which would
+    fail with a less-readable AttributeError deep inside ``promote()``).
+    """
+    assert isinstance(_ByteIdenticalReplayStub(), ReplayEngine)
+    # And a plainly non-conforming object must NOT satisfy.
+    assert not isinstance(object(), ReplayEngine)
 
 
 # --- Trajectory + audit-chain helpers ------------------------------------ #

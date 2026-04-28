@@ -77,6 +77,10 @@ from persistence.plan._mcts import (
     apply_action,
     mcts_search,
 )
+from persistence.plan._mcts_promote import (
+    MCTSPromotionResult,
+    mcts_promote,
+)
 
 __all__ = [
     "Action",
@@ -100,6 +104,7 @@ __all__ = [
     "MCTSConfig",
     "MCTSEdge",
     "MCTSNode",
+    "MCTSPromotionResult",
     "MCTSResult",
     "MetricNotRegistered",
     "MetricRef",
@@ -123,6 +128,7 @@ __all__ = [
     "gate_g4_stub",
     "lookup_coercion",
     "lookup_metric",
+    "mcts_promote",
     "mcts_search",
     "optimize",
     "parse",

@@ -161,6 +161,21 @@ def _apply_add_step(plan: Node, action: AddStepAction) -> Node:
     return _replace_at_path(plan, action.target_path, new_parent)
 
 
+class _PlanCycleDetected(ValueError):
+    """``ComposeWithSkillAction`` would graft the candidate inside a
+    skill_plan that already contains it (design §14). Subclass of
+    ``ValueError`` so the loop's existing ``except (ValueError,
+    IndexError, PlanDepthExceeded)`` catches it;
+    :func:`_classify_apply_failure` maps it to ``"compose_creates_cycle"``."""
+
+
+def _collect_node_ids(node: Node, acc: set[str]) -> None:
+    """In-place DFS collect of ``Node.id`` over ``node`` and descendants."""
+    acc.add(node.id)
+    for child in node.children:
+        _collect_node_ids(child, acc)
+
+
 def _apply_compose_with_skill(
     plan: Node,
     action: ComposeWithSkillAction,
@@ -180,6 +195,15 @@ def _apply_compose_with_skill(
         raise PlanDepthExceeded(
             f"ComposeWithSkillAction: skill {action.skill_id!r} plan "
             f"depth {skill_depth} > MAX_PLAN_DEPTH//2={MAX_PLAN_DEPTH // 2}"
+        )
+    # Cycle guard (design §14): skill_plan must NOT already contain the
+    # candidate plan's content-hash as a subtree. Cheap subtree-hash scan.
+    skill_ids: set[str] = set()
+    _collect_node_ids(skill_plan, skill_ids)
+    if plan.id in skill_ids:
+        raise _PlanCycleDetected(
+            f"ComposeWithSkillAction: skill {action.skill_id!r} plan "
+            f"already contains candidate plan id {plan.id!r} as a subtree"
         )
     subtree = _resolve_path(plan, action.target_path)
     new_skill_root = Node(
@@ -657,6 +681,8 @@ def _classify_apply_failure(action: Action, exc: BaseException) -> str:
     """Map an ``apply_action`` raise to a design §13 reject ``reason`` tag."""
     if isinstance(exc, PlanDepthExceeded):
         return "plan_too_deep"
+    if isinstance(exc, _PlanCycleDetected):
+        return "compose_creates_cycle"
     if isinstance(action, ComposeWithSkillAction):
         msg = str(exc)
         if "skill_library" in msg or "not registered" in msg:
@@ -1097,3 +1123,8 @@ def mcts_search(
         root_q=root_q,
         tree_dump=_build_tree_dump(transposition),
     )
+
+
+# --- B9: skill-library 4-gate promotion hook lives in `_mcts_promote.py` -- #
+# ``mcts_promote`` + ``MCTSPromotionResult`` are re-exported through the
+# package ``__init__.py`` per design §12 ADR-9.

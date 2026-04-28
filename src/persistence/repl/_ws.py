@@ -108,6 +108,29 @@ def _verdict_for_op_error(code: int) -> str:
     return "error"
 
 
+def _is_audit_window_poll(method: str, params: Any) -> bool:
+    """W3 / ADR-11 — hot-path audit-tail polling MUST NOT self-emit.
+
+    The browser UI polls ``repl/inspect kind=audit-window`` once per
+    second to backfill the audit-tail pane. If every poll were itself
+    audited, the pane would saturate at 1 Hz with self-references and
+    the underlying Merkle chain would accumulate one entry per second
+    forever — a Module-2 audit-log DOS. Other inspect kinds (entity,
+    plan, causal-history) MUST still audit; only ``audit-window`` is
+    the read-only hot loop.
+
+    Defensive on ``params`` shape: the dispatcher already filtered
+    pre-envelope failures, but the WS path wraps any payload into
+    ``Request.params`` whose canonical shape is dict — guard against
+    the rare non-dict to keep the no-emit decision total.
+    """
+    if method != "repl/inspect":
+        return False
+    if not isinstance(params, dict):
+        return False
+    return params.get("kind") == "audit-window"
+
+
 # OpHandler signature: (session, db, params, *, server=None) -> result
 #
 # Handlers that mutate session state (D4 rewind, D5 branch) read the
@@ -332,15 +355,22 @@ class WSServer:
             )
             verdict = "error"
             error_str = f"unknown method: {req.method}"
-            self._emit_audit_for_op(
-                session=session,
-                op_kind=op_kind,
-                args=req.params,
-                verdict=verdict,
-                latency_ms=_latency_ms(start, self.runtime_clock()),
-                result_hash=None,
-                error=error_str,
-            )
+            # ADR-11 — `audit-window` polls don't self-emit. The
+            # unknown-method branch can never trigger this case
+            # (audit-window is a registered method) but we keep the
+            # gate symmetric with the success/error branch below so a
+            # future refactor that loosens method registration cannot
+            # silently re-introduce the self-loop.
+            if not _is_audit_window_poll(req.method, req.params):
+                self._emit_audit_for_op(
+                    session=session,
+                    op_kind=op_kind,
+                    args=req.params,
+                    verdict=verdict,
+                    latency_ms=_latency_ms(start, self.runtime_clock()),
+                    result_hash=None,
+                    error=error_str,
+                )
             return session
 
         try:
@@ -375,15 +405,22 @@ class WSServer:
             # args_hash + recorded_at + verdict still capture intent.
             result_hash = None
 
-        self._emit_audit_for_op(
-            session=latest_session,
-            op_kind=op_kind,
-            args=req.params,
-            verdict=verdict,
-            latency_ms=_latency_ms(start, self.runtime_clock()),
-            result_hash=result_hash,
-            error=error_str,
-        )
+        # ADR-11 — `repl/inspect kind=audit-window` is the hot-path
+        # audit-tail poll (~1 Hz from the browser UI). Auditing every
+        # poll would saturate the Merkle chain with self-references.
+        # All other inspect kinds (entity, plan, causal-history) and
+        # all other methods still emit exactly one audit entry per
+        # invocation.
+        if not _is_audit_window_poll(req.method, req.params):
+            self._emit_audit_for_op(
+                session=latest_session,
+                op_kind=op_kind,
+                args=req.params,
+                verdict=verdict,
+                latency_ms=_latency_ms(start, self.runtime_clock()),
+                result_hash=result_hash,
+                error=error_str,
+            )
 
         return latest_session
 

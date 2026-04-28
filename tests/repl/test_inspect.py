@@ -98,7 +98,7 @@ class TestInspectEntity:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "entity", "params": {"entity_id": "e1"}},
+            {"kind": "entity", "entity_id": "e1"},
         )
         assert result["entity"] == {"a": 1, "b": "two"}
         assert result["cursor_iso"] == _DEFAULT_T.isoformat()
@@ -116,10 +116,8 @@ class TestInspectEntity:
             db,
             {
                 "kind": "entity",
-                "params": {
-                    "entity_id": "e1",
-                    "view_cursor_tx_time_iso": t1.isoformat(),
-                },
+                "entity_id": "e1",
+                "view_cursor_tx_time_iso": t1.isoformat(),
             },
         )
         assert result["entity"] == {"a": 1}
@@ -132,7 +130,7 @@ class TestInspectEntity:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "entity", "params": {"entity_id": "never-exists"}},
+            {"kind": "entity", "entity_id": "never-exists"},
         )
         assert result["entity"] is None
         # NOT an error.
@@ -148,10 +146,8 @@ class TestInspectEntity:
                 db,
                 {
                     "kind": "entity",
-                    "params": {
-                        "entity_id": "e1",
-                        "view_cursor_tx_time_iso": "not-an-iso-string",
-                    },
+                    "entity_id": "e1",
+                    "view_cursor_tx_time_iso": "not-an-iso-string",
                 },
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
@@ -165,7 +161,7 @@ class TestInspectEntity:
             await inspect_op(
                 session_with_inspect,
                 db,
-                {"kind": "entity", "params": {}},
+                {"kind": "entity"},
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
         assert "entity_id" in excinfo.value.message
@@ -196,10 +192,8 @@ class TestInspectEntity:
             db,
             {
                 "kind": "entity",
-                "params": {
-                    "entity_id": "e1",
-                    "view_cursor_tx_time_iso": t1.isoformat(),
-                },
+                "entity_id": "e1",
+                "view_cursor_tx_time_iso": t1.isoformat(),
             },
         )
         # Cursor at T1 may or may not include the second assert depending
@@ -221,7 +215,7 @@ class TestInspectEntity:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "entity", "params": {"entity_id": "e1"}},
+            {"kind": "entity", "entity_id": "e1"},
         )
         ent = result["entity"]
         assert ent is not None
@@ -240,7 +234,7 @@ class TestInspectEntity:
             await inspect_op(
                 session_with_inspect,
                 db,
-                {"kind": "entity", "params": {"entity_id": ""}},
+                {"kind": "entity", "entity_id": ""},
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
 
@@ -256,7 +250,7 @@ class TestInspectAuditWindow:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "audit-window", "params": {}},
+            {"kind": "audit-window"},
         )
         # Post-D7 (W2.C): the persistent path is wired. An empty fact
         # store of audit datoms returns an empty entries list — the
@@ -278,10 +272,8 @@ class TestInspectAuditWindow:
             db,
             {
                 "kind": "audit-window",
-                "params": {
-                    "from_iso": _dt(2026, 5, 1).isoformat(),
-                    "to_iso": _dt(2026, 5, 31).isoformat(),
-                },
+                "from_iso": _dt(2026, 5, 1).isoformat(),
+                "to_iso": _dt(2026, 5, 31).isoformat(),
             },
         )
         assert result["entries"] == []
@@ -294,7 +286,7 @@ class TestInspectAuditWindow:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "audit-window", "params": {"op_filter": ":llm/call"}},
+            {"kind": "audit-window", "op_filter": ":llm/call"},
         )
         assert result["entries"] == []
 
@@ -305,13 +297,13 @@ class TestInspectAuditWindow:
         result_default = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "audit-window", "params": {}},
+            {"kind": "audit-window"},
         )
         assert result_default["limit"] == 100
         result_explicit = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "audit-window", "params": {"limit": 25}},
+            {"kind": "audit-window", "limit": 25},
         )
         assert result_explicit["limit"] == 25
 
@@ -322,7 +314,7 @@ class TestInspectAuditWindow:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "audit-window", "params": {"limit": 5000}},
+            {"kind": "audit-window", "limit": 5000},
         )
         assert result["limit"] == 1000
 
@@ -336,7 +328,7 @@ class TestInspectAuditWindow:
                 db,
                 {
                     "kind": "audit-window",
-                    "params": {"from_iso": "definitely-not-iso"},
+                    "from_iso": "definitely-not-iso",
                 },
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
@@ -363,7 +355,7 @@ class TestInspectPlan:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "plan", "params": {"plan_id": "plan:abc"}},
+            {"kind": "plan", "plan_id": "plan:abc"},
         )
         assert result["plan"] == {
             "plan/source": "(do (call :foo))",
@@ -378,7 +370,7 @@ class TestInspectPlan:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "plan", "params": {"plan_id": "plan:missing"}},
+            {"kind": "plan", "plan_id": "plan:missing"},
         )
         assert result["plan"] is None
         assert result["cursor_iso"] == _DEFAULT_T.isoformat()
@@ -393,10 +385,8 @@ class TestInspectPlan:
             db,
             {
                 "kind": "plan",
-                "params": {
-                    "plan_id": "plan:any",
-                    "view_cursor_tx_time_iso": t1.isoformat(),
-                },
+                "plan_id": "plan:any",
+                "view_cursor_tx_time_iso": t1.isoformat(),
             },
         )
         assert result["cursor_iso"] == t1.isoformat()
@@ -409,7 +399,7 @@ class TestInspectPlan:
             await inspect_op(
                 session_with_inspect,
                 db,
-                {"kind": "plan", "params": {}},
+                {"kind": "plan"},
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
         assert "plan_id" in excinfo.value.message
@@ -428,7 +418,7 @@ class TestInspectCausalHistory:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "causal-history", "params": {"entity_id": "e1"}},
+            {"kind": "causal-history", "entity_id": "e1"},
         )
         # 2 asserts + 1 auto-retract → 3 datoms in history.
         assert len(result["seeds"]) >= 1
@@ -450,7 +440,8 @@ class TestInspectCausalHistory:
             db,
             {
                 "kind": "causal-history",
-                "params": {"entity_id": "e1", "limit": 2},
+                "entity_id": "e1",
+                "limit": 2,
             },
         )
         assert len(result["seeds"]) == 2
@@ -465,7 +456,8 @@ class TestInspectCausalHistory:
             db,
             {
                 "kind": "causal-history",
-                "params": {"entity_id": "e1", "limit": 99999},
+                "entity_id": "e1",
+                "limit": 99999,
             },
         )
         assert result["limit"] == 1000
@@ -478,7 +470,7 @@ class TestInspectCausalHistory:
             await inspect_op(
                 session_with_inspect,
                 db,
-                {"kind": "causal-history", "params": {}},
+                {"kind": "causal-history"},
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
         assert "entity_id" in excinfo.value.message
@@ -496,7 +488,7 @@ class TestCapabilityAndProtocol:
             await inspect_op(
                 session_no_caps,
                 db,
-                {"kind": "entity", "params": {"entity_id": "e1"}},
+                {"kind": "entity", "entity_id": "e1"},
             )
         assert excinfo.value.code == ERR_CAPABILITY_DENIED
         assert "inspect:read" in excinfo.value.message
@@ -509,7 +501,7 @@ class TestCapabilityAndProtocol:
             await inspect_op(
                 session_with_inspect,
                 db,
-                {"kind": "totally-not-a-kind", "params": {}},
+                {"kind": "totally-not-a-kind"},
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
         assert "kind" in excinfo.value.message
@@ -518,11 +510,15 @@ class TestCapabilityAndProtocol:
     async def test_missing_kind_raises_invalid_params(
         self, db, session_with_inspect
     ):
+        # No ``kind`` → dispatcher rejects before flatten. ADR-12 (W3)
+        # made the wire shape flat, so a stray top-level ``params`` key
+        # is just an unrecognized arg the kind handler would ignore;
+        # the kind-required check fires first.
         with pytest.raises(_OpError) as excinfo:
             await inspect_op(
                 session_with_inspect,
                 db,
-                {"params": {"entity_id": "e1"}},
+                {"entity_id": "e1"},
             )
         assert excinfo.value.code == ERR_INVALID_PARAMS
 
@@ -530,15 +526,15 @@ class TestCapabilityAndProtocol:
     async def test_missing_params_defaults_to_empty(
         self, db, session_with_inspect
     ):
-        # Only ``audit-window`` accepts an empty sub-params bag (all
-        # fields are optional). entity / plan / causal-history will
-        # surface the underlying "<field> required" error — but the
-        # missing top-level "params" key MUST default to {} rather
-        # than KeyError-bombing the dispatcher.
+        # ADR-12 (W3): wire shape is flat. ``audit-window`` accepts an
+        # empty sub-params bag (every field optional), so a request
+        # carrying only ``kind`` is valid. entity / plan /
+        # causal-history would surface the underlying "<field>
+        # required" error on the same flat-only payload.
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "audit-window"},  # no "params" key
+            {"kind": "audit-window"},  # no sub-kind args
         )
         assert result["entries"] == []
 
@@ -551,7 +547,7 @@ class TestCapabilityAndProtocol:
         result = await inspect_op(
             session_with_inspect,
             db,
-            {"kind": "entity", "params": {"entity_id": "e1"}},
+            {"kind": "entity", "entity_id": "e1"},
         )
         assert result["cursor_iso"] == clock_fixed().isoformat()
 
@@ -573,10 +569,8 @@ class TestCapabilityAndProtocol:
             db,
             {
                 "kind": "entity",
-                "params": {
-                    "entity_id": "e1",
-                    "view_cursor_tx_time_iso": t_sub.isoformat(),
-                },
+                "entity_id": "e1",
+                "view_cursor_tx_time_iso": t_sub.isoformat(),
             },
         )
         assert result["cursor_iso"] == t_sub.isoformat()
@@ -596,7 +590,7 @@ class TestCapabilityAndProtocol:
         result = await inspect_op(
             sess,
             db,
-            {"kind": "entity", "params": {"entity_id": "e1"}},
+            {"kind": "entity", "entity_id": "e1"},
         )
         # No sub.cursor → session.cursor used.
         assert result["cursor_iso"] == t_session.isoformat()
@@ -614,7 +608,7 @@ class TestCapabilityAndProtocol:
             result = await inspect_op(
                 session_with_inspect,
                 db,
-                {"kind": kind, "params": sub},
+                {"kind": kind, **sub},
             )
             assert "cursor_iso" in result, kind
             assert isinstance(result["cursor_iso"], str)

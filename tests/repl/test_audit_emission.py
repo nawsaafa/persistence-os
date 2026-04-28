@@ -295,7 +295,7 @@ class TestVerdictMapping:
         from persistence.repl import ERR_CAPABILITY_DENIED
 
         with pytest.raises(_OpError) as excinfo:
-            await inspect_op(session, db, {"kind": "entity", "params": {"entity_id": "e1"}})
+            await inspect_op(session, db, {"kind": "entity", "entity_id": "e1"})
         assert excinfo.value.code == ERR_CAPABILITY_DENIED
         # Now check that the verdict mapping is "deny"
         assert _verdict_for_op_error(excinfo.value.code) == "deny"
@@ -448,7 +448,7 @@ class TestPersistence:
         # Re-query via the inspect kind="audit-window" path
         result = await inspect_op(
             session_with_caps, db,
-            {"kind": "audit-window", "params": {}},
+            {"kind": "audit-window"},
         )
         assert len(result["entries"]) == 1
         assert result["entries"][0]["id"] == e1.id
@@ -503,7 +503,7 @@ class TestPersistence:
         # Backfill via the audit-window query.
         result = await inspect_op(
             session_with_caps, db,
-            {"kind": "audit-window", "params": {}},
+            {"kind": "audit-window"},
         )
         assert len(result["entries"]) == 2
         ids = [r["id"] for r in result["entries"]]

@@ -423,7 +423,7 @@ class TestBranchSessionMutation:
         result = await inspect_op(
             new_session,
             server.db,
-            {"kind": "entity", "params": {"entity_id": "e1"}},
+            {"kind": "entity", "entity_id": "e1"},
         )
         assert result["cursor_iso"] == target
 

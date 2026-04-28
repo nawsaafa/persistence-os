@@ -262,13 +262,24 @@ async def inspect_op(
     """REPL inspect — capability-gated read-only entity / audit / plan / DAG.
 
     Dispatch on ``params.kind`` ∈ ``{entity, audit-window, plan,
-    causal-history}``; sub-params under ``params.params``. The
-    capability gate is one ``inspect:read`` check up-front — all four
-    sub-kinds share it. Audit-tail SUBSCRIPTION (a future server-push
-    flow) will be a separate ``inspect:audit-tail`` capability when it
-    ships.
+    causal-history}``; sub-kind args are read FLAT from ``params``
+    (every key other than ``kind``). The capability gate is one
+    ``inspect:read`` check up-front — all four sub-kinds share it.
+    Audit-tail SUBSCRIPTION (a future server-push flow) will be a
+    separate ``inspect:audit-tail`` capability when it ships.
 
-    Cursor precedence (W2 ADR-5): ``params.params.view_cursor_tx_time_iso``
+    **Param shape (W3 / ADR-12).** The wire shape is FLAT::
+
+        {"kind": "entity", "entity_id": "user-42"}
+
+    not nested under ``params.params``. The DSL parser (browser UI's
+    ``parseCommand`` in ``static/app.js``) emits flat key=value pairs;
+    matching that on the server keeps the contract symmetric. Inside
+    the handler we strip ``kind`` and pass the remaining keys as
+    ``sub`` to the per-kind handler — those still read flat keys
+    (``entity_id``, ``plan_id``, ``from_iso``, …) so no inner change.
+
+    Cursor precedence (W2 ADR-5): ``params.view_cursor_tx_time_iso``
     overrides ``session.view_cursor_tx_time_iso``; both null → HEAD
     via ``session.clock()``. The resolved cursor is echoed back as
     ``cursor_iso`` for replay-trace alignment.
@@ -283,15 +294,16 @@ async def inspect_op(
     kind = params.get("kind")
     if not isinstance(kind, str):
         raise _op_error(ERR_INVALID_PARAMS, "kind (string) required")
-    sub = params.get("params", {})
-    if not isinstance(sub, dict):
-        raise _op_error(ERR_INVALID_PARAMS, "params.params must be an object")
     handler = _INSPECT_KINDS.get(kind)
     if handler is None:
         raise _op_error(
             ERR_INVALID_PARAMS,
             f"unknown kind: {kind!r}; expected one of {sorted(_INSPECT_KINDS)}",
         )
+    # W3 / ADR-12 — flat handler params. Every key OTHER than ``kind``
+    # is a sub-kind argument. ``kind`` is the dispatcher; the remaining
+    # keys are what the per-kind handler consumes.
+    sub = {k: v for k, v in params.items() if k != "kind"}
     return handler(session, db, sub)
 
 

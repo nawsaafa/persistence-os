@@ -45,6 +45,7 @@ from persistence.plan._metric_registry import (
 )
 from persistence.plan._optimize import OptimizedPlan, optimize
 from persistence.plan._parse import parse, unparse
+from persistence.plan._skill_library import SkillLibrary
 
 __all__ = [
     "Coercion",
@@ -60,6 +61,7 @@ __all__ = [
     "OptimizerNotAvailable",
     "ParseError",
     "PLAN_CANONICAL_VERSION",
+    "SkillLibrary",
     "TrainingExample",
     "UnimplementedNodeKindError",
     "execute",

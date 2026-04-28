@@ -5,6 +5,9 @@ B2: ``MCTSConfig`` frozen dataclass + ``__post_init__`` validation.
 B3: ``MCTSNode`` + ``MCTSEdge`` non-frozen dataclasses (slots=True).
 B4: ``Expander`` Protocol + ``_StaticExpander`` + ``LLMExpander`` (design §8).
 B5: ``Evaluator`` Protocol + ``_StaticEvaluator`` + ``LLMJudgeEvaluator`` (design §9).
+B6: ``mcts_search`` core loop — SELECT/EXPAND/EVALUATE/BACKUP per §16
+    pseudocode + ``MCTSResult`` (no provenance datom side-effects yet;
+    B8 wires the schema validation + ``:mcts/search`` summary write).
 """
 from __future__ import annotations
 
@@ -16,9 +19,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Literal, Protocol, Union, runtime_checkable
 
 from persistence.plan._ast import Node
-from persistence.plan._errors import PlanDepthExceeded
+from persistence.plan._errors import ExpanderContractError, PlanDepthExceeded
 
 if TYPE_CHECKING:
+    from persistence.fact.db import DB
     from persistence.plan._skill_library import SkillLibrary
 
 __all__ = [
@@ -33,8 +37,10 @@ __all__ = [
     "MCTSConfig",
     "MCTSEdge",
     "MCTSNode",
+    "MCTSResult",
     "SubstituteLeafAction",
     "apply_action",
+    "mcts_search",
 ]
 
 #: Plan-depth ceiling enforced post-construction by ``apply_action``;
@@ -485,4 +491,503 @@ def _is_finite_score(value: float) -> bool:
     )
 
 
-# B6-B9 to follow
+# --- B6: mcts_search core loop (design §15, §16, ADR-7) ---------------- #
+#
+# B8 LIFTING ESCAPE HATCH: when the file crosses the design §18 LOC
+# budget (≤800 watermark), B8 should lift `_build_iteration_datoms` and
+# the evaluator-side reject placeholders into a separate `_mcts_datoms.py`
+# helper file. B6 ships placeholder dicts via `_eval_reject_record` and
+# inline `pending_datoms.append({...})` calls; B8's schema-validation
+# refactor is the natural lift point. The B6 surface itself stays in
+# `_mcts.py` — only the datom-building helpers move.
+
+
+#: Search-id hex width (design §15 module-globals enumeration). Mirrors
+#: ``_skill_library._SKILL_ID_HEX_WIDTH = 16`` for consistency across
+#: content-addressed identifier namespaces.
+_SEARCH_ID_HEX_WIDTH: int = 16
+
+#: Termination-reason union (design §11, ADR-8). 6 reasons OR-combined;
+#: ``wall_clock`` is unreachable in v0.6.5 (forward-compat slot).
+TerminatedBy = Literal[
+    "max_iter",
+    "max_unique_plans",
+    "simple_regret",
+    "wall_clock",
+    "exhausted",
+    "all_evaluations_failed",
+]
+
+
+def _hash_config(config: MCTSConfig) -> str:
+    """Return a stable canonical-JSON sha256 hex digest of ``config`` (design §13).
+
+    All fields are JSON-native; ``allow_nan=False`` mirrors ``Node.id``."""
+    payload: dict[str, object] = {
+        "max_iter": config.max_iter,
+        "max_unique_plans": config.max_unique_plans,
+        "simple_regret_threshold": config.simple_regret_threshold,
+        "simple_regret_window": config.simple_regret_window,
+        "wall_clock_budget_ms": config.wall_clock_budget_ms,
+        "c_puct": config.c_puct,
+        "expander_k": config.expander_k,
+        "seed": config.seed,
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _derive_search_id(
+    initial_plan_id: str, config: MCTSConfig, started_at_ms: int
+) -> str:
+    """Return ``"mcts/<16-hex>"`` content-addressed search id (design §13).
+
+    Deterministic function of ``(initial_plan_id, config_hash,
+    started_at_ms)``: identical triples produce byte-identical ids."""
+    payload: dict[str, object] = {
+        "initial_plan_id": initial_plan_id,
+        "config_hash": _hash_config(config),
+        "started_at": started_at_ms,
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+    digest = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return "mcts/" + digest[:_SEARCH_ID_HEX_WIDTH]
+
+
+def _select_child(node: MCTSNode, c_puct: float) -> MCTSEdge | None:
+    """Return the PUCT-best edge from ``node``; ``None`` if no children (design §7).
+
+    Formula: ``Q(s,a) + c_puct * P(s,a) * sqrt(parent.visits) / (1 + N(s,a))``
+    where ``Q = total_value_through_edge / max(1, visits_through_edge)``
+    (cold-start ``0.0``). Tie-break: first edge in dict-insertion
+    order (Python 3.7+ preserves insertion order; determinism-safe)."""
+    if not node.children:
+        return None
+    parent_visits = node.visits
+    sqrt_parent = math.sqrt(parent_visits) if parent_visits > 0 else 1.0
+    best_edge: MCTSEdge | None = None
+    best_score = -math.inf
+    for edge in node.children.values():
+        n_sa = edge.visits_through_edge
+        q = (edge.total_value_through_edge / n_sa) if n_sa > 0 else 0.0
+        u = c_puct * edge.prior * sqrt_parent / (1 + n_sa)
+        score = q + u
+        if score > best_score:
+            best_score = score
+            best_edge = edge
+    return best_edge
+
+
+def _populate_children(
+    node: MCTSNode,
+    proposals: Sequence[tuple[Action, float]],
+    plan_by_id: dict[str, Node],
+    transposition: dict[str, MCTSNode],
+    skill_library: "SkillLibrary | None",
+    pending_datoms: list[object],
+) -> int:
+    """Apply each proposed action; build ``MCTSEdge`` for successes; record rejects.
+
+    Returns the number of successful expansions. Failures append a
+    placeholder reject record to ``pending_datoms`` (B8 closes the
+    schema validation). Within-parent deterministic dedup: a repeated
+    ``action_hash`` under the same parent is silently skipped (first
+    proposal wins, proposal-iteration order is the tie-break)."""
+    plan = plan_by_id[node.plan_id]
+    successes = 0
+    for action, prior in proposals:
+        try:
+            new_plan = apply_action(plan, action, skill_library=skill_library)
+        except (ValueError, IndexError, PlanDepthExceeded) as exc:
+            # B8: schema validation + serialization wires here. For B6,
+            # record a placeholder dict so reject-counting tests have a
+            # non-empty pending_datoms accumulator to scan.
+            pending_datoms.append(
+                {
+                    "phase": "reject",
+                    "plan_id": node.plan_id,
+                    "action_hash": _action_hash(action),
+                    "reason": _classify_apply_failure(action, exc),
+                    "error_class": type(exc).__name__,
+                    "error_repr": repr(exc),
+                }
+            )
+            continue
+        action_hash = _action_hash(action)
+        if action_hash in node.children:
+            # Same parent + same action_hash → same child. Silently
+            # dedup; the existing edge stays.
+            continue
+        child_plan_id = new_plan.id
+        plan_by_id.setdefault(child_plan_id, new_plan)
+        transposition.setdefault(child_plan_id, MCTSNode(plan_id=child_plan_id))
+        edge = MCTSEdge(
+            action_hash=action_hash,
+            action=action,
+            child_plan_id=child_plan_id,
+            prior=prior,
+        )
+        node.children[action_hash] = edge
+        successes += 1
+    return successes
+
+
+def _classify_apply_failure(action: Action, exc: BaseException) -> str:
+    """Map an ``apply_action`` raise to a design §13 reject ``reason`` tag."""
+    if isinstance(exc, PlanDepthExceeded):
+        return "plan_too_deep"
+    if isinstance(action, ComposeWithSkillAction):
+        msg = str(exc)
+        if "skill_library" in msg or "not registered" in msg:
+            return "skill_not_registered"
+    return "plan_construction_raised"
+
+
+@dataclass(frozen=True, slots=True)
+class MCTSResult:
+    """Frozen result of one ``mcts_search`` invocation (design §15).
+
+    All fields are deterministic functions of the inputs; two
+    identical-input invocations produce byte-identical ``MCTSResult``
+    instances incl. ``search_id`` (content-addressed per design §13 /
+    ADR-7, NOT a UUID).
+
+    ``tree_dump`` is the load-bearing determinism pin: a frozen tuple
+    of ``(parent_plan_id, child_plan_id, action_hash, visits, q)`` per
+    edge, lex-sorted by ``(parent_plan_id, child_plan_id,
+    action_hash)`` under string-lex (UTF-8 byte ordering)."""
+
+    winner: Node
+    winner_plan_id: str
+    initial_plan_id: str
+    search_id: str
+    iter_count: int
+    unique_plans_visited: int
+    terminated_by: TerminatedBy
+    root_q: float
+    tree_dump: tuple[tuple[str, str, str, int, float], ...]
+
+
+def _build_tree_dump(
+    transposition: dict[str, MCTSNode],
+) -> tuple[tuple[str, str, str, int, float], ...]:
+    """Return the canonical ``tree_dump`` (design §15).
+
+    Every edge becomes a 5-tuple ``(parent_plan_id, child_plan_id,
+    action_hash, visits, q_value)``; the dump is lex-sorted by the
+    first three elements (every element is a hex ``str``, so Python's
+    default ``str.__lt__`` produces the byte-ordered comparison).
+    ``q`` is the EDGE q-value (cold-start unvisited edges = ``0.0``)."""
+    rows: list[tuple[str, str, str, int, float]] = []
+    for parent_plan_id, parent in transposition.items():
+        for action_hash, edge in parent.children.items():
+            n_sa = edge.visits_through_edge
+            q = (edge.total_value_through_edge / n_sa) if n_sa > 0 else 0.0
+            rows.append(
+                (parent_plan_id, edge.child_plan_id, action_hash, n_sa, q)
+            )
+    rows.sort(key=lambda row: (row[0], row[1], row[2]))
+    return tuple(rows)
+
+
+def _pick_winner_edge(root: MCTSNode) -> MCTSEdge | None:
+    """Return the most-visited root edge (design §16 / OQ-2 AlphaZero).
+
+    Tie-break: highest q_value, then ``action_hash`` lex-lowest.
+    Returns ``None`` iff the root has no children."""
+    if not root.children:
+        return None
+    candidates = list(root.children.values())
+
+    def _key(e: MCTSEdge) -> tuple[int, float, str]:
+        n_sa = e.visits_through_edge
+        q = (e.total_value_through_edge / n_sa) if n_sa > 0 else 0.0
+        return (n_sa, q, e.action_hash)
+
+    # Higher visits / q win; lex-LOWEST action_hash breaks final tie.
+    best = candidates[0]
+    best_n, best_q, best_hash = _key(best)
+    for e in candidates[1:]:
+        n, q, h = _key(e)
+        if (n, q) > (best_n, best_q) or (
+            (n, q) == (best_n, best_q) and h < best_hash
+        ):
+            best, best_n, best_q, best_hash = e, n, q, h
+    return best
+
+
+def _eval_reject_record(
+    plan_id: str,
+    reason: str,
+    *,
+    error: BaseException | None = None,
+    raw_score: object = None,
+) -> dict[str, object]:
+    """Build a placeholder evaluator-side reject record for ``pending_datoms``.
+
+    B8 closes the schema validation; today's records are dicts so B6
+    tests can scan for ``phase="reject"`` + ``reason`` without
+    depending on the datom schema."""
+    record: dict[str, object] = {
+        "phase": "reject",
+        "plan_id": plan_id,
+        "reason": reason,
+    }
+    if error is not None:
+        record["error_class"] = type(error).__name__
+        record["error_repr"] = repr(error)
+    if raw_score is not None:
+        record["raw_score_repr"] = repr(raw_score)
+    return record
+
+
+def mcts_search(
+    initial_plan: Node,
+    *,
+    expander: Expander,
+    evaluator: Evaluator,
+    started_at_ms: int,
+    config: MCTSConfig | None = None,
+    skill_library: "SkillLibrary | None" = None,
+    db: "DB | None" = None,
+) -> MCTSResult:
+    """PUCT tree search over the content-addressed Plan AST (design §15, §16).
+
+    Runs SELECT → EXPAND → EVALUATE → BACKUP per design §16 pseudocode.
+    Returns the winner Plan + a tree summary. Does NOT call
+    ``optimize()`` or ``promote()`` — the closed loop is the caller's
+    recipe (design §12 ADR-9):
+
+    .. code-block:: python
+
+        result = mcts_search(initial_plan, expander=..., evaluator=..., started_at_ms=t)
+        optimized = optimize(result.winner, training_set=..., ...)
+        record = promote(optimized.plan, db=db, ...)
+        skill_id = SkillLibrary(db).register(optimized.plan, record, ...)
+
+    Determinism contract (design §10): under fixed
+    ``(initial_plan, config, started_at_ms, expander_responses,
+    evaluator_responses)`` the search trajectory is byte-identical.
+
+    Evaluator runs on the JUST-EXPANDED PARENT (design §16 invariant
+    5; rollout depth = 1).
+
+    B6 ships zero datom side-effects: ``pending_datoms`` is built
+    locally during the iteration but never transacted; B8 closes the
+    schema validation + ``:mcts/search`` summary write."""
+    if not isinstance(started_at_ms, int) or isinstance(started_at_ms, bool):
+        raise ValueError(
+            f"mcts_search.started_at_ms must be a positive int, got {started_at_ms!r}"
+        )
+    if started_at_ms <= 0:
+        raise ValueError(
+            f"mcts_search.started_at_ms must be a positive int, got {started_at_ms!r}"
+        )
+    if config is None:
+        config = MCTSConfig()
+
+    transposition: dict[str, MCTSNode] = {}
+    expander_cache: dict[str, tuple[tuple[Action, float], ...]] = {}
+    evaluator_cache: dict[str, float] = {}
+    plan_by_id: dict[str, Node] = {initial_plan.id: initial_plan}
+
+    root = MCTSNode(plan_id=initial_plan.id)
+    transposition[initial_plan.id] = root
+    search_id = _derive_search_id(initial_plan.id, config, started_at_ms)
+
+    iter_index = 0
+    eval_attempts = 0
+    eval_failures = 0
+    terminated_by: TerminatedBy = "max_iter"
+
+    # Simple-regret consecutive-window tracker (design §11).
+    simple_regret_streak = 0
+
+    while True:
+        # --- Termination checks BEFORE running iteration ---
+        if iter_index >= config.max_iter:
+            terminated_by = "max_iter"
+            break
+        if len(transposition) >= config.max_unique_plans:
+            terminated_by = "max_unique_plans"
+            break
+        if (
+            config.simple_regret_threshold is not None
+            and iter_index >= config.simple_regret_window
+            and len(root.children) >= 2
+        ):
+            sorted_edges = sorted(
+                root.children.values(),
+                key=lambda e: e.visits_through_edge,
+                reverse=True,
+            )
+            top1, top2 = sorted_edges[0], sorted_edges[1]
+            n1 = top1.visits_through_edge
+            n2 = top2.visits_through_edge
+            q1 = (top1.total_value_through_edge / n1) if n1 > 0 else 0.0
+            q2 = (top2.total_value_through_edge / n2) if n2 > 0 else 0.0
+            gap = q1 - q2
+            if gap >= config.simple_regret_threshold:
+                simple_regret_streak += 1
+                if simple_regret_streak >= config.simple_regret_window:
+                    terminated_by = "simple_regret"
+                    break
+            else:
+                simple_regret_streak = 0
+        # all_evaluations_failed: every attempted evaluator call raised.
+        # Surface as termination only after at least one attempt.
+        if eval_attempts > 0 and eval_attempts == eval_failures:
+            terminated_by = "all_evaluations_failed"
+            break
+
+        path: list[tuple[MCTSNode, MCTSEdge]] = []
+        pending_datoms: list[object] = []
+
+        # --- 1. SELECT: walk root → leaf via PUCT ---
+        node = root
+        while node.children and not node.is_terminal:
+            edge = _select_child(node, config.c_puct)
+            if edge is None:
+                break
+            path.append((node, edge))
+            node = transposition[edge.child_plan_id]
+
+        # --- 2. EXPAND: if not terminal AND no children yet ---
+        if not node.is_terminal and not node.children:
+            cached_proposals = expander_cache.get(node.plan_id)
+            if cached_proposals is None:
+                proposals = tuple(
+                    expander.propose(plan_by_id[node.plan_id], k=config.expander_k)
+                )
+                if proposals and abs(sum(p for _, p in proposals) - 1.0) >= _PRIOR_TOL:
+                    raise ExpanderContractError(
+                        f"Expander.propose returned priors summing to "
+                        f"{sum(p for _, p in proposals)!r}, not 1.0 ± _PRIOR_TOL "
+                        f"(plan_id={node.plan_id!r})"
+                    )
+                expander_cache[node.plan_id] = proposals
+                # B8: schema validation + serialization wires here.
+                pending_datoms.append(
+                    {
+                        "phase": "expand",
+                        "plan_id": node.plan_id,
+                        "proposals": proposals,
+                    }
+                )
+            else:
+                proposals = cached_proposals
+            if not proposals:
+                node.is_terminal = True
+            else:
+                # Iter 0 root-empty short-circuit handled at iter end via
+                # "exhausted" check (root.is_terminal AND no children).
+                _populate_children(
+                    node,
+                    proposals,
+                    plan_by_id,
+                    transposition,
+                    skill_library,
+                    pending_datoms,
+                )
+                if not node.children:
+                    # Every proposal rejected → no descent possible.
+                    node.is_terminal = True
+
+        # --- "exhausted" termination — root has no children at iter 0 ---
+        if (
+            iter_index == 0
+            and node is root
+            and root.is_terminal
+            and not root.children
+        ):
+            terminated_by = "exhausted"
+            iter_index += 1
+            # B8: schema validation + db.transact(pending_datoms, t=...) wires here.
+            break
+
+        # --- 3. EVALUATE on the JUST-EXPANDED PARENT (design §16 inv 5) ---
+        leaf_plan_id = node.plan_id
+        cached_score = evaluator_cache.get(leaf_plan_id)
+        if cached_score is not None:
+            score: float = cached_score
+        else:
+            eval_attempts += 1
+            try:
+                raw_score = evaluator.evaluate(plan_by_id[leaf_plan_id])
+            except Exception as exc:  # noqa: BLE001 — design §14 reject capture
+                eval_failures += 1
+                pending_datoms.append(_eval_reject_record(
+                    leaf_plan_id, "evaluator_raised", error=exc
+                ))
+                iter_index += 1
+                continue
+            if raw_score is None:
+                eval_failures += 1
+                pending_datoms.append(_eval_reject_record(
+                    leaf_plan_id, "evaluator_returned_none"
+                ))
+                iter_index += 1
+                continue
+            if not _is_finite_score(raw_score):
+                eval_failures += 1
+                pending_datoms.append(_eval_reject_record(
+                    leaf_plan_id, "evaluator_returned_non_finite",
+                    raw_score=raw_score,
+                ))
+                iter_index += 1
+                continue
+            evaluator_cache[leaf_plan_id] = raw_score
+            score = raw_score
+            pending_datoms.append({
+                "phase": "evaluate",
+                "plan_id": leaf_plan_id,
+                "score": raw_score,
+            })
+
+        # --- 4. BACKUP along the traversed path ---
+        for parent_node, edge in path:
+            parent_node.visits += 1
+            edge.visits_through_edge += 1
+            edge.total_value_through_edge += score
+            parent_node.total_value += score
+        # The leaf itself receives a +1 visit (design §16 inv 2 leaf-of-path
+        # case + the §16 pseudocode closing `node.visits += 1`).
+        node.visits += 1
+        node.total_value += score
+
+        # B8: schema validation + db.transact(pending_datoms, t=...) wires here.
+
+        iter_index += 1
+
+    # --- Winner selection ---
+    winner_edge = _pick_winner_edge(root)
+    if winner_edge is None:
+        winner_plan = initial_plan
+        winner_plan_id = initial_plan.id
+        root_q = 0.0
+    else:
+        winner_plan = plan_by_id[winner_edge.child_plan_id]
+        winner_plan_id = winner_edge.child_plan_id
+        n_sa = winner_edge.visits_through_edge
+        root_q = (
+            (winner_edge.total_value_through_edge / n_sa) if n_sa > 0 else 0.0
+        )
+
+    return MCTSResult(
+        winner=winner_plan,
+        winner_plan_id=winner_plan_id,
+        initial_plan_id=initial_plan.id,
+        search_id=search_id,
+        iter_count=iter_index,
+        unique_plans_visited=len(transposition),
+        terminated_by=terminated_by,
+        root_q=root_q,
+        tree_dump=_build_tree_dump(transposition),
+    )
+
+
+# B7-B9 to follow

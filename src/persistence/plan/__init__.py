@@ -72,8 +72,10 @@ from persistence.plan._mcts import (
     MCTSConfig,
     MCTSEdge,
     MCTSNode,
+    MCTSResult,
     SubstituteLeafAction,
     apply_action,
+    mcts_search,
 )
 
 __all__ = [
@@ -98,6 +100,7 @@ __all__ = [
     "MCTSConfig",
     "MCTSEdge",
     "MCTSNode",
+    "MCTSResult",
     "MetricNotRegistered",
     "MetricRef",
     "Node",
@@ -120,6 +123,7 @@ __all__ = [
     "gate_g4_stub",
     "lookup_coercion",
     "lookup_metric",
+    "mcts_search",
     "optimize",
     "parse",
     "promote",

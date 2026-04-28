@@ -23,7 +23,11 @@ from persistence.plan._coerce import (
     register_coercion,
     unregister_coercion,
 )
-from persistence.plan._errors import ParseError, UnimplementedNodeKindError
+from persistence.plan._errors import (
+    OptimizerNotAvailable,
+    ParseError,
+    UnimplementedNodeKindError,
+)
 from persistence.plan._walk import walk
 from persistence.plan._dispatch import Dispatcher, Handler
 from persistence.plan._execute import (
@@ -39,6 +43,7 @@ from persistence.plan._metric_registry import (
     register_metric,
     unregister_metric,
 )
+from persistence.plan._optimize import OptimizedPlan, optimize
 from persistence.plan._parse import parse, unparse
 
 __all__ = [
@@ -51,6 +56,8 @@ __all__ = [
     "LeafResult",
     "MetricRef",
     "Node",
+    "OptimizedPlan",
+    "OptimizerNotAvailable",
     "ParseError",
     "PLAN_CANONICAL_VERSION",
     "TrainingExample",
@@ -58,6 +65,7 @@ __all__ = [
     "execute",
     "lookup_coercion",
     "lookup_metric",
+    "optimize",
     "parse",
     "register_coercion",
     "register_metric",

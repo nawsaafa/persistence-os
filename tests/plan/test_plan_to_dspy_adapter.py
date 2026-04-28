@@ -93,15 +93,17 @@ def _dispatcher_with(handler) -> Dispatcher:
 
 
 def test_plan_to_dspy_module_is_internal_not_in_public_all() -> None:
-    """A3 ships the adapter as internal — A4 will add the public ``optimize``.
+    """The forward adapter stays internal even after A4 widens ``__all__``.
 
-    Verifies the adapter is NOT in ``persistence.plan.__all__`` so we
-    don't accidentally widen the public surface ahead of A4.
+    A4 ships ``optimize`` + ``OptimizedPlan`` publicly, but the
+    ``_plan_to_dspy_module`` forward adapter is the internal seam used
+    by ``optimize``. Callers reach the optimizer through the public
+    function, never through the adapter. This test pins that the
+    leading-underscore adapter never ends up in ``__all__``.
     """
     import persistence.plan as plan
 
     assert "_plan_to_dspy_module" not in plan.__all__
-    assert "optimize" not in plan.__all__  # A4 lands this, not A3
 
 
 def test_optimize_module_imports(mock_dspy: MagicMock) -> None:

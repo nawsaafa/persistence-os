@@ -515,6 +515,46 @@ def test_promote_g4_not_approved_raises() -> None:
     assert partial.g4_approver == "human-operator"
 
 
+# --- R2 fix-pass W1.B — G4 isinstance(bool) check ------------------------ #
+
+
+def test_promote_g4_approved_non_bool_raises_typeerror() -> None:
+    """A custom ``g4_fn`` returning ``approved`` that's not a strict
+    ``bool`` must raise ``TypeError`` (R2 fix-pass W1.B).
+
+    Without the fix, ``bool(g4_result["approved"])`` would silently
+    coerce truthy non-bools (e.g. the string ``"False"``, a non-empty
+    dict) into ``True`` — promoting a candidate whose g4_fn surface
+    doesn't even agree on the contract. The strict ``isinstance``
+    check surfaces the wiring bug at the Stream D / operator-token
+    boundary.
+    """
+    plan = _candidate_plan()
+
+    def g4_string_false() -> dict:
+        # The string "False" is truthy in Python; ``bool("False")``
+        # returns True. This is exactly the silent-approval hole the
+        # fix closes.
+        return {
+            "approved": "False",
+            "approver": "buggy-stub",
+            "rationale": "wrong type",
+        }
+
+    with pytest.raises(TypeError, match="bool"):
+        promote(
+            plan,
+            db=_g2_pass_db(),
+            optimized_score=0.90,
+            baseline_score=0.80,
+            held_out_trajectories=_ten_trajectories(),
+            replay_engine=_ByteIdenticalReplayStub(),
+            audit_window=_FULL_AUDIT_WINDOW,
+            promoted_at_ms=1_700_000_000_000,
+            g4_fn=g4_string_false,
+        )
+
+
 # --- promote() — case 6: determinism --------------------------------------- #
 
 

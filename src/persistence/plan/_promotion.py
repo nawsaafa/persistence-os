@@ -218,7 +218,18 @@ def gate_g1_replay_byte_identity(
     for trajectory in held_out_trajectories:
         counterfactual = replay_engine.replay(candidate_plan, trajectory)
         diff = replay_engine.compare(trajectory, counterfactual)
-        if diff.get(_DIVERGENCE_KEY) is not None:
+        # Protocol contract: ``compare`` MUST return a dict containing
+        # ``divergence_step``. A missing key is a wiring bug (not data
+        # variation), so we raise rather than fall back to ``.get(...,
+        # None)`` — silent fallback would let a malformed engine pass
+        # G1 (R2 fix-pass W1.A).
+        if _DIVERGENCE_KEY not in diff:
+            raise TypeError(
+                f"ReplayEngine.compare() returned dict without required "
+                f"{_DIVERGENCE_KEY!r} key; got keys="
+                f"{sorted(diff.keys())!r}"
+            )
+        if diff[_DIVERGENCE_KEY] is not None:
             # First divergence is a hard fail — no need to continue.
             return False
     return True
@@ -236,6 +247,16 @@ def gate_g1_replay_byte_identity(
 #: prefix — datoms whose ``a`` does not start here are not audit
 #: entries.
 _AUDIT_ATTR_PREFIX: str = "audit/"
+
+#: Warning message emitted by G2 when called over an empty audit
+#: window. Symmetric with G1's empty-corpus warning: the gate returns
+#: ``False`` (vacuous truth is not accepted at a correctness gate per
+#: R2 fix-pass W1.C) and warns so callers can opt into ``pytest.warns``
+#: to escalate. Pinned at module level so the test drift-pin and the
+#: caller can match a stable substring.
+_G2_EMPTY_WINDOW_WARNING: str = (
+    "G2 gate: empty audit window — no audit entries to verify Prop 2"
+)
 
 
 def _datom_to_wire_for_audit(datom: Datom) -> dict[str, Any]:
@@ -265,8 +286,17 @@ def _datom_to_wire_for_audit(datom: Datom) -> dict[str, Any]:
     # writes it as ``provenance[":signature"]`` (and into ``:datom/tx``
     # itself in the wire form). Storing in the fact store costs us the
     # ``:datom/tx`` slot — Datom.tx must be int — but the signature is
-    # the canonical fallback.
-    audit_id = provenance.get(":signature", datom.tx)
+    # the canonical pin. Missing ``:signature`` means the audit datom
+    # was hand-rolled outside ``audit_entry_to_datom``; surface that as
+    # a typed ValueError rather than producing a malformed wire dict
+    # whose downstream G2 failure mode is opaque (R2 fix-pass W1.F-1).
+    if ":signature" not in provenance:
+        raise ValueError(
+            "audit Datom missing required provenance[':signature'] — "
+            "cannot reconstruct AuditEntry.id; check the audit handler "
+            "wiring or the datom's provenance map"
+        )
+    audit_id = provenance[":signature"]
     return {
         ":datom/e": datom.e,
         # Restore the leading colon dropped by Datom.a's bare-string
@@ -336,8 +366,12 @@ def gate_g2_audit_chain(
     Pulls ``AuditEntry`` instances from ``db`` for the
     ``[audit_window_start, audit_window_end]`` window (inclusive,
     in milliseconds since the Unix epoch), then delegates to
-    :func:`persistence.effect.verify_chain`. The empty window is
-    vacuously consistent — ``verify_chain([])`` is ``True``.
+    :func:`persistence.effect.verify_chain`. **An empty window
+    returns False with a UserWarning** (R2 fix-pass W1.C) — vacuous
+    truth is not accepted at a correctness gate. Symmetric with G1's
+    empty-corpus handling: callers can ``pytest.warns(UserWarning)``
+    to escalate the wiring bug, and a miscomputed window or a DB
+    with zero audit datoms can no longer silently pass G2.
 
     Module 2 owns the verification logic; this gate is a thin pull-and-
     delegate adapter so Module 3 has a uniform G1/G2/G3/G4 surface for
@@ -356,15 +390,20 @@ def gate_g2_audit_chain(
 
     Returns
     -------
-    ``True`` iff every entry's content hash matches its stored ``id``
-    AND every ``prev_hash`` references the previous entry's ``id``;
-    ``False`` on any break. Empty window → ``True`` (vacuously).
+    ``True`` iff at least one audit entry falls in-window AND every
+    entry's content hash matches its stored ``id`` AND every
+    ``prev_hash`` references the previous entry's ``id``. ``False`` on
+    any chain break, and ``False`` with a UserWarning when no audit
+    entries fall in-window.
     """
     entries = list(
         _audit_entries_in_window(
             db, start_ms=audit_window_start, end_ms=audit_window_end
         )
     )
+    if not entries:
+        warnings.warn(_G2_EMPTY_WINDOW_WARNING, UserWarning, stacklevel=2)
+        return False
     return verify_chain(entries)
 
 
@@ -613,14 +652,12 @@ def _build_promotion_record(
 def _raise_gate_failure(message: str, partial_record: PromotionRecord) -> None:
     """Raise :class:`GateFailure` carrying ``partial_record`` as an attr.
 
-    :class:`GateFailure` inherits ``RuntimeError(message)`` only — no
-    custom signature. We attach ``partial_record`` after construction
-    so the exception's class doesn't need to change. Callers retrieve
-    it via ``getattr(exc, "partial_record", None)``.
+    :class:`GateFailure` accepts ``partial_record`` in its ``__init__``
+    (R2 fix-pass W1.F-2: typed class-level attribute, no dynamic-attr
+    type-ignore at the call site). Callers read it via
+    ``exc.partial_record``.
     """
-    exc = GateFailure(message)
-    exc.partial_record = partial_record  # type: ignore[attr-defined]
-    raise exc
+    raise GateFailure(message, partial_record)
 
 
 def promote(
@@ -772,7 +809,16 @@ def promote(
     # ``approver`` (str), ``rationale`` (str). Stream A's stub is the
     # default; Stream D's REPL operator-token check substitutes here.
     g4_result = g4_fn()
-    g4_approved = bool(g4_result["approved"])
+    # R2 fix-pass W1.B: enforce strict bool. ``bool(...)`` coercion
+    # would let truthy non-bools (e.g. the string "False", non-empty
+    # dicts) silently approve. The g4_fn contract is bool, not bool-ish.
+    g4_approved_raw = g4_result["approved"]
+    if not isinstance(g4_approved_raw, bool):
+        raise TypeError(
+            f"g4_fn returned 'approved' of type "
+            f"{type(g4_approved_raw).__name__}; expected bool"
+        )
+    g4_approved = g4_approved_raw
     g4_approver = str(g4_result["approver"])
     g4_rationale = str(g4_result["rationale"])
     if not g4_approved:

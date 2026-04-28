@@ -68,6 +68,7 @@ from persistence.fact.store import InMemoryStore
 from persistence.plan import (
     Dispatcher,
     ExecutionResult,
+    MetricNotRegistered,
     MetricRef,
     Node,
     PromotionRecord,
@@ -172,9 +173,10 @@ def registered_metric() -> Iterator[MetricRef]:
     finally:
         try:
             unregister_metric(_METRIC_REF)
-        except Exception:
-            # Idempotent teardown — never mask a real failure with a
-            # teardown crash.
+        except MetricNotRegistered:
+            # Idempotent teardown when an earlier teardown already
+            # unregistered the metric (R2 fix-pass W1.F: scope to the
+            # specific exception so a real registry bug surfaces).
             pass
 
 

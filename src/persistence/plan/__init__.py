@@ -25,6 +25,7 @@ from persistence.plan._coerce import (
 )
 from persistence.plan._errors import (
     GateFailure,
+    MetricNotRegistered,
     OptimizerNotAvailable,
     ParseError,
     UnimplementedNodeKindError,
@@ -66,6 +67,7 @@ __all__ = [
     "Handler",
     "ID_HEX_WIDTH",
     "LeafResult",
+    "MetricNotRegistered",
     "MetricRef",
     "Node",
     "OptimizedPlan",

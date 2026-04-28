@@ -400,38 +400,43 @@ def test_g2_tampered_entry_returns_false() -> None:
     )
 
 
-def test_g2_empty_window_returns_true_vacuously() -> None:
-    """Zero entries in window → True (the empty chain is consistent)."""
+def test_g2_empty_db_returns_false_with_warning() -> None:
+    """Zero audit datoms → False with UserWarning (R2 fix-pass W1.C).
+
+    Vacuous truth is not accepted at a correctness gate: a DB with no
+    audit datoms (or a miscomputed window that excludes everything)
+    must surface as a wiring bug, not silently pass G2. Symmetric with
+    G1's empty-corpus handling.
+    """
     db = _make_db()  # no audit datoms at all
-    assert (
-        gate_g2_audit_chain(
+    with pytest.warns(UserWarning, match="empty audit window"):
+        result = gate_g2_audit_chain(
             db,
             audit_window_start=0,
             audit_window_end=9_999_999_999_999,
         )
-        is True
-    )
+    assert result is False
 
 
-def test_g2_window_excludes_out_of_range_entries() -> None:
-    """Entries outside [start, end] are not considered.
+def test_g2_window_excludes_all_audit_entries_returns_false_with_warning() -> None:
+    """Window that excludes every audit entry → False with UserWarning.
 
     With every audit entry's ``recorded_at`` ≈ 1_712_000_000 (the fixed
     clock used by ``_record_audit_chain``), a window ending strictly
-    before that instant must yield True (vacuously empty).
+    before that instant excludes all entries and the gate must fail
+    with a UserWarning rather than vacuously pass (R2 fix-pass W1.C).
     """
     entries = _record_audit_chain(n_entries=3)
     db = _make_db()
     _seed_audit_datoms(db, entries)
     # Window that ends well before the audit instants.
-    assert (
-        gate_g2_audit_chain(
+    with pytest.warns(UserWarning, match="empty audit window"):
+        result = gate_g2_audit_chain(
             db,
             audit_window_start=0,
             audit_window_end=1_000_000_000,  # < 1_712_000_000
         )
-        is True
-    )
+    assert result is False
 
 
 def test_g2_ignores_non_audit_datoms() -> None:
@@ -553,3 +558,87 @@ def test_datom_to_wire_for_audit_round_trips_audit_entry() -> None:
     assert reconstructed.policy_id == original.policy_id
     assert reconstructed.handler_chain == original.handler_chain
     assert reconstructed.principal == original.principal
+
+
+# --- R2 fix-pass W1.A — G1 missing-key fail-closed ----------------------- #
+
+
+def test_g1_compare_missing_divergence_step_key_raises_typeerror() -> None:
+    """If ``compare()`` returns a dict without ``divergence_step``, the
+    gate must raise ``TypeError`` rather than silently treat the missing
+    key as byte-identity (R2 fix-pass W1.A).
+
+    Without the fix, ``diff.get(_DIVERGENCE_KEY)`` returns ``None`` for
+    a malformed compare result, and the gate would pass G1 vacuously —
+    that's a fail-open hole if a Stream F adapter or test stub returns
+    a wrong-shape dict. Strict-key access surfaces the wiring bug.
+    """
+    plan = _candidate_plan()
+    trajectories = [_make_trajectory(i) for i in range(10)]
+
+    @dataclass
+    class _MalformedCompareStub:
+        def replay(self, p: Node, t: Trajectory) -> Trajectory:
+            return t
+
+        def compare(self, a: Trajectory, b: Trajectory) -> dict:
+            # No ``divergence_step`` key at all — a wiring bug.
+            return {"pnl_delta": 0.0, "kl_divergence": 0.0}
+
+    engine = _MalformedCompareStub()
+    with pytest.raises(TypeError, match="divergence_step"):
+        gate_g1_replay_byte_identity(
+            plan,
+            held_out_trajectories=trajectories,
+            replay_engine=engine,
+            min_count=10,
+        )
+
+
+# --- R2 fix-pass W1.F-1 — :signature required in audit provenance -------- #
+
+
+def test_datom_to_wire_for_audit_missing_signature_raises_valueerror() -> None:
+    """An audit ``Datom`` whose ``provenance`` lacks ``:signature`` must
+    surface a typed ``ValueError`` rather than silently fall back to
+    ``datom.tx`` (R2 fix-pass W1.F-1).
+
+    The fallback would produce a wire dict whose ``:datom/tx`` is an
+    int instead of a content hash, and the downstream
+    ``datom_to_audit_entry`` reconstruction would either fail with an
+    opaque error or yield an AuditEntry whose ``id`` doesn't match the
+    canonical content hash — silently breaking G2 with no clear pointer
+    to the wiring bug. The fix requires ``:signature`` and points at
+    the wiring directly.
+    """
+    entries = _record_audit_chain(n_entries=1)
+    db = _make_db()
+    _seed_audit_datoms(db, entries)
+    audit_datoms = [d for d in db.log() if d.a.startswith("audit/")]
+    assert len(audit_datoms) == 1
+    original = audit_datoms[0]
+    # Strip the ``:signature`` from provenance — the inverse of what
+    # ``audit_entry_to_datom`` writes. Cast back to Provenance since
+    # Datom's ``provenance`` field is typed against the TypedDict; a
+    # bare dict comprehension widens the type.
+    from persistence.fact.datom import Provenance  # local import; test-only
+    from typing import cast
+
+    stripped_provenance = cast(
+        Provenance,
+        {k: v for k, v in original.provenance.items() if k != ":signature"},
+    )
+    tampered = Datom(
+        e=original.e,
+        a=original.a,
+        v=original.v,
+        tx=original.tx,
+        tx_time=original.tx_time,
+        valid_from=original.valid_from,
+        valid_to=original.valid_to,
+        op=original.op,
+        provenance=stripped_provenance,
+        invalidated_by=original.invalidated_by,
+    )
+    with pytest.raises(ValueError, match=":signature"):
+        _datom_to_wire_for_audit(tampered)

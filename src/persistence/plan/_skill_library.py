@@ -20,10 +20,10 @@ All three share one transaction (atomic registration). The fact store
 is the source of truth for the registration *graph* — what's registered,
 when, against which promotion record. To round-trip the Plan AST and
 the promotion record themselves (i.e. recover the actual ``Node``
-object from a stored ``plan.id``), this module keeps two in-memory
+object from a stored ``skill_id``), this module keeps two in-memory
 caches populated by ``register()``:
 
-    * ``_plans:    dict[str, Node]``         — plan.id → Node
+    * ``_plans:    dict[str, Node]``         — skill_id → Node
     * ``_records:  dict[str, _PromotionRecordLike]``
                                               — promotion_id → record-like
 
@@ -137,7 +137,7 @@ class SkillLibrary:
     """Content-addressed skill registry over a :class:`DB`.
 
     The fact store is the source of truth for the registration *graph*.
-    In-memory caches map Plan id → Node and promotion_id → record-like
+    In-memory caches map skill_id → Node and promotion_id → record-like
     so :meth:`lookup` can return the original objects (byte-identity),
     not deserialized copies. The caches are populated only by
     :meth:`register`, so a freshly-constructed SkillLibrary over a DB

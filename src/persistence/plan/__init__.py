@@ -63,6 +63,7 @@ from persistence.plan._mcts import (
     AddStepAction,
     ComposeWithSkillAction,
     MAX_PLAN_DEPTH,
+    MCTSConfig,
     SubstituteLeafAction,
     apply_action,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "ID_HEX_WIDTH",
     "LeafResult",
     "MAX_PLAN_DEPTH",
+    "MCTSConfig",
     "MetricNotRegistered",
     "MetricRef",
     "Node",

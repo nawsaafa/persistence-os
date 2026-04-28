@@ -1,6 +1,7 @@
-"""MCTS over the content-addressed Plan AST (v0.6.5; design §5, §6, ADR-11).
+"""MCTS over the content-addressed Plan AST (v0.6.5; design §5, §6, §11, ADR-11).
 
 B1: Action ADT + canonical hash + pure ``apply_action`` + depth guard.
+B2: ``MCTSConfig`` frozen dataclass + ``__post_init__`` validation.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ __all__ = [
     "AddStepAction",
     "ComposeWithSkillAction",
     "MAX_PLAN_DEPTH",
+    "MCTSConfig",
     "SubstituteLeafAction",
     "apply_action",
 ]
@@ -194,4 +196,66 @@ def apply_action(
     return new_plan
 
 
-# B2-B9 to follow
+@dataclass(frozen=True, slots=True)
+class MCTSConfig:
+    """PUCT search hyperparameters + termination knobs (design §11, ADR-8).
+
+    All numeric fields are guarded in ``__post_init__`` by a
+    bool-isinstance check FIRST (``isinstance(True, int) is True`` —
+    Stream A's W1.B / G4 anti-pattern), then a numeric type check, then
+    a positivity check.
+
+    ``wall_clock_budget_ms`` is in the schema for forward-compat but
+    the v0.6.5 search loop ignores it (no ``:clock/now`` thread; design
+    §11 / §15). ``seed`` has no consumer in v0.6.5 — reserved for v0.7+
+    Dirichlet noise / shuffle tie-break (design §10)."""
+
+    max_iter: int = 200
+    max_unique_plans: int = 64
+    simple_regret_threshold: float | None = None
+    simple_regret_window: int = 5
+    wall_clock_budget_ms: int | None = None
+    c_puct: float = 1.4
+    expander_k: int = 4
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        # Bool-isinstance check FIRST on every numeric field. ``bool`` is a
+        # subclass of ``int`` in Python — ``isinstance(True, int) is True``;
+        # ``True > 0`` is ``True`` accidentally and ``False > 0`` is
+        # ``False`` (vacuous threshold-never-fires). Stream A W1.B / G4.
+        for fld in (
+            "c_puct",
+            "max_iter",
+            "max_unique_plans",
+            "expander_k",
+            "simple_regret_window",
+        ):
+            v = getattr(self, fld)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v <= 0:
+                raise ValueError(
+                    f"MCTSConfig.{fld} must be a positive number, got {v!r}"
+                )
+
+        srt = self.simple_regret_threshold
+        if srt is not None:
+            if isinstance(srt, bool) or not isinstance(srt, (int, float)) or srt < 0:
+                raise ValueError(
+                    f"MCTSConfig.simple_regret_threshold must be None or a "
+                    f"non-negative number, got {srt!r}"
+                )
+
+        wcb = self.wall_clock_budget_ms
+        if wcb is not None:
+            # Must be ``int`` (NOT ``float``, NOT ``bool``) and positive.
+            if isinstance(wcb, bool) or not isinstance(wcb, int) or wcb <= 0:
+                raise ValueError(
+                    f"MCTSConfig.wall_clock_budget_ms must be None or a "
+                    f"positive int, got {wcb!r}"
+                )
+
+        if isinstance(self.seed, bool) or not isinstance(self.seed, int):
+            raise ValueError(f"MCTSConfig.seed must be an int, got {self.seed!r}")
+
+
+# B3-B9 to follow

@@ -6,7 +6,7 @@
 - WS auth handshake                               (8)
 - Pre-auth ops rejected                           (4)
 - Method not found                                (3)
-- Skeleton ops raise NotImplementedError          (4)
+- WS-level edit-op surfacing                     (1)
 - Static / route                                  (3)
 
 See design doc ``docs/plans/2026-04-28-v0.7.0a1-module-7-repl-design.md``
@@ -29,7 +29,7 @@ from persistence.fact import DB, InMemoryStore
 from persistence.repl import (
     Capability,
     ERR_AUTH_FAILED,
-    ERR_INTERNAL_ERROR,
+    ERR_INVALID_PARAMS,
     ERR_INVALID_REQUEST,
     ERR_METHOD_NOT_FOUND,
     ERR_PARSE_ERROR,
@@ -385,16 +385,21 @@ class TestMethodNotFound:
 
 
 # ===========================================================================
-# 5. Skeleton ops raise NotImplementedError (1 — D6 only)
+# 5. WS-level edit-op surfacing (1 — D6 wired through dispatcher)
 # ===========================================================================
-# D3/D4/D5 ship inspect/rewind/branch; only ``repl/edit`` remains stubbed
-# pending D6. The full op-level test coverage moved to
-# ``test_inspect.py`` / ``test_rewind.py`` / ``test_branch.py``.
+# D3/D4/D5/D6 all ship now; the full op-level test coverage lives in
+# ``test_inspect.py`` / ``test_rewind.py`` / ``test_branch.py`` /
+# ``test_edit.py``. This single test confirms that the
+# WS-dispatcher path correctly threads ``edit_op`` errors through the
+# JSON-RPC error envelope (post-D6 the op is real, not a stub).
 class TestSkeletonOpsNotImplemented:
     @pytest.mark.asyncio
-    async def test_post_auth_edit_returns_internal_error(
+    async def test_post_auth_edit_with_empty_params_returns_invalid_params(
         self, client, db, clock_fixed
     ):
+        # Token from fixture has ``edit:write`` so we get past the
+        # capability gate; empty params then fail the datoms-shape
+        # check with ``ERR_INVALID_PARAMS`` (D6).
         tok = _stored_token_str(db, clock_fixed)
         async with client.ws_connect("/ws") as ws:
             await _auth(ws, tok)
@@ -408,8 +413,9 @@ class TestSkeletonOpsNotImplemented:
             )
             resp = await ws.receive_json()
         assert "error" in resp
-        # NotImplementedError → ERR_INTERNAL_ERROR (D6 will overwrite).
-        assert resp["error"]["code"] == ERR_INTERNAL_ERROR
+        # D6 wired: empty params → ERR_INVALID_PARAMS (not the
+        # ERR_INTERNAL_ERROR that the pre-D6 stub produced).
+        assert resp["error"]["code"] == ERR_INVALID_PARAMS
 
 
 # ===========================================================================

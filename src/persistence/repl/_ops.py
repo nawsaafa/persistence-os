@@ -29,11 +29,16 @@ import hashlib
 from datetime import datetime
 from typing import Any
 
+from persistence.effect.canonical import canonical_hash
+
 from ._protocol import (
     ERR_BRANCH_DEPTH_EXCEEDED,
     ERR_CAPABILITY_DENIED,
+    ERR_INTERNAL_ERROR,
     ERR_INVALID_PARAMS,
+    ERR_REQUEST_HASH_MISMATCH,
     ERR_SESSION_EXPIRED,
+    ERR_STALE_CURSOR_EDIT,
 )
 from ._session import Session
 
@@ -405,17 +410,171 @@ async def branch_op(
 
 
 # ---------------------------------------------------------------------------
-# D6 — edit (stub; pre-skeleton for D5+D6 parallel dispatch)
+# D6 — edit (two-step propose-confirm without server-side preview)
 # ---------------------------------------------------------------------------
+def _compute_request_hash(params: dict) -> str:
+    """Canonical hash over ``params`` minus ``confirm`` and ``request_hash``.
+
+    Per §5.2 + ADR-7: the hash binds the operator's confirm step to the
+    exact bytes proposed in step 1. Stripping ``confirm`` lets the same
+    payload hash at both steps (step 1 has ``confirm=False`` or omitted;
+    step 2 has ``confirm=True``); stripping ``request_hash`` makes the
+    re-hash idempotent (the field carries its own value, so it must
+    not feed back into itself). Computed via
+    :func:`persistence.effect.canonical.canonical_hash` — the same
+    path the rest of the substrate uses for content-addressing.
+    """
+    minus = {k: v for k, v in params.items() if k not in ("confirm", "request_hash")}
+    return canonical_hash(minus)
+
+
+def _validate_datoms(datoms: Any) -> list:
+    """Validate the ``datoms`` field shape; raise ``ERR_INVALID_PARAMS``.
+
+    Returns the list (unchanged) on success. Both the propose and
+    confirm steps validate the same shape: a non-empty list of dicts
+    each carrying ``e``, ``a``, ``v`` keys. ``valid_from`` is OPTIONAL
+    on the wire (``db.transact`` defaults to ``self._clock()`` when
+    absent).
+    """
+    if not isinstance(datoms, list) or not datoms:
+        raise _op_error(ERR_INVALID_PARAMS, "datoms must be non-empty list")
+    for i, d in enumerate(datoms):
+        if not isinstance(d, dict):
+            raise _op_error(
+                ERR_INVALID_PARAMS,
+                f"datoms[{i}] must be a dict with e, a, v keys",
+            )
+        for k in ("e", "a", "v"):
+            if k not in d:
+                raise _op_error(
+                    ERR_INVALID_PARAMS,
+                    f"datoms[{i}] missing required key {k!r}",
+                )
+    return datoms
+
+
 async def edit_op(
     session: Session, db: Any, params: dict, *, server: Any = None
 ) -> Any:
-    """REPL edit (two-step propose-confirm). Ships in D6."""
-    raise NotImplementedError("D6")
+    """REPL edit — two-step propose-confirm without server-side preview.
+
+    See design doc §5.2 + ADR-7. Step 1 (``confirm`` omitted or
+    ``False``) returns ``{requires_confirmation: True, request_hash,
+    echo, preview_note}`` — the operator inspects the echoed payload,
+    re-hashes locally if desired, and re-issues with ``confirm: true``
+    AND matching ``request_hash`` to commit (step 2).
+
+    The substrate does NOT compute a server-side auto-retract preview
+    (W1.D — the earlier ``preview_transact`` extension to ``db.py``
+    was withdrawn). Operators wanting to see what auto-retracts can
+    run a prior ``inspect`` against the current state; the
+    ``request_hash`` then binds the confirm step to the exact bytes
+    that were approved.
+
+    Capability matrix (§ADR-3 + §10):
+
+    - ``edit:write`` grants both propose AND confirm.
+    - ``edit:propose-only`` grants ONLY propose; the confirm step
+      requires ``edit:write``.
+    - Neither → ``ERR_CAPABILITY_DENIED`` on either step.
+
+    Stale-cursor reject (§5.2 + ADR-9 ``-32008``): if
+    ``session.view_cursor_tx_time_iso`` is set on the confirm step,
+    the edit is rejected — operators must ``branch`` first to fork
+    the cursor before editing in the past. The propose step is
+    permitted at any cursor (it's a read-only re-hash).
+
+    Errors (ADR-9): ``ERR_CAPABILITY_DENIED``,
+    ``ERR_REQUEST_HASH_MISMATCH``, ``ERR_STALE_CURSOR_EDIT``,
+    ``ERR_INVALID_PARAMS``, ``ERR_INTERNAL_ERROR`` (transact failure).
+    """
+    has_write = session.cap_set.has("edit", "write")
+    has_propose = session.cap_set.has("edit", "propose-only")
+    if not (has_write or has_propose):
+        raise _op_error(
+            ERR_CAPABILITY_DENIED,
+            "edit:write or edit:propose-only required",
+        )
+
+    datoms = _validate_datoms(params.get("datoms"))
+    confirm = params.get("confirm", False)
+
+    if not confirm:
+        # Step 1 — propose. No commit, no cursor check; this is a
+        # pure re-hash of the input. Both edit:write and
+        # edit:propose-only reach this branch.
+        request_hash = _compute_request_hash(params)
+        return {
+            "requires_confirmation": True,
+            "request_hash": request_hash,
+            "echo": {"datoms": datoms},
+            "preview_note": (
+                "No server-side auto-retract preview computed. "
+                "Re-issue with confirm:true and matching request_hash to commit."
+            ),
+        }
+
+    # Step 2 — confirm.
+    if not has_write:
+        # propose-only operators reach the propose branch; the
+        # confirm step demands the broader write capability.
+        raise _op_error(
+            ERR_CAPABILITY_DENIED, "edit:write required for confirm step"
+        )
+
+    # Stale-cursor reject: edits at HEAD only; branch first to fork.
+    if session.view_cursor_tx_time_iso is not None:
+        raise _op_error(
+            ERR_STALE_CURSOR_EDIT,
+            "edit at past cursor not allowed; branch first",
+        )
+
+    # request_hash binds the confirm step to the exact bytes
+    # proposed in step 1.
+    expected = _compute_request_hash(params)
+    provided = params.get("request_hash")
+    if provided != expected:
+        raise _op_error(
+            ERR_REQUEST_HASH_MISMATCH, "request_hash mismatch; re-propose"
+        )
+
+    # Commit via the same db.transact path programmatic callers use.
+    # ``db.transact`` returns a NEW DB value (functional wrapper);
+    # the freshly-allocated tx-id is read off the last datom in the
+    # store. We sample ``session.clock()`` BEFORE transact for the
+    # response's ``tx_time_iso``; the clock is the same one db uses
+    # internally (both wired through the runtime in production).
+    now = session.clock()
+    try:
+        new_db = db.transact(datoms)
+    except Exception as e:
+        raise _op_error(ERR_INTERNAL_ERROR, f"transact failed: {e}")
+
+    # Read the freshly-allocated tx id off the store. ``transact``
+    # appends in one atomic block per call; the last datom's ``tx``
+    # is the just-committed transaction id.
+    tx: int | None = None
+    try:
+        all_datoms = list(new_db.store.all_datoms())
+        if all_datoms:
+            tx = all_datoms[-1].tx
+    except Exception:
+        # Defensive: if store introspection fails for any reason,
+        # the commit still succeeded; we just can't surface tx.
+        tx = None
+
+    return {
+        "committed": True,
+        "tx_time_iso": now.isoformat(),
+        "tx": tx,
+        "datom_count": len(datoms),
+    }
 
 
 __all__ = [
     "MAX_BRANCH_DEPTH",
+    "_compute_request_hash",
     "branch_op",
     "edit_op",
     "inspect_op",

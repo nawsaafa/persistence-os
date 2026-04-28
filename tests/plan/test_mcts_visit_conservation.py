@@ -291,6 +291,10 @@ def _drive_to_transposition(
                     transposition,
                     None,
                     pending_datoms,
+                    search_id="mcts/test-fixture",
+                    iter_index=iter_index,
+                    prev_hash="0" * 64,
+                    started_at_ms=1_000_000,
                 )
                 if not node.children:
                     node.is_terminal = True

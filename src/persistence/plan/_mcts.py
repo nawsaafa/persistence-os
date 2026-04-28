@@ -1,13 +1,11 @@
-"""MCTS over the content-addressed Plan AST (v0.6.5; design §5, §6, §11, ADR-11).
+"""MCTS over the content-addressed Plan AST (v0.6.5; design §5, §6, §11).
 
-B1: Action ADT + canonical hash + pure ``apply_action`` + depth guard.
-B2: ``MCTSConfig`` frozen dataclass + ``__post_init__`` validation.
-B3: ``MCTSNode`` + ``MCTSEdge`` non-frozen dataclasses (slots=True).
-B4: ``Expander`` Protocol + ``_StaticExpander`` + ``LLMExpander`` (design §8).
-B5: ``Evaluator`` Protocol + ``_StaticEvaluator`` + ``LLMJudgeEvaluator`` (design §9).
-B6: ``mcts_search`` core loop — SELECT/EXPAND/EVALUATE/BACKUP per §16
-    pseudocode + ``MCTSResult`` (no provenance datom side-effects yet;
-    B8 wires the schema validation + ``:mcts/search`` summary write).
+B1-B5: Action ADT + applicator, MCTSConfig, MCTSNode/Edge dataclasses,
+Expander + Evaluator Protocols + static stubs + LLM wirings.
+B6-B7: ``mcts_search`` core loop (SELECT/EXPAND/EVALUATE/BACKUP per
+§16) + 6-reason termination + ``MCTSResult``.
+B8: ``:mcts/iteration`` provenance + ``mcts/prev-hash`` Merkle chain +
+one ``db.transact()`` per iteration; schema/builders in ``_mcts_datoms.py``.
 """
 from __future__ import annotations
 
@@ -17,10 +15,11 @@ import math
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable, Literal, Protocol, Union, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Literal, Protocol, Union, runtime_checkable
 
 from persistence.plan._ast import Node
 from persistence.plan._errors import ExpanderContractError, PlanDepthExceeded
+from persistence.plan import _mcts_datoms as _datoms
 
 if TYPE_CHECKING:
     from persistence.fact.db import DB
@@ -494,13 +493,12 @@ def _is_finite_score(value: float) -> bool:
 
 # --- B6: mcts_search core loop (design §15, §16, ADR-7) ---------------- #
 #
-# B8 LIFTING ESCAPE HATCH: when the file crosses the design §18 LOC
-# budget (≤800 watermark), B8 should lift `_build_iteration_datoms` and
-# the evaluator-side reject placeholders into a separate `_mcts_datoms.py`
-# helper file. B6 ships placeholder dicts via `_eval_reject_record` and
-# inline `pending_datoms.append({...})` calls; B8's schema-validation
-# refactor is the natural lift point. The B6 surface itself stays in
-# `_mcts.py` — only the datom-building helpers move.
+# B8 LIFT COMPLETE: provenance machinery (`:mcts/iteration` schema,
+# `:mcts/search` summary, `mcts/prev-hash` Merkle chain, output payload
+# records, reject-record builder, synthetic-time helper) lives in
+# `_mcts_datoms.py`. The loop here threads `prev_hash` across iterations
+# and accumulates per-iteration `pending_facts` lists for one
+# `db.transact()` call per iteration (design §13 transaction granularity).
 
 
 #: Search-id hex width (design §15 module-globals enumeration). Mirrors
@@ -589,34 +587,52 @@ def _populate_children(
     plan_by_id: dict[str, Node],
     transposition: dict[str, MCTSNode],
     skill_library: "SkillLibrary | None",
-    pending_datoms: list[object],
-) -> int:
+    pending_facts: list[dict[str, Any]],
+    *,
+    search_id: str,
+    iter_index: int,
+    prev_hash: str,
+    started_at_ms: int,
+) -> tuple[int, str]:
     """Apply each proposed action; build ``MCTSEdge`` for successes; record rejects.
 
-    Returns the number of successful expansions. Failures append a
-    placeholder reject record to ``pending_datoms`` (B8 closes the
-    schema validation). Within-parent deterministic dedup: a repeated
-    ``action_hash`` under the same parent is silently skipped (first
-    proposal wins, proposal-iteration order is the tie-break)."""
+    Returns ``(successes, new_prev_hash)``. Each rejected proposal
+    appends a ``phase="reject"`` iteration row's facts (7 facts; design
+    §13) to ``pending_facts``, advancing ``prev_hash`` along the
+    Merkle chain in proposal-iteration order (design §13 within-
+    transaction ordering — W2 MINOR-7 pin).
+
+    Within-parent deterministic dedup: a repeated ``action_hash`` under
+    the same parent is silently skipped (first proposal wins, proposal-
+    iteration order is the tie-break)."""
     plan = plan_by_id[node.plan_id]
     successes = 0
-    for action, prior in proposals:
+    for action, _prior in proposals:
         try:
             new_plan = apply_action(plan, action, skill_library=skill_library)
         except (ValueError, IndexError, PlanDepthExceeded) as exc:
-            # B8: schema validation + serialization wires here. For B6,
-            # record a placeholder dict so reject-counting tests have a
-            # non-empty pending_datoms accumulator to scan.
-            pending_datoms.append(
-                {
-                    "phase": "reject",
-                    "plan_id": node.plan_id,
-                    "action_hash": _action_hash(action),
-                    "reason": _classify_apply_failure(action, exc),
-                    "error_class": type(exc).__name__,
-                    "error_repr": repr(exc),
-                }
+            reason = _classify_apply_failure(action, exc)
+            output_value = _datoms._reject_record(
+                action, node.plan_id, reason, error=exc
             )
+            inputs_hash = _datoms._hash_payload({
+                "plan_id": node.plan_id,
+                "action_hash": _action_hash(action),
+            })
+            group = _datoms._make_iter_facts(
+                search_id=search_id,
+                iter_index=iter_index,
+                phase="reject",
+                plan_id=node.plan_id,
+                inputs_hash=inputs_hash,
+                output_value=output_value,
+                prev_hash=prev_hash,
+                started_at_ms=started_at_ms,
+                action_hash=_action_hash(action),
+                error=exc,
+            )
+            pending_facts.extend(group.facts)
+            prev_hash = group.content_hash
             continue
         action_hash = _action_hash(action)
         if action_hash in node.children:
@@ -630,11 +646,11 @@ def _populate_children(
             action_hash=action_hash,
             action=action,
             child_plan_id=child_plan_id,
-            prior=prior,
+            prior=_prior,
         )
         node.children[action_hash] = edge
         successes += 1
-    return successes
+    return successes, prev_hash
 
 
 def _classify_apply_failure(action: Action, exc: BaseException) -> str:
@@ -646,6 +662,43 @@ def _classify_apply_failure(action: Action, exc: BaseException) -> str:
         if "skill_library" in msg or "not registered" in msg:
             return "skill_not_registered"
     return "plan_construction_raised"
+
+
+def _emit_eval_reject(
+    *,
+    db: "DB | None",
+    search_id: str,
+    iter_index: int,
+    leaf_plan_id: str,
+    inputs_hash: str,
+    reason: str,
+    started_at_ms: int,
+    pending_facts: list[dict[str, Any]],
+    prev_hash: str,
+    error: BaseException | None = None,
+    raw_score: object = None,
+) -> str:
+    """Emit one ``phase="reject"`` evaluator-side group + flush iter txn.
+
+    Lifted from the three near-identical eval-reject branches (raised /
+    None / non-finite). Returns the new ``prev_hash``; caller does
+    ``iter_index += 1`` + ``continue``."""
+    rec = _datoms._reject_record(
+        None, leaf_plan_id, reason, error=error, raw_score=raw_score,
+    )
+    group = _datoms._make_iter_facts(
+        search_id=search_id, iter_index=iter_index, phase="reject",
+        plan_id=leaf_plan_id, inputs_hash=inputs_hash,
+        output_value=rec, prev_hash=prev_hash,
+        started_at_ms=started_at_ms, action_hash=None, error=error,
+    )
+    pending_facts.extend(group.facts)
+    if db is not None and pending_facts:
+        db.transact(
+            pending_facts,
+            provenance=_datoms._iter_provenance(search_id, iter_index),
+        )
+    return group.content_hash
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,31 +774,6 @@ def _pick_winner_edge(root: MCTSNode) -> MCTSEdge | None:
     return best
 
 
-def _eval_reject_record(
-    plan_id: str,
-    reason: str,
-    *,
-    error: BaseException | None = None,
-    raw_score: object = None,
-) -> dict[str, object]:
-    """Build a placeholder evaluator-side reject record for ``pending_datoms``.
-
-    B8 closes the schema validation; today's records are dicts so B6
-    tests can scan for ``phase="reject"`` + ``reason`` without
-    depending on the datom schema."""
-    record: dict[str, object] = {
-        "phase": "reject",
-        "plan_id": plan_id,
-        "reason": reason,
-    }
-    if error is not None:
-        record["error_class"] = type(error).__name__
-        record["error_repr"] = repr(error)
-    if raw_score is not None:
-        record["raw_score_repr"] = repr(raw_score)
-    return record
-
-
 def mcts_search(
     initial_plan: Node,
     *,
@@ -758,28 +786,20 @@ def mcts_search(
 ) -> MCTSResult:
     """PUCT tree search over the content-addressed Plan AST (design §15, §16).
 
-    Runs SELECT → EXPAND → EVALUATE → BACKUP per design §16 pseudocode.
-    Returns the winner Plan + a tree summary. Does NOT call
-    ``optimize()`` or ``promote()`` — the closed loop is the caller's
-    recipe (design §12 ADR-9):
+    Runs SELECT → EXPAND → EVALUATE → BACKUP. Returns winner + tree
+    summary. Does NOT call ``optimize()`` / ``promote()`` (caller's
+    closed loop, design §12 ADR-9). Evaluator runs on the JUST-EXPANDED
+    PARENT (design §16 inv 5; rollout depth = 1). Determinism: byte-
+    identical under fixed inputs (design §10).
 
-    .. code-block:: python
-
-        result = mcts_search(initial_plan, expander=..., evaluator=..., started_at_ms=t)
-        optimized = optimize(result.winner, training_set=..., ...)
-        record = promote(optimized.plan, db=db, ...)
-        skill_id = SkillLibrary(db).register(optimized.plan, record, ...)
-
-    Determinism contract (design §10): under fixed
-    ``(initial_plan, config, started_at_ms, expander_responses,
-    evaluator_responses)`` the search trajectory is byte-identical.
-
-    Evaluator runs on the JUST-EXPANDED PARENT (design §16 invariant
-    5; rollout depth = 1).
-
-    B6 ships zero datom side-effects: ``pending_datoms`` is built
-    locally during the iteration but never transacted; B8 closes the
-    schema validation + ``:mcts/search`` summary write."""
+    B8 provenance (design §13). When ``db is not None``: one
+    ``db.transact`` per iteration with ``phase="expand"`` /
+    ``phase="evaluate"`` / ``phase="reject"`` rows; ``mcts/prev-hash``
+    chains every group; iter 0 prepends the ``mcts/search`` summary;
+    search end writes winner / iter-count / terminated-by /
+    finished-at. Cache-hit-only iterations emit zero datoms.
+    ``db is None`` short-circuits the transacts (chain still advances
+    for symmetry; unobservable)."""
     if not isinstance(started_at_ms, int) or isinstance(started_at_ms, bool):
         raise ValueError(
             f"mcts_search.started_at_ms must be a positive int, got {started_at_ms!r}"
@@ -798,12 +818,22 @@ def mcts_search(
 
     root = MCTSNode(plan_id=initial_plan.id)
     transposition[initial_plan.id] = root
+    config_hash = _hash_config(config)
     search_id = _derive_search_id(initial_plan.id, config, started_at_ms)
+
+    # Initial Merkle anchor (design §13): iter 0's first prev-hash
+    # links to the up-front search-summary content hash. Only the
+    # known-at-start slots participate (winner/iter-count/terminated-by/
+    # finished-at are written at search end).
+    prev_hash: str = _datoms._hash_search_summary(
+        initial_plan.id, config_hash, started_at_ms
+    )
 
     iter_index = 0
     eval_attempts = 0
     eval_failures = 0
     terminated_by: TerminatedBy = "max_iter"
+    search_summary_emitted = False  # iter 0's transact prepends summary
 
     # Simple-regret consecutive-window tracker (design §11).
     simple_regret_streak = 0
@@ -856,7 +886,15 @@ def mcts_search(
             break
 
         path: list[tuple[MCTSNode, MCTSEdge]] = []
-        pending_datoms: list[object] = []
+        pending_facts: list[dict[str, Any]] = []
+
+        # iter 0: prepend the ``mcts/search`` summary group.
+        if not search_summary_emitted:
+            pending_facts.extend(_datoms._build_search_summary_start_facts(
+                search_id=search_id, initial_plan_id=initial_plan.id,
+                config_hash=config_hash, started_at_ms=started_at_ms,
+            ))
+            search_summary_emitted = True
 
         # --- 1. SELECT: walk root → leaf via PUCT ---
         node = root
@@ -881,31 +919,36 @@ def mcts_search(
                         f"(plan_id={node.plan_id!r})"
                     )
                 expander_cache[node.plan_id] = proposals
-                # B8: schema validation + serialization wires here.
-                pending_datoms.append(
-                    {
-                        "phase": "expand",
-                        "plan_id": node.plan_id,
-                        "proposals": proposals,
-                    }
+                # phase="expand": full-payload proposal records (W2 M4
+                # canonical Node bytes for synthesized Nodes).
+                expand_output = [
+                    _datoms._expand_proposal_record(a, p) for a, p in proposals
+                ]
+                expand_group = _datoms._make_iter_facts(
+                    search_id=search_id, iter_index=iter_index,
+                    phase="expand", plan_id=node.plan_id,
+                    inputs_hash=_datoms._expand_inputs_hash(
+                        node.plan_id, config.expander_k
+                    ),
+                    output_value=expand_output, prev_hash=prev_hash,
+                    started_at_ms=started_at_ms, action_hash=None,
                 )
+                pending_facts.extend(expand_group.facts)
+                prev_hash = expand_group.content_hash
             else:
                 proposals = cached_proposals
             if not proposals:
                 node.is_terminal = True
             else:
-                # Iter 0 root-empty short-circuit handled at iter end via
-                # "exhausted" check (root.is_terminal AND no children).
-                _populate_children(
-                    node,
-                    proposals,
-                    plan_by_id,
-                    transposition,
-                    skill_library,
-                    pending_datoms,
+                # ``_populate_children`` chains prev_hash for rejected
+                # proposals AFTER the expand row (design §13 W2 MINOR-7).
+                _, prev_hash = _populate_children(
+                    node, proposals, plan_by_id, transposition,
+                    skill_library, pending_facts,
+                    search_id=search_id, iter_index=iter_index,
+                    prev_hash=prev_hash, started_at_ms=started_at_ms,
                 )
                 if not node.children:
-                    # Every proposal rejected → no descent possible.
                     node.is_terminal = True
 
         # --- "exhausted" termination — root has no children at iter 0 ---
@@ -916,8 +959,12 @@ def mcts_search(
             and not root.children
         ):
             terminated_by = "exhausted"
+            if db is not None and pending_facts:
+                db.transact(
+                    pending_facts,
+                    provenance=_datoms._iter_provenance(search_id, iter_index),
+                )
             iter_index += 1
-            # B8: schema validation + db.transact(pending_datoms, t=...) wires here.
             break
 
         # --- 3. EVALUATE on the JUST-EXPANDED PARENT (design §16 inv 5) ---
@@ -927,37 +974,54 @@ def mcts_search(
             score: float = cached_score
         else:
             eval_attempts += 1
+            inputs_hash = _datoms._evaluate_inputs_hash(leaf_plan_id)
             try:
                 raw_score = evaluator.evaluate(plan_by_id[leaf_plan_id])
             except Exception as exc:  # noqa: BLE001 — design §14 reject capture
                 eval_failures += 1
-                pending_datoms.append(_eval_reject_record(
-                    leaf_plan_id, "evaluator_raised", error=exc
-                ))
+                prev_hash = _emit_eval_reject(
+                    db=db, search_id=search_id, iter_index=iter_index,
+                    leaf_plan_id=leaf_plan_id, inputs_hash=inputs_hash,
+                    reason="evaluator_raised", started_at_ms=started_at_ms,
+                    pending_facts=pending_facts, prev_hash=prev_hash,
+                    error=exc,
+                )
                 iter_index += 1
                 continue
             if raw_score is None:
                 eval_failures += 1
-                pending_datoms.append(_eval_reject_record(
-                    leaf_plan_id, "evaluator_returned_none"
-                ))
+                prev_hash = _emit_eval_reject(
+                    db=db, search_id=search_id, iter_index=iter_index,
+                    leaf_plan_id=leaf_plan_id, inputs_hash=inputs_hash,
+                    reason="evaluator_returned_none",
+                    started_at_ms=started_at_ms,
+                    pending_facts=pending_facts, prev_hash=prev_hash,
+                )
                 iter_index += 1
                 continue
             if not _is_finite_score(raw_score):
                 eval_failures += 1
-                pending_datoms.append(_eval_reject_record(
-                    leaf_plan_id, "evaluator_returned_non_finite",
+                prev_hash = _emit_eval_reject(
+                    db=db, search_id=search_id, iter_index=iter_index,
+                    leaf_plan_id=leaf_plan_id, inputs_hash=inputs_hash,
+                    reason="evaluator_returned_non_finite",
+                    started_at_ms=started_at_ms,
+                    pending_facts=pending_facts, prev_hash=prev_hash,
                     raw_score=raw_score,
-                ))
+                )
                 iter_index += 1
                 continue
             evaluator_cache[leaf_plan_id] = raw_score
             score = raw_score
-            pending_datoms.append({
-                "phase": "evaluate",
-                "plan_id": leaf_plan_id,
-                "score": raw_score,
-            })
+            evaluate_group = _datoms._make_iter_facts(
+                search_id=search_id, iter_index=iter_index,
+                phase="evaluate", plan_id=leaf_plan_id,
+                inputs_hash=inputs_hash, output_value=raw_score,
+                prev_hash=prev_hash, started_at_ms=started_at_ms,
+                action_hash=None,
+            )
+            pending_facts.extend(evaluate_group.facts)
+            prev_hash = evaluate_group.content_hash
 
         # --- 4. BACKUP along the traversed path ---
         for parent_node, edge in path:
@@ -970,15 +1034,18 @@ def mcts_search(
         node.visits += 1
         node.total_value += score
 
-        # B8: schema validation + db.transact(pending_datoms, t=...) wires here.
+        # One ``db.transact`` per MCTS iteration (design §13);
+        # cache-hit-only iters skip (design §10 cache-miss-only).
+        if db is not None and pending_facts:
+            db.transact(
+                pending_facts,
+                provenance=_datoms._iter_provenance(search_id, iter_index),
+            )
 
         iter_index += 1
 
-    # --- Winner selection ---
-    # Design §11 / impl plan §B7: when termination is
-    # ``all_evaluations_failed`` the winner falls back to
-    # ``initial_plan`` regardless of whether root accumulated children
-    # (root edges all have visits=0; their q is meaningless).
+    # Winner selection. ``all_evaluations_failed`` falls back to
+    # ``initial_plan`` (root edges have visits=0; q meaningless).
     if terminated_by == "all_evaluations_failed":
         winner_plan = initial_plan
         winner_plan_id = initial_plan.id
@@ -997,6 +1064,28 @@ def mcts_search(
                 (winner_edge.total_value_through_edge / n_sa) if n_sa > 0 else 0.0
             )
 
+    # Search-end summary (design §13): winner / iter-count /
+    # terminated-by / finished-at — only known here. The
+    # ``not search_summary_emitted`` guard is symmetric with the start
+    # path; degenerate (zero-iter) runs prepend the start group.
+    if db is not None:
+        finish_facts: list[dict[str, Any]] = []
+        if not search_summary_emitted:
+            finish_facts.extend(_datoms._build_search_summary_start_facts(
+                search_id=search_id, initial_plan_id=initial_plan.id,
+                config_hash=config_hash, started_at_ms=started_at_ms,
+            ))
+        finish_facts.extend(_datoms._build_search_summary_finish_facts(
+            search_id=search_id, started_at_ms=started_at_ms,
+            iter_count=iter_index, winner_plan_id=winner_plan_id,
+            terminated_by=terminated_by,
+        ))
+        db.transact(finish_facts, provenance={
+            "source": _datoms._SOURCE_TAG,
+            _datoms._ATTR_SEARCH_ID: search_id,
+            "phase": "search-finish",
+        })
+
     return MCTSResult(
         winner=winner_plan,
         winner_plan_id=winner_plan_id,
@@ -1008,6 +1097,3 @@ def mcts_search(
         root_q=root_q,
         tree_dump=_build_tree_dump(transposition),
     )
-
-
-# B7-B9 to follow

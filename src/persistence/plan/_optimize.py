@@ -330,7 +330,7 @@ def _build_provenance_attrs(
     ``test_provenance_attr_keys_construct.py`` suite is the regression
     guard for the key shapes.
     """
-    return {
+    attrs = {
         "plan/optimizer": optimizer,
         "plan/optimizer-call": optimizer_call_hash,
         "plan/baseline": baseline_plan_id,
@@ -338,6 +338,13 @@ def _build_provenance_attrs(
         "plan/metric-id": metric.id,
         "plan/metric-version": metric.version,
     }
+    # Drift guard: keep _PROVENANCE_KEYS as the single source of truth.
+    # If a future refactor adds/removes a key here, the assertion fires
+    # before any Node is constructed. Cheap; runs once per optimize() call.
+    assert frozenset(attrs) == _PROVENANCE_KEYS, (
+        "_build_provenance_attrs / _PROVENANCE_KEYS drift — keep them in sync."
+    )
+    return attrs
 
 
 def _extract_signature_overrides(
@@ -454,7 +461,8 @@ def optimize(
     training_set: list[TrainingExample],
     metric: MetricRef,
     optimizer: str = "miprov2-v1",
-    miprov2_kwargs: dict | None = None,
+    miprov2_kwargs: dict[str, Any] | None = None,
+    dispatcher: Dispatcher | None = None,
 ) -> OptimizedPlan:
     """Optimize ``plan`` against ``training_set`` under ``metric``.
 
@@ -488,6 +496,16 @@ def optimize(
             constructor. Passed through verbatim — this function does
             not inspect or validate them. Defaults to ``{}`` if
             ``None``.
+        dispatcher: Handler registry used for baseline + optimized
+            scoring. If ``None``, optimize() builds a TRIVIAL internal
+            dispatcher whose only handler is a ``:llm-call`` stub that
+            returns ``node.attrs["signature"]`` verbatim — fine for the
+            mocked-suite path where the metric scores off
+            ``ExecutionResult`` shape, NOT off handler output. Real
+            integrations (Stream A v0.6.1+) MUST pass a dispatcher with
+            handlers for every tag the plan uses; otherwise plans with
+            ``:seq`` / ``:cond`` / ``:tool-call`` tags execute with
+            zero handlers and produce empty ``leaf_results``.
 
     Returns:
         :class:`OptimizedPlan` with the cloned-and-pinned plan, baseline
@@ -523,18 +541,18 @@ def optimize(
     metric_fn = lookup_metric(metric)
 
     # We need a dispatcher to drive baseline scoring + the inverse
-    # adapter's forward(). For optimization we keep the dispatcher
-    # internal-and-trivial: a `:llm-call` handler that returns the
-    # signature string verbatim. Real-CI optional-dep job wires a real
-    # LLM-backed handler; the mocked-suite path doesn't reach the
-    # handler because the test metric scores off ExecutionResult shape,
-    # not handler output. Centralized here so the e2e flow has a single
-    # source of dispatcher truth.
-    dispatcher = Dispatcher()
-    dispatcher.register(
-        ":llm-call",
-        lambda node, env: node.attrs.get("signature", ""),
-    )
+    # adapter's forward(). Caller may pass one explicitly (Stream A v0.6.1+
+    # real-LLM integration); if None, fall back to a TRIVIAL internal
+    # dispatcher with only a `:llm-call` stub handler. The trivial path is
+    # fine for the mocked suite (metric scores off ExecutionResult shape,
+    # not handler output) but produces empty leaf_results for any tag
+    # other than `:llm-call` — see docstring for the limitation.
+    if dispatcher is None:
+        dispatcher = Dispatcher()
+        dispatcher.register(
+            ":llm-call",
+            lambda node, env: node.attrs.get("signature", ""),
+        )
 
     # Canonical hash inputs (design §5). Reuse
     # `_canonicalize_training_set` from `_execute.py` — the canonical

@@ -23,11 +23,15 @@ datoms via :func:`persistence.effect.audit_entry_to_datom`.
 from __future__ import annotations
 
 import datetime as _dt
-from dataclasses import dataclass
+import warnings
+from dataclasses import dataclass, field
+
+import pytest
 
 from persistence.effect.handlers.audit import (
     AuditEntry,
     audit_entry_to_datom,
+    datom_to_audit_entry,
     make_audit_handler,
 )
 from persistence.effect.handlers.clock import make_fixed_clock_handler
@@ -38,6 +42,8 @@ from persistence.fact.db import DB
 from persistence.fact.store import InMemoryStore
 from persistence.plan import Node
 from persistence.plan._promotion import (
+    ReplayEngine,
+    _datom_to_wire_for_audit,
     gate_g1_replay_byte_identity,
     gate_g2_audit_chain,
 )
@@ -110,10 +116,7 @@ class _DivergentOnIndexReplayStub:
     """
 
     divergent_idx: int
-    seen: list[int] = None  # type: ignore[assignment]
-
-    def __post_init__(self) -> None:
-        self.seen = []
+    seen: list[int] = field(default_factory=list)
 
     def replay(self, plan: Node, trajectory: Trajectory) -> Trajectory:
         # Index in the held-out list is implicit; we use the trajectory's
@@ -190,21 +193,51 @@ def test_g1_fewer_than_min_count_returns_false() -> None:
     )
 
 
-def test_g1_empty_trajectory_list_returns_false() -> None:
-    """Empty list → False. The "<min_count" branch covers this; we
-    explicitly pin the boundary so a future implementer can't accidentally
-    short-circuit "no trajectories ⇒ vacuously true"."""
+def test_g1_empty_trajectory_list_returns_false_with_warning() -> None:
+    """Empty list → False **and** emits a distinguishable ``UserWarning``.
+
+    Per impl plan §2.A6 ("Empty trajectory list → False (and assert
+    error message)"). The empty-list branch is distinct from the
+    ``< min_count`` branch (which is silent) so a caller can tell
+    "wiring is wrong, no corpus loaded" apart from "candidate failed
+    coverage". Both still return False — gates return bool, A7's
+    ``promote()`` raises ``GateFailure``.
+    """
     plan = _candidate_plan()
     engine = _ByteIdenticalReplayStub()
-    assert (
-        gate_g1_replay_byte_identity(
+    with pytest.warns(UserWarning, match="empty held_out_trajectories"):
+        result = gate_g1_replay_byte_identity(
             plan,
             held_out_trajectories=[],
             replay_engine=engine,
             min_count=10,
         )
-        is False
-    )
+    assert result is False
+
+
+def test_g1_below_min_count_does_not_warn() -> None:
+    """Below-threshold (but non-empty) corpus is silent — only the
+    empty-list branch emits the warning. Locks the distinguishability
+    invariant from the test above."""
+    plan = _candidate_plan()
+    trajectories = [_make_trajectory(i) for i in range(3)]  # < 10
+    engine = _ByteIdenticalReplayStub()
+    with warnings.catch_warnings(record=True) as recorded:
+        warnings.simplefilter("always")
+        result = gate_g1_replay_byte_identity(
+            plan,
+            held_out_trajectories=trajectories,
+            replay_engine=engine,
+            min_count=10,
+        )
+    assert result is False
+    # Specifically: no UserWarning matching the empty-list message.
+    empty_list_warnings = [
+        w for w in recorded
+        if issubclass(w.category, UserWarning)
+        and "empty held_out_trajectories" in str(w.message)
+    ]
+    assert empty_list_warnings == []
 
 
 def test_g1_min_count_exactly_at_threshold_returns_true() -> None:
@@ -246,6 +279,11 @@ def test_g1_short_circuits_on_first_divergence() -> None:
     )
     # The divergent trajectory must have been replayed (seen[0]).
     assert 0 in engine.seen
+    # Short-circuit measurement: with the divergence at index 0, the
+    # gate must NOT replay the remaining 9 trajectories. Converts the
+    # "may stop early" docstring claim into a hard pin so a future
+    # change to parallel/eager evaluation surfaces here.
+    assert len(engine.seen) == 1
 
 
 # --- G2 helpers ------------------------------------------------------------ #
@@ -467,3 +505,51 @@ def test_g1_min_count_default_is_ten() -> None:
 
     sig = inspect.signature(gate_g1_replay_byte_identity)
     assert sig.parameters["min_count"].default == 10
+
+
+def test_replay_engine_protocol_is_runtime_checkable() -> None:
+    """``ReplayEngine`` is decorated ``@runtime_checkable`` so callers
+    can guard wiring with ``isinstance`` at boundaries (Stream F's
+    adapter, Module 7 REPL's promote command). Both stubs above must
+    satisfy the protocol structurally."""
+    assert isinstance(_ByteIdenticalReplayStub(), ReplayEngine)
+    assert isinstance(_DivergentOnIndexReplayStub(divergent_idx=0), ReplayEngine)
+    # And a plainly non-conforming object must NOT satisfy.
+    assert not isinstance("not a replay engine", ReplayEngine)
+    assert not isinstance(object(), ReplayEngine)
+
+
+def test_datom_to_wire_for_audit_round_trips_audit_entry() -> None:
+    """Drift-pin: the splice in ``_datom_to_wire_for_audit`` mirrors
+    Module 2's ``audit_entry_to_datom`` contract. If Module 2 changes
+    where it stores the entry id (currently
+    ``provenance[':signature']``), this round-trip breaks loudly here
+    instead of producing silent G2 false-negatives in production.
+
+    Round-trip:
+        AuditEntry → audit_entry_to_datom → Datom → _datom_to_wire_for_audit
+        → datom_to_audit_entry → AuditEntry'
+    must preserve every field used by ``verify_chain``.
+    """
+    entries = _record_audit_chain(n_entries=1)
+    db = _make_db()
+    _seed_audit_datoms(db, entries)
+    # There is exactly one audit datom in the store; pull it back.
+    audit_datoms = [d for d in db.log() if d.a.startswith("audit/")]
+    assert len(audit_datoms) == 1
+    wire = _datom_to_wire_for_audit(audit_datoms[0])
+    reconstructed = datom_to_audit_entry(wire)
+    original = entries[0]
+
+    # Every field that contributes to the content hash (i.e. anything
+    # ``verify_chain`` depends on) must match.
+    assert reconstructed.id == original.id
+    assert reconstructed.prev_hash == original.prev_hash
+    assert reconstructed.op == original.op
+    assert reconstructed.args_hash == original.args_hash
+    assert reconstructed.verdict == original.verdict
+    assert reconstructed.latency_ms == original.latency_ms
+    assert reconstructed.recorded_at == original.recorded_at
+    assert reconstructed.policy_id == original.policy_id
+    assert reconstructed.handler_chain == original.handler_chain
+    assert reconstructed.principal == original.principal

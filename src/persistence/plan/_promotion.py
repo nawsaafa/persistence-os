@@ -37,9 +37,11 @@ References:
 """
 from __future__ import annotations
 
-from typing import Any, Iterable, Protocol
+import warnings
+from typing import Any, Iterable, Protocol, runtime_checkable
 
 from persistence.effect import datom_to_audit_entry, verify_chain
+from persistence.effect.handlers.audit import AuditEntry
 from persistence.fact.datom import Datom
 from persistence.fact.db import DB
 from persistence.plan._ast import Node
@@ -63,7 +65,18 @@ _DEFAULT_MIN_COUNT: int = 10
 #: :func:`persistence.replay.engine.compare`.
 _DIVERGENCE_KEY: str = "divergence_step"
 
+#: Warning message emitted by G1 when called with an empty held-out
+#: corpus. Pinned at module level so the test can match on a stable
+#: substring without coupling to the full prose. Distinguishes the
+#: empty-list branch from the (also-False) ``< min_count`` branch per
+#: impl plan §2.A6 ("Empty trajectory list → False (and assert error
+#: message)").
+_G1_EMPTY_TRAJECTORIES_WARNING: str = (
+    "G1 gate: empty held_out_trajectories — no coverage to claim Prop 4"
+)
 
+
+@runtime_checkable
 class ReplayEngine(Protocol):
     """Structural type for the engine G1 calls.
 
@@ -157,9 +170,19 @@ def gate_g1_replay_byte_identity(
 
     Otherwise ``False``.
     """
-    # Coverage gate first — reject below-threshold corpora before
-    # touching the replay engine. This is also the empty-list branch
-    # (``0 < min_count``) — Prop 4 cannot be claimed vacuously.
+    # Empty-list branch — distinguished signal so the caller can tell
+    # "no corpus" apart from "below-threshold corpus". Both still return
+    # False (Prop 4 cannot be claimed vacuously), but the empty case
+    # almost always means the wiring is wrong rather than the candidate
+    # is bad. Warning, not log, so callers can opt into ``pytest.warns``
+    # / ``warnings.simplefilter("error")`` to escalate.
+    if not held_out_trajectories:
+        warnings.warn(_G1_EMPTY_TRAJECTORIES_WARNING, UserWarning, stacklevel=2)
+        return False
+
+    # Coverage gate next — reject below-threshold (but non-empty)
+    # corpora before touching the replay engine. Prop 4's claim still
+    # cannot be made under partial coverage.
     if len(held_out_trajectories) < min_count:
         return False
 
@@ -237,7 +260,7 @@ def _datom_to_wire_for_audit(datom: Datom) -> dict[str, Any]:
 
 def _audit_entries_in_window(
     db: DB, *, start_ms: int, end_ms: int
-) -> Iterable:
+) -> Iterable[AuditEntry]:
     """Yield ``AuditEntry`` reconstructions for audit datoms in the window.
 
     Walks ``db.log()`` once. For each datom whose attribute starts with

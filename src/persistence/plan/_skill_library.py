@@ -3,7 +3,10 @@
 A skill is a tagged Plan AST that has cleared promotion. Skills are
 identified by ``"skill/" + plan.id[:16]`` — a 16-hex-char namespace
 prefix on top of the 32-hex Plan AST content hash. Re-registering the
-same Plan AST is a no-op: the content hash IS the identity.
+same Plan AST is a no-op — the content hash IS the identity, and
+:meth:`SkillLibrary.register` checks both the in-memory cache (fast
+path) AND the fact store (cross-instance / post-restart slow path)
+before emitting datoms.
 
 Each ``register()`` call writes exactly three datoms to the fact store
 (plain-string ``a`` keys, no leading colon — ``datom.py:114``
@@ -191,14 +194,35 @@ class SkillLibrary:
         """
         skill_id = _derive_skill_id(plan)
 
-        # Idempotency check via the in-memory cache. Skill_id is
+        # Idempotency check, fast path: in-memory cache. Skill_id is
         # content-addressed (deterministic from plan.id), so cache
         # presence is equivalent to "this exact Plan AST has been
-        # registered before". We keep the existing record (whichever
-        # was registered first wins) — design §6 says re-registration
-        # is a no-op, full stop.
+        # registered before by THIS SkillLibrary instance".
         if skill_id in self._plans:
             return skill_id
+
+        # Idempotency check, slow path: another SkillLibrary instance
+        # (or this same instance, post-restart with seeded store) may
+        # already have written a ``skill/plan`` datom for this skill_id
+        # to the fact store. The fact store is the source of truth for
+        # the registration *graph*; cache absence is not authoritative.
+        # One log scan detects the cross-instance case; we then return
+        # without re-emitting datoms (matches docstring claim:
+        # re-registration is a no-op, full stop).
+        #
+        # We populate ``_plans`` with the freshly-passed plan because
+        # skill_id is sha256-derived from canonical Plan AST bytes — a
+        # skill_id match is a content-equality proof (modulo birthday
+        # collisions at 2^32 scale, which we accept). This lets THIS
+        # instance's :meth:`lookup` return the plan back. We do NOT
+        # populate ``_records``: the freshly-passed promotion_record
+        # may not match the one originally registered against this
+        # skill_id; the fact store's ``skill/promotion-record`` datom
+        # is canonical for that mapping.
+        for d in self._db.log():
+            if d.e == skill_id and d.a == _A_PLAN and d.op == "assert":
+                self._plans[skill_id] = plan
+                return skill_id
 
         # Three datoms in a single transact() — atomic registration.
         # Plain-string ``a`` keys (no leading colon) per
@@ -264,8 +288,9 @@ class SkillLibrary:
             return None
         # Resolve promotion_id from the fact store (the source of
         # truth for the registration graph). Walking the log is O(N)
-        # but N is bounded by the registration count, which the
-        # roadmap caps in low thousands — fine for v0.6.0a1.
+        # over total datom count; the roadmap caps the workload such
+        # that this is fine for v0.6.0a1. A future indexed lookup
+        # ($e, $a) → datom would lift the constant factor.
         promotion_id: Optional[str] = None
         for d in self._db.log():
             if d.e == skill_id and d.a == _A_PROMOTION_RECORD and d.op == "assert":

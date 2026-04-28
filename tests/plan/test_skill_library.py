@@ -273,6 +273,53 @@ def test_skill_id_is_deterministic_across_skill_library_instances():
     assert sid_from_a in visible_to_b
 
 
+# --- Edge case 7b — cross-instance idempotency (multi-SkillLibrary) ------- #
+
+
+def test_register_is_idempotent_across_skill_library_instances():
+    """Two SkillLibrary instances over the same DB don't double-write.
+
+    Pins the docstring claim that re-registration is "a no-op, full
+    stop." The fast-path cache check is in-memory only, so without a
+    fact-store probe a second instance over the same store would emit
+    3 fresh datoms on the same plan content. That probe lives in
+    :meth:`register`; this test is the regression guard for it.
+    """
+    db = _make_db()
+    lib_a = SkillLibrary(db)
+    plan = _seq_plan()
+
+    sid_a = lib_a.register(
+        plan,
+        _StubPromotionRecord(promotion_id="prom-a"),
+        registered_at_ms=1234,
+    )
+    datoms_after_lib_a = list(db.log())
+    assert len(datoms_after_lib_a) == 3  # baseline: one registration.
+
+    # A second SkillLibrary over the same DB sees an empty cache but
+    # MUST still detect the skill via the fact store.
+    lib_b = SkillLibrary(db)
+    sid_b = lib_b.register(
+        plan,
+        _StubPromotionRecord(promotion_id="prom-b-different"),
+        registered_at_ms=9999,
+    )
+    datoms_after_lib_b = list(db.log())
+
+    assert sid_a == sid_b
+    assert len(datoms_after_lib_b) == 3  # NO new datoms emitted.
+
+    # And lib_b's cache now contains the plan, so its lookup() can
+    # reach back to the freshly-passed plan reference. The promotion-
+    # record cache stays unpopulated for this skill in lib_b — the
+    # fact store's skill/promotion-record datom points at the
+    # originally-registered "prom-a", which lib_b never saw, so
+    # lookup() returns None until lib_b also caches "prom-a" via a
+    # subsequent register on the same plan with the same record.
+    assert lib_b.lookup(sid_b) is None
+
+
 # --- Edge case 8 — datoms emitted by register have plain-string a-keys ---- #
 
 

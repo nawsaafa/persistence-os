@@ -42,14 +42,25 @@ from typing import Any, Awaitable, Callable
 
 from aiohttp import WSMsgType, web
 
+from persistence.effect.canonical import canonical_hash
+from persistence.effect.handlers.audit import AuditEntry
+
+from ._audit import emit_repl_op_audit, persist_repl_audit
 from ._caps import _token_id, validate_token
 from ._protocol import (
     ERR_AUTH_FAILED,
+    ERR_BRANCH_DEPTH_EXCEEDED,
+    ERR_CAPABILITY_DENIED,
     ERR_INTERNAL_ERROR,
+    ERR_INVALID_PARAMS,
     ERR_INVALID_REQUEST,
     ERR_METHOD_NOT_FOUND,
     ERR_PARSE_ERROR,
+    ERR_REQUEST_HASH_MISMATCH,
+    ERR_SESSION_EXPIRED,
+    ERR_STALE_CURSOR_EDIT,
     ERR_TOKEN_INVALID,
+    ERR_VERIFY_CHAIN_FAILED,
     Request,
     make_error_response,
     make_response,
@@ -58,6 +69,43 @@ from ._protocol import (
 from ._session import Session, make_session
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# ADR-9 verdict mapping (W2.B)
+# ---------------------------------------------------------------------------
+# Application-specific error codes that map to ``verdict="deny"`` on the
+# emitted ``:repl/op`` AuditEntry. Per design doc §ADR-9 / §ADR-4 verdict
+# table: capability rejection, hash mismatch, stale cursor, expired
+# session, depth exceeded, token invalid, and auth-failed are all
+# operator-policy denials — distinct from internal-error verdicts which
+# signal substrate failures. Any other code (or any non-_OpError
+# exception) maps to ``verdict="error"``. Pinned at module level so the
+# dispatcher and the per-error-code tests share one source of truth.
+_DENY_ERROR_CODES: frozenset[int] = frozenset(
+    {
+        ERR_AUTH_FAILED,
+        ERR_BRANCH_DEPTH_EXCEEDED,
+        ERR_CAPABILITY_DENIED,
+        ERR_REQUEST_HASH_MISMATCH,
+        ERR_SESSION_EXPIRED,
+        ERR_STALE_CURSOR_EDIT,
+        ERR_TOKEN_INVALID,
+    }
+)
+
+
+def _verdict_for_op_error(code: int) -> str:
+    """Map an ``_OpError.code`` to the canonical substrate verdict.
+
+    See ``_DENY_ERROR_CODES`` for the explicit deny set. Any other
+    application code (e.g. ``ERR_INVALID_PARAMS``,
+    ``ERR_VERIFY_CHAIN_FAILED``, ``ERR_INTERNAL_ERROR``) and any
+    JSON-RPC-reserved code maps to ``"error"``.
+    """
+    if code in _DENY_ERROR_CODES:
+        return "deny"
+    return "error"
 
 
 # OpHandler signature: (session, db, params, *, server=None) -> result
@@ -119,6 +167,15 @@ class WSServer:
         # and so D4/D5 ops can swap the session record after rewind /
         # branch (frozen dataclass + dataclasses.replace pattern).
         self._active_sessions: dict[str, Session] = {}
+        # In-memory audit ring (W2.C — hot cache for the WS-tail
+        # subscription). Durability lives in the fact store via
+        # ``persist_repl_audit``; the ring is bounded so a slow client
+        # cannot grow it without bound. v0.7.0a1 uses one process-wide
+        # ring; per-session rings would partition the Merkle chain so
+        # one sequential ring is the right shape for ``verify_chain``.
+        self._audit_entries: list[AuditEntry] = []
+        # Default 256 per design §8.2; override-able for tests.
+        self._max_ring_size: int = 256
 
     # ------------------------------------------------------------------
     # HTTP handlers
@@ -172,8 +229,16 @@ class WSServer:
         raw: str,
         session: Session | None,
     ) -> Session | None:
-        """Process one TEXT frame. Returns the (possibly-new) session ref."""
-        # 1. JSON parse
+        """Process one TEXT frame. Returns the (possibly-new) session ref.
+
+        D7 wires audit emission across every dispatch path that reaches
+        a session-bound op (success, ``_OpError``, internal exception).
+        Pre-envelope failures (parse error, invalid request) and
+        unauthenticated non-auth ops do NOT emit — there is no session
+        principal to bind. Auth (success or fail) is audited inside
+        :meth:`_handle_auth`.
+        """
+        # 1. JSON parse — pre-envelope, no audit possible
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError as e:
@@ -189,7 +254,7 @@ class WSServer:
             )
             return session
 
-        # 2. Envelope parse
+        # 2. Envelope parse — pre-envelope, no audit possible
         try:
             req = parse_request(payload)
         except ValueError as e:
@@ -198,25 +263,58 @@ class WSServer:
             )
             return session
 
-        # 3. Auth handshake (re-auth on the same socket replaces the session)
+        # 3. Auth handshake — audited inside _handle_auth (success+fail
+        # both bind a principal; a failed auth audits with the synthetic
+        # session-like object built from the presented token's hashed id)
         if req.method == "repl/auth":
             new_session = await self._handle_auth(ws, req, session)
             return new_session if new_session is not None else session
 
-        # 4. Pre-auth gate
+        # 4. Pre-auth gate — no session principal, no audit binding
         if session is None:
             await ws.send_json(
                 make_error_response(req.id, ERR_AUTH_FAILED, "must call repl/auth first")
             )
             return None
 
-        # 5. Op dispatch
+        # 5. Op dispatch — every path (success, _OpError, exception)
+        # emits exactly one :repl/op AuditEntry chained off the prior
+        # entry. Latency is wall-clock between ``runtime_clock`` start
+        # and end, computed AFTER the op resolves so the audit record's
+        # latency_ms is the true op duration.
+        op_kind = (
+            req.method.removeprefix("repl/")
+            if req.method.startswith("repl/")
+            else req.method
+        )
+        start = self.runtime_clock()
+        result: Any = None
+        verdict = "ok"
+        error_str: str | None = None
+
         op_handler = self.ops.get(req.method)
         if op_handler is None:
+            # Unknown method on an authenticated session — audit as
+            # ``verdict="error"`` (not in the deny-error-code set per
+            # ADR-9: ERR_METHOD_NOT_FOUND is JSON-RPC-reserved, not an
+            # operator-policy denial). The op_kind echoes the bare
+            # post-``repl/`` segment so principal records what was
+            # attempted.
             await ws.send_json(
                 make_error_response(
                     req.id, ERR_METHOD_NOT_FOUND, f"unknown method: {req.method}"
                 )
+            )
+            verdict = "error"
+            error_str = f"unknown method: {req.method}"
+            self._emit_audit_for_op(
+                session=session,
+                op_kind=op_kind,
+                args=req.params,
+                verdict=verdict,
+                latency_ms=_latency_ms(start, self.runtime_clock()),
+                result_hash=None,
+                error=error_str,
             )
             return session
 
@@ -224,19 +322,97 @@ class WSServer:
             result = await op_handler(session, self.db, req.params, server=self)
             await ws.send_json(make_response(req.id, result))
         except _OpError as e:
+            verdict = _verdict_for_op_error(e.code)
+            error_str = e.message
             await ws.send_json(make_error_response(req.id, e.code, e.message, e.data))
-            return session
         except Exception as e:  # noqa: BLE001 — surface as JSON-RPC envelope
+            verdict = "error"
+            error_str = str(e)
             logger.exception("op handler error: %s", req.method)
             await ws.send_json(
                 make_error_response(req.id, ERR_INTERNAL_ERROR, str(e))
             )
-            return session
 
-        # 6. Session-mutation pickup: D4 (rewind) / D5 (branch) ops swap
-        # the session record in self._active_sessions; re-read so the
-        # dispatcher uses the latest version on the next message.
-        return self._active_sessions.get(session.session_id, session)
+        # 6. Session-mutation pickup BEFORE audit emission so the audit
+        # entry's view-cursor reflects the post-rewind / post-branch
+        # state. D4 (rewind) / D5 (branch) ops swap the session record
+        # in self._active_sessions; we read the latest version here.
+        latest_session = self._active_sessions.get(session.session_id, session)
+
+        # 7. Audit emission — exactly one entry per op invocation,
+        # whether success / deny / error. Bound to the post-op session
+        # so cursors reflect the post-mutation state.
+        try:
+            result_hash = canonical_hash(result) if result is not None else None
+        except (TypeError, ValueError):
+            # Defensive: a result that isn't canonical-JSON-serializable
+            # still gets audited; we just can't pin its hash. The
+            # args_hash + recorded_at + verdict still capture intent.
+            result_hash = None
+
+        self._emit_audit_for_op(
+            session=latest_session,
+            op_kind=op_kind,
+            args=req.params,
+            verdict=verdict,
+            latency_ms=_latency_ms(start, self.runtime_clock()),
+            result_hash=result_hash,
+            error=error_str,
+        )
+
+        return latest_session
+
+    # ------------------------------------------------------------------
+    # Audit emission (W2.A + W2.B + W2.C)
+    # ------------------------------------------------------------------
+    def _emit_audit_for_op(
+        self,
+        *,
+        session: Session,
+        op_kind: str,
+        args: dict,
+        verdict: str,
+        latency_ms: int,
+        result_hash: str | None,
+        error: str | None,
+    ) -> None:
+        """Emit one ``:repl/op`` AuditEntry + persist it.
+
+        Best-effort persistence: if ``persist_repl_audit`` raises
+        (e.g. a write-only fact-store backend, transient I/O), the
+        in-memory ring entry is still in ``self._audit_entries`` so the
+        WS-tail subscription continues to see it. The next-restart
+        backfill will lose this entry, but durability degrades
+        gracefully rather than dropping the live op.
+
+        Bounded ring: when the ring exceeds ``self._max_ring_size`` we
+        drop the oldest entry. The dropped entry's tx-window is the
+        source of the design-doc §8.2 ``repl/audit-event-overflow``
+        notification (D8 will surface that on the WS tail).
+        """
+        entry = emit_repl_op_audit(
+            self._audit_entries,
+            session=session,
+            op_kind=op_kind,
+            args=args,
+            verdict=verdict,
+            latency_ms=latency_ms,
+            result_hash=result_hash,
+            error=error,
+            view_cursor_tx_time_iso=session.view_cursor_tx_time_iso,
+            view_cursor_vt_iso=session.view_cursor_vt_iso,
+        )
+        # Bounded ring — drop oldest if over limit. Drop AFTER the new
+        # entry's prev_hash has already been computed off the prior
+        # last-of-ring, so the chain pointer in the dropped-window
+        # remains intact on the durable side (the fact store has all
+        # of it).
+        if len(self._audit_entries) > self._max_ring_size:
+            del self._audit_entries[0 : len(self._audit_entries) - self._max_ring_size]
+        try:
+            persist_repl_audit(self.db, entry)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("audit persistence failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Auth
@@ -253,40 +429,130 @@ class WSServer:
         and registers the session in ``self._active_sessions``. Re-auth
         on the same WS replaces the prior session record (single
         session per connection invariant).
+
+        D7: every auth attempt is audited. Success emits with the
+        newly-minted session (real principal). Denial emits with a
+        synthetic session-like object built from the presented token's
+        hashed ``token_id`` so the audit trail records WHICH token was
+        rejected without leaking the raw token string. Malformed-token
+        request (no params.token) audits with token_id="<unknown>".
         """
+        start = self.runtime_clock()
         token_str = req.params.get("token")
+
+        # ---------- Malformed request ----------
         if not isinstance(token_str, str):
             await ws.send_json(
                 make_error_response(req.id, ERR_INVALID_REQUEST, "params.token required")
             )
+            self._emit_auth_audit(
+                token_id="<unknown>",
+                session_id="<pre-auth>",
+                args=req.params,
+                verdict="error",
+                latency_ms=_latency_ms(start, self.runtime_clock()),
+                error="params.token required",
+            )
             return None
+
+        # ---------- Validate token ----------
         cap_set = validate_token(self.db, token_str, runtime_clock=self.runtime_clock)
+        token_id_for_audit = _token_id(token_str)
+
         if cap_set is None:
             await ws.send_json(
                 make_error_response(
                     req.id, ERR_TOKEN_INVALID, "token invalid, expired, or revoked"
                 )
             )
+            self._emit_auth_audit(
+                token_id=token_id_for_audit,
+                session_id="<pre-auth>",
+                args=req.params,
+                verdict="deny",
+                latency_ms=_latency_ms(start, self.runtime_clock()),
+                error="token invalid, expired, or revoked",
+            )
             return None
+
+        # ---------- Success ----------
         # Drop the prior session (re-auth overwrites).
         if prior_session is not None:
             self._active_sessions.pop(prior_session.session_id, None)
-        token_id = _token_id(token_str)
-        session = make_session(token_id, cap_set, runtime_clock=self.runtime_clock)
+        session = make_session(
+            token_id_for_audit, cap_set, runtime_clock=self.runtime_clock
+        )
         self._active_sessions[session.session_id] = session
-        await ws.send_json(
-            make_response(
-                req.id,
-                {
-                    "session_id": session.session_id,
-                    "auth_clock_iso": session.auth_clock_iso,
-                    "caps": [
-                        {"op": c.op, "qualifier": c.qualifier} for c in cap_set.caps
-                    ],
-                },
-            )
+        result_payload = {
+            "session_id": session.session_id,
+            "auth_clock_iso": session.auth_clock_iso,
+            "caps": [
+                {"op": c.op, "qualifier": c.qualifier} for c in cap_set.caps
+            ],
+        }
+        await ws.send_json(make_response(req.id, result_payload))
+        # Bind the audit to the freshly-minted session so the principal
+        # carries the real session_id.
+        try:
+            result_hash = canonical_hash(result_payload)
+        except (TypeError, ValueError):
+            result_hash = None
+        self._emit_audit_for_op(
+            session=session,
+            op_kind="auth",
+            args=req.params,
+            verdict="ok",
+            latency_ms=_latency_ms(start, self.runtime_clock()),
+            result_hash=result_hash,
+            error=None,
         )
         return session
+
+    def _emit_auth_audit(
+        self,
+        *,
+        token_id: str,
+        session_id: str,
+        args: dict,
+        verdict: str,
+        latency_ms: int,
+        error: str | None,
+    ) -> None:
+        """Emit a ``:repl/op`` AuditEntry for an auth-failure path.
+
+        No real :class:`Session` exists yet, so we build a minimal
+        synthetic principal that satisfies :func:`emit_repl_op_audit`'s
+        attribute access (``token_id``, ``session_id``, ``clock``,
+        ``view_cursor_tx_time_iso``, ``view_cursor_vt_iso``). The hashed
+        ``token_id`` records which token was rejected without exposing
+        the raw token string; ``session_id`` is the literal sentinel
+        ``"<pre-auth>"`` so audit-window readers can distinguish
+        unauthenticated audit rows from session-bound rows.
+        """
+
+        class _SyntheticAuthSession:
+            def __init__(
+                self,
+                token_id: str,
+                session_id: str,
+                clock: Callable[[], datetime],
+            ) -> None:
+                self.token_id = token_id
+                self.session_id = session_id
+                self.clock = clock
+                self.view_cursor_tx_time_iso: str | None = None
+                self.view_cursor_vt_iso: str | None = None
+
+        synth = _SyntheticAuthSession(token_id, session_id, self.runtime_clock)
+        self._emit_audit_for_op(
+            session=synth,  # type: ignore[arg-type]
+            op_kind="auth",
+            args=args,
+            verdict=verdict,
+            latency_ms=latency_ms,
+            result_hash=None,
+            error=error,
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -307,6 +573,23 @@ class WSServer:
             await asyncio.Event().wait()
         finally:
             await runner.cleanup()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _latency_ms(start: datetime, end: datetime) -> int:
+    """Compute the wall-clock latency in non-negative integer
+    milliseconds.
+
+    Mirror of the audit handler's ``max(0, int((t1 - t0) * 1000))``
+    convention (``audit.py:445``) so REPL-emitted entries carry the
+    same ``latency_ms`` shape (``int`` per ``AuditEntry.latency_ms``;
+    non-negative even if the substrate clock skews backward under a
+    poorly-mocked replay scenario).
+    """
+    delta = (end - start).total_seconds()
+    return max(0, int(delta * 1000))
 
 
 # ---------------------------------------------------------------------------

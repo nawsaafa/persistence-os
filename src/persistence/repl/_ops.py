@@ -148,17 +148,30 @@ def _inspect_entity(session: Session, db: Any, sub: dict) -> dict:
 def _inspect_audit_window(session: Session, db: Any, sub: dict) -> dict:
     """``kind=audit-window`` projection.
 
-    D7 will wire ``:repl/op`` AuditEntry persistence — the op writes
-    each REPL op to the fact store via ``audit_entry_to_datom`` +
-    ``db.transact``, and this kind queries that path. Until D7 lands,
-    the substrate has no in-DB audit-window query primitive (the
-    audit handler appends to a caller-owned list at runtime, not the
-    fact store), so this kind returns an empty list with a clear
-    indicator that the persistent path is pending.
+    D7 wires this against the fact store. Every ``:repl/op`` AuditEntry
+    is persisted via :func:`persistence.repl._audit.persist_repl_audit`
+    (one ``audit/repl.op`` datom per entry); this query walks
+    ``db.log()`` once for ``audit/...`` datoms in the
+    ``[from_iso, to_iso]`` window, optionally narrowed by ``op_filter``,
+    and reconstructs each into an :class:`AuditEntry` projected to a
+    JSON-friendly dict.
 
-    Validates ``from_iso`` / ``to_iso`` shape so D7 only has to wire
-    the query body — the param contract is locked here.
+    The query is durable across server restart: the in-memory ring
+    drops, but the underlying datoms persist in the fact store, so a
+    reconnecting client can backfill the full chain. Programmatic audit
+    entries (``audit/llm.call``, ``audit/tool.call``, etc.) are
+    returned alongside REPL entries — the chain is one Merkle log.
+
+    Errors: malformed ``from_iso`` / ``to_iso`` /
+    ``op_filter`` / ``limit`` → ``ERR_INVALID_PARAMS``. The query
+    itself is best-effort: a hand-rolled audit datom missing
+    ``provenance[":signature"]`` is silently skipped (the window is
+    not a verification gate; ``inspect`` callers wanting Merkle
+    integrity should run ``verify_chain`` on the returned entries
+    themselves).
     """
+    from ._audit import _audit_entry_to_summary, _audit_window_query
+
     _coerce_iso(sub.get("from_iso"), field="from_iso")
     _coerce_iso(sub.get("to_iso"), field="to_iso")
     op_filter = sub.get("op_filter")
@@ -170,10 +183,16 @@ def _inspect_audit_window(session: Session, db: Any, sub: dict) -> dict:
     if limit < 0:
         raise _op_error(ERR_INVALID_PARAMS, "limit must be >= 0")
     limit = min(limit, _INSPECT_MAX_LIMIT)
+    entries = _audit_window_query(
+        db,
+        from_iso=sub.get("from_iso"),
+        to_iso=sub.get("to_iso"),
+        op_filter=op_filter,
+        limit=limit,
+    )
     return {
-        "entries": [],
+        "entries": [_audit_entry_to_summary(e) for e in entries],
         "limit": limit,
-        "pending": "D7 will wire :repl/op persistence",
     }
 
 

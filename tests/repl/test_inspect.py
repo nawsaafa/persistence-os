@@ -250,7 +250,7 @@ class TestInspectEntity:
 # ===========================================================================
 class TestInspectAuditWindow:
     @pytest.mark.asyncio
-    async def test_empty_returns_empty_entries_with_pending_marker(
+    async def test_empty_returns_empty_entries_no_pending_marker(
         self, db, session_with_inspect
     ):
         result = await inspect_op(
@@ -258,12 +258,15 @@ class TestInspectAuditWindow:
             db,
             {"kind": "audit-window", "params": {}},
         )
+        # Post-D7 (W2.C): the persistent path is wired. An empty fact
+        # store of audit datoms returns an empty entries list — the
+        # ``pending`` D7-marker is gone. Callers that distinguish
+        # "no audit datoms yet" from "audit query not wired" should
+        # rely on the contract surface (``inspect kind="audit-window"``
+        # is now the canonical query), not a transitional sentinel.
         assert result["entries"] == []
-        # D7 will wire the persistent path; until then the marker is
-        # surfaced so callers can distinguish "no audit entries" from
-        # "audit-tail not yet wired".
-        assert "pending" in result
-        assert "D7" in result["pending"]
+        assert result["limit"] == 100
+        assert "pending" not in result
 
     @pytest.mark.asyncio
     async def test_from_to_range_validated(

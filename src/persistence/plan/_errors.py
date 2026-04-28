@@ -36,6 +36,19 @@ class ExpanderContractError(ValueError):
     """
 
 
+class EvaluatorContractError(ValueError):
+    """`Evaluator.evaluate` returned a non-finite score (NaN/+Inf/-Inf).
+
+    Raised by the MCTS search loop (B9) at the reject-path boundary when
+    ``not _is_finite_score(score)`` (design §9 + §13). The corresponding
+    ``:mcts/iteration`` datom is written with ``phase="reject"`` and
+    ``reason="evaluator_returned_non_finite"``; BACKUP is skipped for that
+    iteration; the search continues. Subclasses ``ValueError`` so callers
+    can ``except ValueError`` to bundle evaluator-contract failures with
+    other invalid-input errors.
+    """
+
+
 class GateFailure(RuntimeError):
     """A promotion gate (G1/G2/G3/G4) returned False; raised by `promote()`.
 

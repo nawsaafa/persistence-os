@@ -4,11 +4,13 @@ B1: Action ADT + canonical hash + pure ``apply_action`` + depth guard.
 B2: ``MCTSConfig`` frozen dataclass + ``__post_init__`` validation.
 B3: ``MCTSNode`` + ``MCTSEdge`` non-frozen dataclasses (slots=True).
 B4: ``Expander`` Protocol + ``_StaticExpander`` + ``LLMExpander`` (design §8).
+B5: ``Evaluator`` Protocol + ``_StaticEvaluator`` + ``LLMJudgeEvaluator`` (design §9).
 """
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Callable, Literal, Protocol, Union, runtime_checkable
@@ -23,8 +25,10 @@ __all__ = [
     "Action",
     "AddStepAction",
     "ComposeWithSkillAction",
+    "Evaluator",
     "Expander",
     "LLMExpander",
+    "LLMJudgeEvaluator",
     "MAX_PLAN_DEPTH",
     "MCTSConfig",
     "MCTSEdge",
@@ -403,4 +407,82 @@ class _StaticExpander:
         return tuple(pinned[:k])
 
 
-# B5-B9 to follow
+# --- B5: Evaluator Protocol + implementations (design §9, ADR-6) -------- #
+
+
+@runtime_checkable
+class Evaluator(Protocol):
+    """Returns a scalar reward for a leaf plan (design §9, ADR-6).
+
+    Return type is exactly ``float`` — never ``None``. Failure is
+    signalled by raising; ``error_class != null`` in the provenance
+    datom is the unambiguous "raised vs returned" signal (design §13).
+    The MCTS loop (B9) caches by ``plan.id`` and rejects non-finite
+    scores at the boundary via ``EvaluatorContractError``.
+    """
+
+    def evaluate(self, plan: Node) -> float:
+        """Return a finite scalar reward for ``plan``."""
+        ...
+
+
+class LLMJudgeEvaluator:
+    """Production wiring; LLM provider closure is the caller's concern.
+
+    Pure delegation to a ``provider: Callable[[Node], float]``. MCTS
+    does NOT own the registry seam (design §17 ADR-6 mirrors ADR-5).
+    The MCTS loop (B9) validates finite-score and caches by ``plan.id``.
+    """
+
+    __slots__ = ("_provider",)
+
+    def __init__(self, provider: Callable[[Node], float]) -> None:
+        self._provider = provider
+
+    def evaluate(self, plan: Node) -> float:
+        """Delegate to the wired provider closure (design §9)."""
+        return self._provider(plan)
+
+
+class _StaticEvaluator:
+    """Test-only stub. Pinned signature mirrors ``LLMJudgeEvaluator``.
+
+    ``scores`` keyed by ``plan.id``. On unknown ``plan.id``,
+    ``on_unknown="zero"`` returns ``0.0`` (mirrors ``MCTSNode.q_value``'s
+    zero-not-NaN posture); ``on_unknown="raise"`` raises ``KeyError``.
+    """
+
+    __slots__ = ("_scores", "_on_unknown")
+
+    def __init__(
+        self,
+        scores: dict[str, float],
+        *,
+        on_unknown: Literal["zero", "raise"] = "zero",
+    ) -> None:
+        self._scores = scores
+        self._on_unknown = on_unknown
+
+    def evaluate(self, plan: Node) -> float:
+        """Look up ``plan.id`` in pinned scores; honour ``on_unknown`` on miss."""
+        pinned = self._scores.get(plan.id)
+        if pinned is None:
+            if self._on_unknown == "raise":
+                raise KeyError(plan.id)
+            return 0.0
+        return pinned
+
+
+def _is_finite_score(value: float) -> bool:
+    """True iff ``value`` is finite numeric (design §9 NaN/Inf defense).
+
+    Rejects NaN, +Inf, -Inf, AND ``bool`` (Stream A W1.B / G4 anti-
+    pattern). Raise-site is B9's reject path."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+# B6-B9 to follow

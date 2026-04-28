@@ -7,7 +7,7 @@ Modules:
     replay   — counterfactual trajectory engine            [v0.1.0a1 shipped]
     txn      — atomic multi-datom commit + snapshot isolation [v0.5.1 shipped]
     spec     — parse-don't-validate boundary contracts     [v0.1.0a1 shipped]
-    repl     — live production inspection                  [stub]
+    repl     — capability-gated live REPL (WS + browser console) [v0.7.0a1 shipped]
 """
 
-__version__ = "0.6.5"
+__version__ = "0.7.0a1"

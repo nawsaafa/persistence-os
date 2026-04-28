@@ -3,6 +3,147 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.7.0a1 — 2026-04-29 (Module 7: capability-gated live REPL — WS + browser console)
+
+Stream D of the v1.0 ferrari-first roadmap. Adds a live, capability-gated,
+audit-emitting REPL surface over a WebSocket transport with a vanilla-JS
+browser console UI — the operator-facing surface that Streams A/B/C/E/F
+all hang off for production inspection, two-step edits, view-cursor
+rewind, and branch-as-cursor-marker. ARIS R2 (code quality) PASS at mean
+**8.90 / min 8.4** with two MAJORs closed via design-doc-only edits
+(ADR-9 code-name realignment + ADR-13). Suite **1517 passed / 7 xfailed**
+(+30 over v0.6.5; +5 D-INT integration tests).
+
+### Added
+
+- **`persistence.repl` package** (`src/persistence/repl/`). Public surface:
+  `Capability`, `CapabilitySet`, `mint_token`, `store_token`, `WSServer`,
+  plus the eight application-band error constants
+  (`ERR_CAPABILITY_DENIED`, `ERR_AUTH_FAILED`, `ERR_TOKEN_INVALID`,
+  `ERR_VERIFY_CHAIN_FAILED`, `ERR_REQUEST_HASH_MISMATCH`,
+  `ERR_SESSION_EXPIRED`, `ERR_BRANCH_DEPTH_EXCEEDED`,
+  `ERR_STALE_CURSOR_EDIT`).
+- **WebSocket transport** (`_ws.py`, `_protocol.py`). `aiohttp.web`-based
+  single-port server (ADR-1 + ADR-10). JSON-RPC 2.0 envelope (ADR-2)
+  with closed application-band code table at `-32001..-32008` (ADR-9).
+  Auth handshake on first frame: `repl/auth { token }` → returns
+  deterministic `session_id = sha256(token_id + ":" + auth_clock_iso)[:16]`
+  and the granted capability set.
+- **Capability tokens** (`_caps.py`). Opaque random 256-bit tokens stored
+  fact-store-backed (ADR-3). `Capability(op, qualifier)` pairs:
+  `inspect:read`, `inspect:audit-tail`, `edit:write`, `rewind:any`,
+  `branch:fork`, `auth:login`. `expires_at` enforced at every op-dispatch.
+  Idempotent `revoke_token`; revocation propagates on next
+  `validate_token` call (mid-op semantics: in-flight ops complete).
+- **Four ops** (`_ops.py`). Capability-gated handlers, all dispatching
+  through one shim that flattens params per ADR-12:
+  - `repl/inspect` — `kind=entity` / `audit-window` / `causal-history` /
+    `plan` (read-only; cap `inspect:read` or `inspect:audit-tail`).
+  - `repl/edit` — two-step propose-confirm with `request_hash`-strip
+    canonical-hash matching (ADR-7); zero substrate-source extension.
+    Stale-cursor edit rejected with `-32008` (§5.2 invariant).
+  - `repl/rewind` — sticky per-session view-cursor (ADR-5). Cursor only
+    affects view; intervening `db.transact` writes still land.
+  - `repl/branch` — cursor + depth marker (ADR-13; **NOT a `db.branch`
+    store fork**). Advances `view_cursor_tx_time_iso` and increments
+    `parent_chain_depth`; rejected with `-32007` past `max_branch_depth`
+    (default 16). Safety rests on the stale-cursor edit invariant.
+- **Audit emission** (`_audit.py`). Every op writes one `:repl/op`
+  AuditEntry whose `principal` rides the REPL fields (`op_kind`,
+  `view_cursor_tx_time_iso`, `parent_session_id`, `parent_chain_depth`)
+  so Module 2's canonical AuditEntry slot set is intact. `verify_chain`
+  returns `True` over a pure-REPL OR mixed programmatic+REPL chain;
+  audit-window is hot-path read and exempted from self-emission per
+  ADR-11. In-memory FIFO ring (hot cache, default cap 1000) +
+  fact-store persistence (durable).
+- **Browser console UI** (`static/index.html` / `app.js` / `style.css`).
+  Vanilla JS, zero build step (ADR-6). Two-pane layout: command output
+  (left) + audit tail (right). XSS-pinned via `textContent` only —
+  the unsafe HTML-string DOM setter and unsafe dynamic-code constructors
+  do not appear in the source (a regression test scans for absence).
+  Token loaded from URL fragment `#token=...` then immediately scrubbed
+  via `history.replaceState`. Audit-tail polled at 1Hz via
+  `repl/inspect kind=audit-window` (W3 ADR-11 server-side gate
+  prevents the poll from logging itself into the audit log).
+- **D-INT integration test** (`tests/integration/test_v0_7_repl_e2e.py`,
+  5 tests, 722 LOC incl. fixtures + docstrings):
+  inspect-after-edit ⋅ rewind-cursor-isolation ⋅ branch-records-cursor-and-depth
+  ⋅ replay-from-datoms-alone byte-identity (the W2 chain invariant at
+  the REPL boundary, mirrors Stream B's Prop 6 defense via
+  `canonical_dumps` projection) ⋅ audit-chain integrity with W3
+  self-loop verified end-to-end.
+
+### Design
+
+- **13 ADRs** in `docs/plans/2026-04-28-v0.7.0a1-module-7-repl-design.md`:
+  - ADR-1..10: transport, protocol, capabilities, audit shape, view-cursor
+    semantics, UI bundling, propose-confirm, subscription model, error
+    envelope, async runtime.
+  - **ADR-11** (W3): `repl/inspect kind=audit-window` polls don't
+    self-emit — closes the 1Hz audit-tail self-loop that drowned the
+    audit pane during browser verification.
+  - **ADR-12** (W3): flat handler params, DSL is canonical — handler
+    flattens `kind`-stripped params; no nested `params.params` shape on
+    the wire.
+  - **ADR-13** (W4 fix-pass): `repl/branch` is a cursor + depth marker,
+    NOT a `db.branch` store fork — codifies shipped semantics; safety
+    rests on §5.2 stale-cursor-edit rejection (any non-null-cursor
+    session is read-only because `repl/edit` rejects with `-32008`).
+- **R2 code-quality** at mean 8.90 / min 8.4 with zero MAJORs after W4:
+  Correctness 8.4 / Robustness 8.8 / Readability 9.2 / Coverage 9.4 /
+  Performance 8.7. Eight MINORs deferred to v0.7.x post-tag (browser
+  audit-poll cosmetic flat-params drift, exception-class tightening on
+  `_OpError` error-string surface, `_SyntheticAuthSession` factory
+  hardening, etc.).
+
+### Migration / behavioural notes
+
+- **No substrate-source extension.** Module 7 is a layer over the
+  existing `db.transact` / `db.branch` / `verify_chain` primitives; no
+  `preview_transact`, no new fact-store APIs. Two-step propose-confirm
+  is implemented entirely in `_ops.py` via `canonical_hash(params with
+  confirm and request_hash stripped)`.
+- **`branch_op` is read-only.** A "branched" session inherits the
+  capability set including `edit:write` but cannot mutate state because
+  its non-null `view_cursor_tx_time_iso` triggers `-32008`. To write at
+  a past coordinate, operators must coordinate out-of-band with the
+  substrate's `db.branch(...)` primitive directly (Phase 3 NeSy 2027
+  may add a `branch:write` capability that swaps the session's DB).
+- **Audit-window polls don't audit themselves.** Operators relying on
+  the audit count to detect access-pattern anomalies need to
+  account for the gate: only `kind ∈ {entity, audit-window-tail-by-id,
+  causal-history, plan}` emit `:repl/op` AuditEntries. (Implementation
+  is the inverse — `audit-window` is the lone exempt kind; all other
+  inspect kinds DO emit.)
+
+### Compatibility
+
+- **Pre-release.** No prior `repl` API surface existed (was a one-line
+  `[stub]` marker in `persistence/__init__.py`). All public exports are
+  new in v0.7.0a1. Pre-release suffix `-a1` reflects substrate-internal
+  alpha; will graduate to `v0.7.0` when paper Stream H lands its v1.0
+  rewrite around the eval block (2026-05-28→06-04).
+- **Optional install.** `pip install persistence[repl]` pulls the
+  `aiohttp>=3.9.0,<4.0.0` extra. Substrate-only consumers do NOT need
+  aiohttp.
+
+### Stream-D timeline
+
+- D1-D8: per-task subagent dispatch (1 fresh implementer + spec-reviewer
+  + code-quality-reviewer per task), 8 commits.
+- W3: micro-pass after browser verification on `chrome-MCP` tab
+  `2101276577` + huashu-design first-pass surfaced 2 ⚠️ critical
+  defects (audit-window self-loop + DSL/handler param-shape drift).
+  Single subagent, single commit `dd31f37`. ADR-11 + ADR-12.
+- D-INT: integration test subagent at `1ce8ac4` (5 tests, all PASS,
+  +5 to suite total → 1517).
+- D-FINAL.1 R2: PASS-with-W1 at mean 8.90 / min 8.4. Two MAJORs were
+  design-doc drift only.
+- W4 fix-pass: design-doc-only edits at `4157c64` closing R2 MAJORs
+  (ADR-9 code-name realignment + ADR-13 branch-as-cursor-marker).
+- D-FINAL.2: this release. **17-day margin to NeSy 2026 abstract
+  deadline 2026-06-09 preserved.**
+
 ## v0.6.5 — 2026-04-28 (Module 3.X: MCTS — PUCT search + skill-library 4-gate closed loop)
 
 Stream B of the v1.0 ferrari-first roadmap. Adds PUCT tree search over

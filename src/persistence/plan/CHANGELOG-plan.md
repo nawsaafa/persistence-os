@@ -1,5 +1,65 @@
 # persistence.plan CHANGELOG
 
+## v0.6.5 (2026-04-28) — MCTS: PUCT search + skill-library 4-gate closed loop
+
+Stream B of the v1.0 ferrari-first roadmap. Adds PUCT tree search over
+the content-addressed Plan AST, full `:mcts/iteration` provenance for
+replay-from-audit-log alone (Prop 6), and `mcts_promote()` chaining
+`mcts_search → promote → SkillLibrary.register`.
+
+ARIS R1 PASS at 8.90 / 8.0 (round 3); R2 PASS at 8.94 / 8.7.
+
+### Added
+
+- **`_mcts.py`** — single-flat-file impl (ADR-11). Action ADT
+  (`SubstituteLeafAction`, `AddStepAction`, `ComposeWithSkillAction`),
+  `MCTSConfig` (`__post_init__` bool-isinstance-FIRST validation),
+  `MCTSNode` / `MCTSEdge` dataclasses, `Expander` / `Evaluator`
+  protocols (`@runtime_checkable`), `mcts_search()` PUCT loop, cycle
+  detection, `MAX_PLAN_DEPTH = 32`.
+- **`_mcts_datoms.py`** — `:mcts/iteration` schema (kebab-case attr
+  keys), `mcts/prev-hash` Merkle chain, canonical Node round-trip
+  (`_node_canonical` / `_node_from_canonical` for W2 M4 closure
+  enabling production-LLMExpander Prop-6 defense), reject-reason
+  enum, `_search_summary_datom` (start + end).
+- **`_mcts_promote.py`** — `mcts_promote()` orchestrator wiring
+  search → promote → SkillLibrary.register.
+- Public surface re-exports in `__init__.py`: `Action`,
+  `SubstituteLeafAction`, `AddStepAction`, `ComposeWithSkillAction`,
+  `apply_action`, `MAX_PLAN_DEPTH`, `MCTSConfig`, `MCTSNode`,
+  `MCTSEdge`, `Expander`, `LLMExpander`, `Evaluator`,
+  `LLMJudgeEvaluator`, `mcts_search`, `MCTSResult`, `mcts_promote`,
+  `MCTSPromotionResult`, `PlanDepthExceeded`,
+  `ExpanderContractError`, `EvaluatorContractError`.
+
+### Tests
+
+- `tests/plan/test_action_*.py` + `tests/plan/test_mcts_*.py`
+  (28 unit files; +153 tests vs `v0.6.0a1`)
+- `tests/integration/test_v0_6_5_mcts.py` (load-bearing Prop 6
+  replay-from-datoms-alone with byte-identity on `tree_dump`)
+
+### Property pins
+
+- visit-conservation 3-case (`test_mcts_visit_conservation.py`)
+- determinism 5x rerun (`test_mcts_determinism_pin.py`)
+- iteration datom schema (`test_mcts_iteration_datom_schema.py`)
+- expand-output payload + Node canonical round-trip
+  (`test_mcts_expand_output_payload_schema.py`)
+- replay-loud-stub (`test_mcts_replay_loud_stub.py`)
+- search summary datom (`test_mcts_search_summary_datom.py`)
+- terminations + `all_evaluations_failed` (`test_mcts_terminations.py`)
+- simple_regret with <2 children + visits-sorted top-2
+- evaluator non-finite + raises + invalid-action + unregistered-skill
+  + cycle (B9 reject paths)
+
+### W1 micro-pass
+
+- `_classify_apply_failure` substring-match on error messages →
+  isinstance dispatch via private `_SkillNotRegistered(ValueError)`
+  subclass (cousin of Stream A W1.B/G4 string-coercion anti-pattern;
+  closes R2 m1).
+
 ## v0.6.0a1 (2026-04-28) — Plan execution + optimization + 4-gate promotion
 
 Stream A of the v1.0 ferrari-first roadmap — closes the

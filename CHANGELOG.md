@@ -3,6 +3,138 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.6.5 — 2026-04-28 (Module 3.X: MCTS — PUCT search + skill-library 4-gate closed loop)
+
+Stream B of the v1.0 ferrari-first roadmap. Adds PUCT tree search over
+the content-addressed Plan AST with an LLM-evaluator port, full
+`:mcts/iteration` provenance for replay-from-audit-log alone (Prop 6),
+and a `mcts_promote()` orchestrator that chains `mcts_search → promote
+→ SkillLibrary.register` to close the search → promotion → reuse loop.
+Single-flat-file impl per ADR-11 (`_mcts.py`) with provenance helpers
+lifted to `_mcts_datoms.py`. ARIS R1 (design fitness) PASS at composite
+8.90 / min 8.0; ARIS R2 (code quality) PASS at mean 8.94 / min 8.7.
+
+### Added
+
+- **`Action` algebraic data type** (`persistence.plan._mcts`).
+  `SubstituteLeafAction(target_path, new_leaf)` /
+  `AddStepAction(target_path, new_child)` /
+  `ComposeWithSkillAction(target_path, skill_id)`. All
+  `@dataclass(frozen=True, slots=True)`. `apply_action(plan, action,
+  *, skill_library=None)` dispatches by `isinstance` (strict — third-
+  party action subclasses fall through to `ValueError("unknown action
+  kind")`). `_action_hash` composes via `Node.id` for nested Nodes;
+  reuses the canonical-JSON helper from `_ast.py`. `MAX_PLAN_DEPTH = 32`
+  enforced via two-layer guard (apply-time + ComposeWithSkill skill-
+  plan ≤ MAX_PLAN_DEPTH//2 = 16).
+- **`MCTSConfig`** `@dataclass(frozen=True, slots=True)`. Defaults:
+  `c_puct=1.4`, `max_iter=200`, `max_unique_plans=64`, `expander_k=4`,
+  `simple_regret_window=5`, `simple_regret_threshold=False`,
+  `selection_temperature=0.0`. `__post_init__` runs bool-isinstance-FIRST
+  then positive-only validators on every numeric field (Stream A
+  W1.B/G4 anti-pattern preempted: `bool(...)` coercion never accepted).
+- **`MCTSNode`** + **`MCTSEdge`** `@dataclass(slots=True)` (non-frozen
+  for backup mutation). Per design §4: `MCTSNode` carries
+  `plan_id / visits / total_value / children / is_terminal` with
+  computed `q_value` property; `MCTSEdge` carries
+  `action / action_hash / prior / child_plan_id / visits_through_edge /
+  total_value_through_edge`. Prior lives on the edge, not the node.
+- **`Expander`** `@runtime_checkable` Protocol with `propose(plan, *,
+  k) → Sequence[tuple[Action, float]]`. `_StaticExpander(proposals,
+  on_unknown="empty"|"raise")` for deterministic test harnesses.
+  `LLMExpander(provider: Callable[[Node, int], Iterable[tuple[Action,
+  float]]])` — pure delegation (prior-sum tolerance `_PRIOR_TOL = 1e-6`
+  enforced in the `mcts_search` loop, not in the protocol).
+- **`Evaluator`** `@runtime_checkable` Protocol with
+  `evaluate(plan) → float`. `_StaticEvaluator` + `LLMJudgeEvaluator`
+  (provider-callable injection — no registry indirection).
+  `_is_finite_score` rejects NaN, Inf, bool, and non-numeric — emits
+  `evaluator_returned_non_finite` reject datom (no silent coercion).
+- **`mcts_search(initial_plan, *, expander, evaluator, started_at_ms,
+  config=None, skill_library=None, db=None) → MCTSResult`**. Single-
+  player PUCT loop (SELECT → EXPAND → EVALUATE on the just-expanded
+  parent → BACKUP). `MCTSResult` is `frozen=True, slots=True`:
+  `winner / winner_plan_id / initial_plan_id / search_id (content-
+  addressed sha256) / iter_count / unique_plans_visited / terminated_by /
+  root_q / tree_dump`. `tree_dump` canonical-ordered: lex sort by
+  `(parent_plan_id, child_plan_id)`, 5-tuple includes `action_hash`.
+  `db is None` short-circuits provenance (unit-test escape hatch).
+- **Visit-conservation 3-case invariant** (root / interior / leaf-of-
+  path) verified per design §16; pinned by
+  `tests/plan/test_mcts_visit_conservation.py`.
+- **Synthetic time discipline**: `t = started_at_ms + iter_index`. No
+  wall-clock leaks; one `db.transact(...)` per iteration so each
+  iteration is one audit-chain entry.
+- **`:mcts/iteration` provenance schema** (`persistence.plan._mcts_
+  datoms`). Per design §13 with kebab-case attr keys throughout.
+  `phase ∈ {"start", "select", "expand", "evaluate", "backup",
+  "reject", "search"}`. `expand` records carry both `_id` and
+  `_canonical` slots for `SubstituteLeafAction.new_leaf` /
+  `AddStepAction.new_child` so replay can materialize Node bytes
+  without requiring the originating in-process state (W2 M4 closure
+  for production-LLMExpander Prop-6 defense).
+- **`mcts/prev-hash` Merkle chain**. Each datom commits `sha256(
+  canonical_json(prev datom content))`; the search trajectory thus
+  forms its own Merkle chain SEPARATE from the Module 2 effect-
+  handler audit chain (W1 closure of the R2 audit-chain category-
+  error: Prop 1/2/4 composition does NOT lift to the search layer
+  for free).
+- **Cache-miss-only recording** (ADR-10). Hits do not emit datoms;
+  replay re-derives on demand. `MCTSReplayCacheMiss` test-local
+  exception fires loud in the replay-loud-stub harness.
+- **Reject reasons** (closed `frozenset`):
+  `evaluator_returned_non_finite / evaluator_raised /
+  plan_too_deep / compose_creates_cycle / skill_not_registered /
+  plan_construction_raised`. `_classify_apply_failure` dispatches by
+  isinstance — no string-substring matching on error messages
+  (W1 micro-pass closure of R2 m1).
+- **Cycle detection** on `ComposeWithSkillAction`: `_PlanCycleDetected`
+  raised when the candidate plan's content-hash already appears in
+  the looked-up skill plan's subtree set; mapped to
+  `compose_creates_cycle` reject.
+- **`mcts_promote(initial_plan, *, expander, evaluator, started_at_ms,
+  skill_library, replay_engine, training_set, metric, scores_before,
+  scores_after, threshold, db, config=None) → MCTSPromotionResult`**.
+  Composition: `mcts_search → promote() → SkillLibrary.register`. No
+  chained `optimize()` per design §12 — promotion gate is the source
+  of truth for skill-library admission.
+- **B-INT integration test** (`tests/integration/test_v0_6_5_mcts.py`).
+  7-step body: setup → `mcts_search` with full provenance → verify
+  `:mcts/search` summary → verify Merkle chain → verify reject
+  schema → verify expand-output Node round-trip → REPLAY-FROM-DATOMS-
+  ALONE with byte-identity assertion on `tree_dump`. Step 7 is the
+  load-bearing Prop 6 test: caches reconstructed from `db.log()`
+  only, Nodes materialized from `new_leaf_canonical` bytes, no
+  cross-state cheating.
+
+### Suite
+
+`1084 → 1272 passed, 7 xfailed` (+188 over `v0.6.0a1` baseline; +153
+under `tests/plan/`, +35 under `tests/integration/` and shared
+fixtures). pyright + ruff clean on the three Stream B source files.
+
+### Files
+
+- `src/persistence/plan/_mcts.py` (1129 LOC — single flat module)
+- `src/persistence/plan/_mcts_datoms.py` (416 LOC — provenance
+  helpers + canonical Node round-trip)
+- `src/persistence/plan/_mcts_promote.py` (144 LOC — promote
+  orchestrator)
+- `src/persistence/plan/_errors.py` (deltas: `PlanDepthExceeded`,
+  `ExpanderContractError`, `EvaluatorContractError`)
+- `src/persistence/plan/__init__.py` (public surface re-exports)
+- `tests/plan/test_action_*.py` + `tests/plan/test_mcts_*.py`
+  (28 unit files)
+- `tests/integration/test_v0_6_5_mcts.py` (1 integration file)
+
+### Design + impl docs
+
+- `docs/plans/2026-04-28-v0.6.5-mcts-design.md` (1535 lines, 25
+  sections, 12 ADRs — ARIS R1 PASS round-3 at 8.90 / 8.0 after W1
+  + W2 fix-passes)
+- `docs/plans/2026-04-28-v0.6.5-mcts-impl.md` (1191 lines, 11-task
+  playbook B1–B9 + B-INT + B-FINAL)
+
 ## v0.6.0a1 — 2026-04-28 (Module 3: Plan — execution + optimization + 4-gate promotion)
 
 Stream A of the v1.0 ferrari-first roadmap. Closes the

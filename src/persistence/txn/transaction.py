@@ -50,7 +50,21 @@ class Transaction:
     attempt: int
     read_set: set[Ref] = field(default_factory=set)
     write_set: dict[Ref, Any] = field(default_factory=dict)
+    ensure_set: set[Ref] = field(default_factory=set)
     effect_intent_log: list[EffectIntent] = field(default_factory=list)
+    # v0.5.2 § F3 — commute_log entries are body-order tuples
+    # ``(ref, fn_id, args)`` where ``args`` is a tuple of positional
+    # args. Each entry is reapplied at commit-time inside the
+    # writer-lock against the latest committed value. NOT added to
+    # read_set — commute is conflict-free by design.
+    commute_log: list[tuple[Ref, str, tuple]] = field(default_factory=list)
+    # Eager body-time cache of commute results — keyed by ref. Populated
+    # by ``tx.commute`` so a subsequent ``tx.deref`` on the same ref
+    # returns the optimistic body-eager value (intra-txn case 4 of
+    # § F3). Distinct from ``write_set`` because explicit writes win
+    # over commute at commit-time (case 2); keeping them separate keeps
+    # that invariant explicit at the data-structure level.
+    _commute_eager: dict[Ref, Any] = field(default_factory=dict)
     commit_id: str | None = None
 
     def now(self) -> datetime:
@@ -117,6 +131,18 @@ class Transaction:
         self.read_set.add(ref)
         if ref in self.write_set:
             return self.write_set[ref]
+        # v0.5.2 § F3 — intra-txn case 4: a previous ``tx.commute`` on
+        # this ref produced an optimistic body-eager value. Return it
+        # so the body sees its own (read-your-own-commutes). The
+        # ``read_set.add`` above is idempotent (it's a set), so calling
+        # ``deref`` multiple times after ``commute`` does NOT inflate
+        # the conflict-detection footprint. Note: ``commute`` itself
+        # does NOT add to read_set (the entire point) — but if the
+        # body subsequently ``deref``s the ref, that deref-call DOES
+        # take the read-set hit, which is correct read-your-own-writes
+        # semantics.
+        if ref in self._commute_eager:
+            return self._commute_eager[ref]
         # Snapshot read at t_start. The ref's value lives under the
         # ``ref.spec_attr`` attribute name (default ``"value"`` preserves
         # v0.5.0a1 behavior bit-for-bit). Two refs sharing an eid but
@@ -139,6 +165,155 @@ class Transaction:
         new_value = fn(current, *args)
         self.assoc(ref, new_value)
         return new_value
+
+    def commute(self, ref: Ref, fn_id: str, *args: Any) -> Any:
+        """Commutative write — eager-at-body + reapply-at-commit.
+
+        Two-phase semantic (matches Clojure
+        ``LockingTransaction.doCommute``):
+
+        1. **At this call:** look up ``fn_id`` in the curated registry,
+           apply against the optimistic committed-or-locally-written
+           value, append ``(ref, fn_id, args)`` to ``commute_log``,
+           cache the result so subsequent ``tx.deref(ref)`` returns
+           it (read-your-own-commutes), and return the new value.
+        2. **At commit (inside writer-lock):** re-read the ref's
+           latest committed value, re-apply ``fn``, write the result.
+           The body-eager value is discarded; only the commit-time
+           value reaches the log.
+
+        Soundness depends on ``fn`` being commutative: ``f(f(v, a),
+        b) == f(f(v, b), a)``. The substrate does NOT verify this —
+        the registry is curated to functions known to be commutative.
+
+        ``ref`` is NOT added to ``read_set`` — that is the entire
+        point of ``commute`` vs ``alter``: two parallel transactions
+        calling ``tx.commute(counter, "inc-by", 1)`` both succeed with
+        no retry and produce a final counter incremented by 2.
+
+        Intra-txn semantics (4 cases — see § F3 line 307-312):
+
+        - **Multiple commutes on same ref:** composed in body-order;
+          eager value at call N is ``fn(eager_value_at_N-1, *args)``.
+        - **Commute then assoc/alter:** explicit write WINS at commit;
+          commute log entries on that ref are dropped.
+        - **Assoc/alter then commute:** body-eager value seen by the
+          commute is the just-set explicit value (so subsequent body
+          reads see ``fn(explicit, *args)``); **at commit the explicit
+          write WINS and the commute on that ref is DROPPED** —
+          structurally identical to case 2 (write_set membership at
+          commit-time drops commute regardless of body order). The
+          design doc § F3 line 311 prose ("both apply; commute
+          reapplies against explicit-write's value") is superseded by
+          case 2's drop-on-write_set-membership invariant; v0.5.2 R2
+          MAJOR-2 closure pinned the realised behavior in
+          ``tests/persistence/txn/test_commute.py:328-367``.
+        - **Deref after commute:** returns the optimistic body-eager
+          value; idempotent on repeated derefs.
+
+        Raises ``RefBranchMismatch`` if ``ref`` was constructed
+        against a different DB. Raises ``ValueError`` if ``fn_id`` is
+        not registered. Raises ``RefValueNotImmutable`` if the
+        eager-applied result is mutable.
+
+        See v0.5.2 design § F3 for the full semantics + acceptance
+        gates.
+        """
+        from persistence.txn._commute import lookup_commute, _DEFAULT_COMMUTE_TABLE
+        from persistence.txn.errors import RefBranchMismatch
+        from persistence.txn._db_extension import _get_db_id
+
+        if ref.db_id != _get_db_id(self.db):
+            raise RefBranchMismatch(
+                f"ref {ref!r} belongs to a different DB than this dosync"
+            )
+        fn = lookup_commute(fn_id)
+        if fn is None:
+            raise ValueError(
+                f"tx.commute: unknown fn_id {fn_id!r}. Curated registry: "
+                f"{sorted(_DEFAULT_COMMUTE_TABLE.keys())}. Use "
+                f"register_commute (test-only, gated by "
+                f"PERSISTENCE_TXN_ALLOW_RUNTIME_REGISTRATION) to add custom "
+                f"fns."
+            )
+        # Eager base resolution — see intra-txn cases.
+        if ref in self.write_set:
+            # Case 3: explicit write happened earlier in body. Commute
+            # eager-applies on top of the explicit value so subsequent
+            # body reads see ``fn(explicit, *args)``. **At commit, the
+            # explicit write wins and this commute entry is dropped**
+            # (case 2's drop-on-write_set-membership rule covers cases
+            # 2 and 3 uniformly — see ``_build_commute_facts`` and the
+            # docstring above for the realised invariant). The
+            # body-eager value here influences subsequent in-body reads
+            # only, not the committed log.
+            eager_base = self.write_set[ref]
+        elif ref in self._commute_eager:
+            # Case 1: a previous commute on the same ref produced an
+            # optimistic body value. Compose in body-order.
+            eager_base = self._commute_eager[ref]
+        else:
+            # Snapshot read at t_start (NOT via self.deref — we must
+            # not add to read_set). Same path as deref's snapshot
+            # branch.
+            view = self.db.as_of(self.t_start)
+            entity_attrs = view.entity(ref.eid)
+            eager_base = (
+                entity_attrs.get(ref.spec_attr) if entity_attrs else None
+            )
+        new_value = fn(eager_base, *args)
+        if not is_immutable_value(new_value):
+            raise RefValueNotImmutable(
+                f"tx.commute eager-applied value must be immutable; "
+                f"got {type(new_value).__name__!r} from fn_id {fn_id!r}. "
+                f"The registered fn must return an immutable value (use "
+                f"pyrsistent.PMap/PVector/PSet, frozenset, tuple, or a "
+                f"frozen scalar)."
+            )
+        # ``args`` is a Python positional tuple — preserved as-is for
+        # both the log entry and provenance emission. Tuple is the
+        # canonical "frozen ordered sequence" shape.
+        self.commute_log.append((ref, fn_id, args))
+        self._commute_eager[ref] = new_value
+        return new_value
+
+    def ensure(self, ref: Ref) -> Any:
+        """Add ``ref`` to ``ensure_set`` AND return its snapshot value.
+
+        Mirrors Clojure ``LockingTransaction.ensure(ref)`` which returns
+        the deref'd value so ``ensure`` is a strict superset of ``deref``
+        for ergonomic chained reads. Internally calls ``self.deref(ref)``
+        (which adds ``ref`` to ``read_set`` and returns the snapshot) then
+        adds ``ref`` to ``ensure_set`` so any subsequent body code that
+        ignores the return value still gets the conflict-padding behavior.
+
+        Conflict detection at commit reads ``read_set | write_set |
+        ensure_set`` against ``db.store.since(t_start)`` — if any datom
+        on any of the three sets has ``tx_time > t_start``, the dosync
+        retries.
+
+        Note on the dual sets: because ``tx.ensure(ref)`` calls
+        ``tx.deref(ref)`` which already adds to ``read_set``, the
+        conflict-detection union is mathematically equivalent to just
+        unioning ``ensure_set`` into ``read_set``. The semantic value
+        of a separate ``ensure_set`` is **provenance distinguishability**
+        — at commit time an external auditor reading the commit datom
+        can tell which refs were "actually deref'd for value" (in
+        ``:persistence.txn/read-set``) vs which were "padded for
+        conflict-detection only" (in ``:persistence.txn/ensure-set``).
+
+        See v0.5.2 design § F2.
+        """
+        from persistence.txn.errors import RefBranchMismatch
+        from persistence.txn._db_extension import _get_db_id
+
+        if ref.db_id != _get_db_id(self.db):
+            raise RefBranchMismatch(
+                f"ref {ref!r} belongs to a different DB than this dosync"
+            )
+        value = self.deref(ref)  # also adds to read_set + branch-checks
+        self.ensure_set.add(ref)
+        return value
 
 
 
@@ -215,6 +390,90 @@ def _build_commit_fact(tx: "Transaction", commit_id: str) -> dict:
     }
 
 
+def _build_commute_facts(tx: "Transaction") -> tuple[list[dict], dict[Ref, Any]]:
+    """Reapply each commute_log entry against latest committed value.
+
+    Returns ``(facts_list, resolved)`` where ``resolved`` is a per-ref
+    dict of the latest computed value — used both for the provenance
+    emission cross-check and for intra-batch composition: when the
+    same ref has multiple commute entries, the second entry's reapply
+    sees the first entry's just-computed value (compose in body-order
+    against the latest committed value as the seed).
+
+    Refs that ALSO appear in ``tx.write_set`` are SKIPPED — the
+    explicit write wins per § F3 intra-txn cases 2 AND 3 (commute-
+    then-set OR set-then-commute both drop the commute fact at commit;
+    the realised invariant is "any ref in write_set drops its commute
+    log entries, regardless of body-order interleaving"). The
+    explicit write fact is emitted separately by
+    :func:`_build_write_facts`; this helper just refrains from
+    emitting a competing commute fact for those refs. See
+    ``Transaction.commute`` docstring + the case-3 pinning test in
+    ``tests/persistence/txn/test_commute.py:328-367`` for the
+    superseding-rationale on the design doc § F3 line 311 prose.
+
+    Called from inside the writer-lock window in :func:`_commit_attempt`
+    AFTER the conflict-detection check passes. Reads the latest
+    committed value via ``tx.db.as_of(now)`` against the post-conflict-
+    check store state.
+
+    Raises ``RuntimeError`` if a ``fn_id`` recorded in the commute_log
+    is no longer in the registry — that means the registry was mutated
+    between body call and commit, which is forbidden under the
+    static-registry contract.
+    """
+    from persistence.txn._commute import lookup_commute
+
+    explicit_write_refs = set(tx.write_set.keys())
+    facts: list[dict] = []
+    resolved: dict[Ref, Any] = {}
+    now = tx.db._clock()
+    # ``view_at_now`` is the latest snapshot of the DB at this lock-held
+    # moment. The conflict-check upstream proved that any datoms after
+    # ``t_start`` on read_set/write_set/ensure_set refs are absent — but
+    # commute refs were deliberately excluded from that union, so this
+    # snapshot is the only place that sees concurrent commute updates.
+    view_at_now = tx.db.as_of(now)
+    for ref, fn_id, args in tx.commute_log:
+        if ref in explicit_write_refs:
+            # Case 2: explicit write wins; drop commute entries for
+            # this ref. The explicit write fact is emitted by
+            # ``_build_write_facts`` (already called by the caller).
+            continue
+        fn = lookup_commute(fn_id)
+        if fn is None:
+            raise RuntimeError(
+                f"commute fn_id {fn_id!r} disappeared from registry "
+                f"between body call and commit — registry mutation "
+                f"during dosync is forbidden (the static-registry "
+                f"contract guarantees cross-host determinism by "
+                f"forbidding mid-flight changes)."
+            )
+        if ref in resolved:
+            # Multiple commutes on same ref — compose in body-order
+            # against the result of the previous commute's reapply.
+            # (Case 1 of intra-txn semantics, applied at commit-time.)
+            base = resolved[ref]
+        else:
+            entity_attrs = view_at_now.entity(ref.eid)
+            base = entity_attrs.get(ref.spec_attr) if entity_attrs else None
+        new_value = fn(base, *args)
+        if not is_immutable_value(new_value):
+            raise RefValueNotImmutable(
+                f"commute reapply at commit produced a mutable value "
+                f"({type(new_value).__name__!r}) for fn_id {fn_id!r}; "
+                f"the registered fn must return an immutable value."
+            )
+        resolved[ref] = new_value
+        facts.append({
+            "e": ref.eid,
+            "a": ref.spec_attr,
+            "v": new_value,
+            "valid_from": now,
+        })
+    return facts, resolved
+
+
 def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
     """Build the dict passed as ``transact_batch(provenance=...)``.
 
@@ -254,6 +513,23 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
     if not result.is_ok:
         _raise_spec_error(result)
 
+    # v0.5.2 § F3 — commute_log emitted in BODY-ORDER (not sorted).
+    # Body-order is the natural deterministic order: a body that calls
+    # ``tx.commute(r, "inc-by", 1)`` then ``tx.commute(r, "inc-by", 2)``
+    # produces the same wire-form across any two replays of the same
+    # body (under fixed clock + same registry). Sorting would lose the
+    # "compose in body-order" invariant called out in
+    # :func:`_build_commute_facts` — the second commute on a ref sees
+    # the first's reapply result, so emitting them out-of-body-order
+    # would falsely advertise an order they were not applied in.
+    # ``args`` is converted tuple → list because EDN sequences are
+    # serialized as lists; the wire form must round-trip cleanly under
+    # the registered ``:persistence.txn/commute-log`` spec.
+    commute_log_wire: list = [
+        {":ref": ref.eid, ":fn-id": fn_id, ":args": list(args)}
+        for ref, fn_id, args in tx.commute_log
+    ]
+
     return {
         ":persistence.txn/commit-id": commit_id,
         ":persistence.txn/started-at": tx.t_start.isoformat(),
@@ -263,7 +539,9 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
             tx, "_deadline_set", False
         ),
         ":persistence.txn/read-set": sorted(r.eid for r in tx.read_set),
+        ":persistence.txn/ensure-set": sorted(r.eid for r in tx.ensure_set),
         ":persistence.txn/intent-log": intent_log_wire,
+        ":persistence.txn/commute-log": commute_log_wire,
     }
 
 
@@ -313,7 +591,8 @@ def _commit_attempt(tx: "Transaction") -> bool:
     # to zero: a thread that passes the check is guaranteed to commit
     # before any other thread's check runs.
     commit_id = str(_uuid.uuid4())  # noqa: wall-clock
-    facts = _build_write_facts(tx) + [_build_commit_fact(tx, commit_id)]
+    write_facts = _build_write_facts(tx)
+    commit_fact = _build_commit_fact(tx, commit_id)
     # v0.5.1 W1 fix-pass — R2 MINOR 1: build the provenance dict OUTSIDE
     # the store lock. ``_build_commit_provenance`` runs the
     # ``:persistence.txn/intent-log`` spec conformance, which has zero
@@ -323,11 +602,29 @@ def _commit_attempt(tx: "Transaction") -> bool:
     # narrow the lock window to the conflict-check + transact-batch core.
     provenance = _build_commit_provenance(tx, commit_id)
     with tx.db.store._lock:
-        touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
+        # v0.5.2 § F3: conflict-detection union UNCHANGED — commute
+        # refs are DELIBERATELY excluded. That is the entire point of
+        # ``commute`` vs ``alter``: two parallel transactions calling
+        # the same commute on the same ref both succeed without retry.
+        touched = (
+            {r.eid for r in tx.read_set}
+            | {r.eid for r in tx.write_set}
+            | {r.eid for r in tx.ensure_set}
+        )
         if any_datoms_since(tx.db, tx.t_start, touched):
             return False
-        # Apply atomically as one db.transact() — write_set + commit datom.
-        # `facts` always contains at least the commit datom, so no guard.
+        # v0.5.2 § F3: commute reapply happens INSIDE the lock,
+        # AFTER the conflict check passes. The reapply reads the
+        # latest committed value (NOT the t_start snapshot) — by
+        # holding ``store._lock``, we serialise the read+write so
+        # two parallel commutes can't both miss each other's writes.
+        # Refs in both write_set and commute_log are skipped here
+        # (case 2: explicit write wins).
+        commute_facts, _resolved = _build_commute_facts(tx)
+        # Apply atomically as one db.transact() — write_set + commute
+        # reapply + commit datom. ``facts`` always contains at least
+        # the commit datom, so no guard.
+        facts = write_facts + commute_facts + [commit_fact]
         tx.db.transact_batch(facts, provenance=provenance)
     tx.commit_id = commit_id
     _replay_effect_intents(tx, commit_id)
@@ -392,6 +689,7 @@ __all__ = [
     "_spec_validate_writes",
     "_build_write_facts",
     "_build_commit_fact",
+    "_build_commute_facts",
     "_build_commit_provenance",
     "_replay_effect_intents",
     "_commit_attempt",

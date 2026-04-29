@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>persistence.repl</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <span class="title">persistence.repl</span>
+    <span class="status" id="conn-status">disconnected</span>
+    <span class="session" id="session-info"></span>
+  </header>
+  <main>
+    <section class="left">
+      <h2>commands</h2>
+      <div class="output" id="output"></div>
+      <form id="cmd-form">
+        <input type="text" id="cmd-input" autocomplete="off"
+               placeholder="repl/inspect kind=entity entity_id=user-42 (or 'help')">
+        <button type="submit">send</button>
+      </form>
+    </section>
+    <section class="right">
+      <h2>audit tail</h2>
+      <div class="audit-tail" id="audit-tail"></div>
+    </section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

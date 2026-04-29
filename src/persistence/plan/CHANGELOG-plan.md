@@ -1,5 +1,122 @@
 # persistence.plan CHANGELOG
 
+## v0.6.5 (2026-04-28) — MCTS: PUCT search + skill-library 4-gate closed loop
+
+Stream B of the v1.0 ferrari-first roadmap. Adds PUCT tree search over
+the content-addressed Plan AST, full `:mcts/iteration` provenance for
+replay-from-audit-log alone (Prop 6), and `mcts_promote()` chaining
+`mcts_search → promote → SkillLibrary.register`.
+
+ARIS R1 PASS at 8.90 / 8.0 (round 3); R2 PASS at 8.94 / 8.7.
+
+### Added
+
+- **`_mcts.py`** — single-flat-file impl (ADR-11). Action ADT
+  (`SubstituteLeafAction`, `AddStepAction`, `ComposeWithSkillAction`),
+  `MCTSConfig` (`__post_init__` bool-isinstance-FIRST validation),
+  `MCTSNode` / `MCTSEdge` dataclasses, `Expander` / `Evaluator`
+  protocols (`@runtime_checkable`), `mcts_search()` PUCT loop, cycle
+  detection, `MAX_PLAN_DEPTH = 32`.
+- **`_mcts_datoms.py`** — `:mcts/iteration` schema (kebab-case attr
+  keys), `mcts/prev-hash` Merkle chain, canonical Node round-trip
+  (`_node_canonical` / `_node_from_canonical` for W2 M4 closure
+  enabling production-LLMExpander Prop-6 defense), reject-reason
+  enum, `_search_summary_datom` (start + end).
+- **`_mcts_promote.py`** — `mcts_promote()` orchestrator wiring
+  search → promote → SkillLibrary.register.
+- Public surface re-exports in `__init__.py`: `Action`,
+  `SubstituteLeafAction`, `AddStepAction`, `ComposeWithSkillAction`,
+  `apply_action`, `MAX_PLAN_DEPTH`, `MCTSConfig`, `MCTSNode`,
+  `MCTSEdge`, `Expander`, `LLMExpander`, `Evaluator`,
+  `LLMJudgeEvaluator`, `mcts_search`, `MCTSResult`, `mcts_promote`,
+  `MCTSPromotionResult`, `PlanDepthExceeded`,
+  `ExpanderContractError`, `EvaluatorContractError`.
+
+### Tests
+
+- `tests/plan/test_action_*.py` + `tests/plan/test_mcts_*.py`
+  (28 unit files; +153 tests vs `v0.6.0a1`)
+- `tests/integration/test_v0_6_5_mcts.py` (load-bearing Prop 6
+  replay-from-datoms-alone with byte-identity on `tree_dump`)
+
+### Property pins
+
+- visit-conservation 3-case (`test_mcts_visit_conservation.py`)
+- determinism 5x rerun (`test_mcts_determinism_pin.py`)
+- iteration datom schema (`test_mcts_iteration_datom_schema.py`)
+- expand-output payload + Node canonical round-trip
+  (`test_mcts_expand_output_payload_schema.py`)
+- replay-loud-stub (`test_mcts_replay_loud_stub.py`)
+- search summary datom (`test_mcts_search_summary_datom.py`)
+- terminations + `all_evaluations_failed` (`test_mcts_terminations.py`)
+- simple_regret with <2 children + visits-sorted top-2
+- evaluator non-finite + raises + invalid-action + unregistered-skill
+  + cycle (B9 reject paths)
+
+### W1 micro-pass
+
+- `_classify_apply_failure` substring-match on error messages →
+  isinstance dispatch via private `_SkillNotRegistered(ValueError)`
+  subclass (cousin of Stream A W1.B/G4 string-coercion anti-pattern;
+  closes R2 m1).
+
+## v0.6.0a1 (2026-04-28) — Plan execution + optimization + 4-gate promotion
+
+Stream A of the v1.0 ferrari-first roadmap — closes the
+"plan as data → plan as runnable program" boundary.
+
+### Added
+
+- **`_execute.py`** — `execute(plan, db, *, dispatcher=None) → ExecutionResult`
+  with frozen `LeafResult` / `FailureInfo` envelopes. Per-leaf failure
+  capture; only handler-thrown exceptions of an explicitly-allowed set
+  propagate.
+- **`_metric_registry.py`** — `register_metric` / `lookup_metric` /
+  `unregister_metric` with `MetricRef` and `MetricNotRegistered`.
+- **`TrainingExample`** + `_canonicalize_training_set(...)` —
+  deterministic ordering + canonical EDN form for reproducible DSPy
+  optimization.
+- **`_optimize.py`** — `_plan_to_dspy_module` forward adapter (lazy DSPy
+  import; `OptimizerNotAvailable` when missing); inverse adapter rebuilds
+  a `Node` AST with provenance pinning. `optimize(plan, training_set,
+  metric, *, db, max_demos=...) → OptimizedPlan` end-to-end MIPROv2
+  wrapper. Caller-injectable dispatcher (W1.A4).
+- **`_skill_library.py`** — `SkillLibrary` with `register` / `lookup` /
+  `list_skills`. Cross-instance idempotency via fact-store log scan;
+  conflicting content raises. `_PromotionRecordLike` `@runtime_checkable`
+  Protocol decouples this surface from `PromotionRecord`.
+- **`_promotion.py`** — four gates (`gate_g1_replay_byte_identity`,
+  `gate_g2_audit_chain`, `gate_g3_score_delta`, `gate_g4_stub`) and a
+  `promote()` orchestrator. `PromotionRecord` is `@dataclass(frozen=True,
+  slots=True)` with content-addressed `promotion_id`.
+- **`GateFailure`** moved to `_errors.py` as a typed class with
+  class-level `partial_record: Any` attribute.
+
+### W1 fix-pass (post-ARIS R2)
+
+- W1.A G1 strict-key check on `compare()` dict (`TypeError` on missing
+  `divergence_step`).
+- W1.B G4 `isinstance(approved_raw, bool)` (rejects truthy non-bool).
+- W1.C G2 empty audit window → `False` + `UserWarning`.
+- W1.F-1 `:signature` required in `_datom_to_wire_for_audit` (raises
+  `ValueError` on absence).
+- W1.F-2 Simplified `_raise_gate_failure`.
+- W1.G G1/G2 contracts: `@runtime_checkable` ReplayEngine Protocol;
+  `divergence_step` required key; empty corpus → False+UserWarning;
+  audit-window pull mechanism documented in design doc.
+
+### Preserving changes (id-stability)
+
+`PLAN_CANONICAL_VERSION` unchanged at **1**. No changes to
+`_canonical_dict`, `_coerce`, or `_walk` semantics. All v0.6.0a1
+additions are new modules around the existing AST surface; existing
+`Node.id` hashes are bit-stable across this release.
+
+### Suite
+
+`1018 → 1084 passed, 7 xfailed` (+66 over v0.5.1 baseline; +3 W1
+pin tests).
+
 ## v0.4.0a1 (2026-04-25) — substrate-primitives: Dispatcher + walk rename
 
 ### Added

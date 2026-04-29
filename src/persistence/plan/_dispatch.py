@@ -60,6 +60,16 @@ class Dispatcher:
         """True if a handler is registered for ``tag``."""
         return tag in self._handlers
 
+    def get_handler(self, tag: str) -> Handler | None:
+        """Return the handler bound to ``tag``, or ``None`` if unbound.
+
+        Public accessor for callers that need to invoke the handler
+        themselves (e.g. ``execute()`` wraps the call in a per-node
+        ``try/except`` to capture failures). Mirrors ``has_handler`` but
+        returns the value instead of just the predicate.
+        """
+        return self._handlers.get(tag)
+
     def dispatch(self, node: Node, env: dict) -> list[Any]:
         """Walk ``node`` in DFS order; for each node with a registered
         handler, call it with ``(node, env)``; return results in walk order.

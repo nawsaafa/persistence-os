@@ -11,11 +11,31 @@ from pyrsistent import PMap, PSet, PVector, pmap, pvector
 from persistence.txn.errors import RefValueNotImmutable
 
 
-# Valid EDN keyword name shape (no leading colon — colon is the keyword
-# sigil, stripped at the Datom-store boundary). Matches alphanum + the
-# punctuation used in namespaced keyword names: ``./_-``. Used in
-# ``Ref.__post_init__`` to reject invalid ``spec_attr`` values.
-_SPEC_ATTR_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9./_-]*")
+# EDN keyword name shape (no leading colon — colon is the keyword sigil,
+# stripped at the Datom-store boundary). Per the EDN spec
+# (https://github.com/edn-format/edn — Symbols + Keywords sections):
+#
+#   - A name has at most ONE ``/`` (namespace separator); both segments
+#     follow symbol grammar.
+#   - A standard segment head is an alpha char or one of
+#     ``* ! _ ? $ % & = < >``.
+#   - The body chars include those plus digits and ``+ - . # :``.
+#   - Special leaders ``- + .`` are permitted only if the next char (if
+#     any) is non-digit — this disambiguates the symbol path from the
+#     number path (e.g. ``-1`` is a number, ``-foo`` is a symbol).
+#
+# Used in ``Ref.__post_init__`` to reject invalid ``spec_attr`` values.
+# v0.5.2 N8 tightening over v0.5.1 N3 ``[A-Za-z0-9][A-Za-z0-9./_-]*``:
+# gains rejections of leading-digit segments, multi-``/`` paths, empty
+# segments, and special-leader-then-digit; loosens to admit valid
+# EDN-shaped names like ``-foo``, ``foo123``, single-char ``+``/``-``/``.``.
+_STANDARD_HEAD = r"[A-Za-z*!_?$%&=<>]"
+_BODY = r"[A-Za-z0-9*+!\-_?$%&=<>.#:]"
+_SEG = (
+    rf"(?:{_STANDARD_HEAD}{_BODY}*"
+    rf"|[\-+.](?![0-9]){_BODY}*)"
+)
+_SPEC_ATTR_PATTERN = re.compile(rf"^{_SEG}(?:/{_SEG})?$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,17 +67,26 @@ class Ref:
         # Validate ``spec_attr`` shape eagerly: the Datom store enforces
         # only the leading-colon-strip rule on its ``a`` field, so without
         # this guard a malformed ``spec_attr`` would land as a wire-form
-        # attribute name only at commit time. EDN keyword names are
-        # alphanum + ``./_-``. Reject leading colon, whitespace, empty
-        # string. Raises ``ValueError`` rather than spec-layer SpecError
-        # because this is a structural invariant of Ref itself, not of
-        # any registered write-spec.
+        # attribute name only at commit time. We require an EDN keyword
+        # name (see ``_SPEC_ATTR_PATTERN`` above for the full grammar).
+        # Raises ``ValueError`` rather than spec-layer SpecError because
+        # this is a structural invariant of Ref itself, not of any
+        # registered write-spec.
         if not isinstance(self.spec_attr, str) or not _SPEC_ATTR_PATTERN.fullmatch(
             self.spec_attr
         ):
             raise ValueError(
                 f"Ref.spec_attr {self.spec_attr!r} must be a valid EDN keyword "
-                "name (alphanum + ./_-, no leading colon, no whitespace, non-empty)"
+                "name. EDN spec rules: non-empty; no leading ':' (the keyword "
+                "sigil is stripped at the Datom-store boundary); no whitespace; "
+                "at most one '/' (namespace separator) with non-empty segments "
+                "on both sides; each segment starts with an alpha or one of "
+                "'*!_?$%&=<>', OR with one of '-+.' followed by a non-digit "
+                "(the EDN second-char rule disambiguating symbols from numbers); "
+                "remaining chars are alphanumerics or one of '*+-!_?$%&=<>.#:'. "
+                "Examples that fail: '0/foo' (leading-digit segment), "
+                "'foo/bar/baz' (multi-'/'), '/foo' or 'foo/' (empty segment), "
+                "'-1'/'+42'/'.5' (special leader followed by digit)."
             )
 
     def __repr__(self) -> str:

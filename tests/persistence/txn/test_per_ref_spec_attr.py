@@ -149,24 +149,36 @@ def test_per_ref_spec_validation_fires_correct_spec(clean_spec_registry):
 # ---------------------------------------------------------------------------
 
 def test_invalid_spec_attr_shape_raises():
-    """Reject leading colon, whitespace, empty string, leading punctuation.
+    """Reject malformed EDN keyword names at Ref construction.
 
-    The Datom store strips a leading ``":"`` from ``a`` field, so a
+    The Datom store strips a leading ``":"`` from the ``a`` field, so a
     ``spec_attr`` like ``":colon"`` would silently land as ``"colon"``
-    on the wire — break that reflection by rejecting at Ref construction
-    time. Whitespace and empty string have no valid EDN keyword
-    interpretation. Leading slash / dot / dash violate EDN keyword name
-    shape (must start with alphanum).
+    on the wire — break that reflection by rejecting up front.
+    Whitespace and empty string have no valid EDN keyword interpretation.
+
+    v0.5.2 N8 additionally rejects: leading-digit segments
+    (``"0/foo"``, ``"42name"``), multi-``/`` paths (``"foo/bar/baz"``),
+    empty segments (``"/foo"``, ``"foo/"``), and the EDN second-char
+    rule (``"-1"``, ``"+42"``, ``".5"`` — a special leader ``-``/``+``/
+    ``.`` followed by a digit would parse as a number, not a symbol).
     """
     db = DB()
     bad_shapes = [
+        # v0.5.1 N3 baseline rejects
         ":colon",          # leading colon — Datom strips it; reject up front
         "bad name",        # whitespace
         "",                # empty
-        "/leading-slash",  # leading slash (not alphanum)
-        ".dot-first",      # leading dot
-        "-dash-first",     # leading dash
+        "/leading-slash",  # leading slash (empty namespace segment)
         "name\twith\ttab", # tab inside
+        # v0.5.2 N8 — newly gained rejections
+        "0/foo",           # leading-digit on namespace segment (EDN: head must be non-digit)
+        "42name",          # leading-digit on lone segment
+        "foo/bar/baz",     # multiple '/' (EDN: at most one)
+        "/foo",            # empty namespace segment
+        "foo/",            # empty name segment
+        "-1",              # special leader '-' + digit (EDN second-char rule)
+        "+42",             # special leader '+' + digit
+        ".5",              # special leader '.' + digit
     ]
     for bad in bad_shapes:
         with pytest.raises(ValueError, match="spec_attr"):
@@ -175,6 +187,41 @@ def test_invalid_spec_attr_shape_raises():
             db.new_ref(spec_attr=bad)
         with pytest.raises(ValueError, match="spec_attr"):
             Ref(eid="e1", db_id="db-X", spec_attr=bad)
+
+
+def test_valid_spec_attr_loosenings():
+    """v0.5.2 N8 — admit EDN-valid shapes the v0.5.1 N3 regex over-rejected.
+
+    The v0.5.1 ``[A-Za-z0-9][A-Za-z0-9./_-]*`` pattern required a
+    leading alphanumeric, which excluded EDN-valid bare symbols starting
+    with ``-``/``+``/``.`` whose second char is non-digit (per the EDN
+    second-char rule disambiguating symbols from numbers). N8 admits
+    these as well as Datomic-style internal-``:`` names. This test
+    pins the loosening so future regex regressions surface here.
+    """
+    permitted_shapes = [
+        # trailing digits — common Datomic convention
+        "foo123",
+        "count42",
+        "version2",
+        # leading symbol-chars where second char is non-digit (EDN-valid)
+        "-foo",
+        "+bar",
+        ".baz",
+        # single-char names — vacuously pass the second-char rule
+        "-",
+        "+",
+        ".",
+        # standard namespaced shapes — must still pass
+        "app.user/email",
+        "db/cas",
+        # internal ':' — Datomic-style nested namespacing
+        "foo:bar",
+    ]
+    for good in permitted_shapes:
+        # constructs without raising
+        r = Ref(eid="e1", db_id="d1", spec_attr=good)
+        assert r.spec_attr == good
 
 
 # ---------------------------------------------------------------------------

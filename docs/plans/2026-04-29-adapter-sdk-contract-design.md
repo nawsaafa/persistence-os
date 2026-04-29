@@ -6,7 +6,7 @@
 **Audience:** persistence-os engineering — Phase 1 substrate-completion stream
 **Predecessors:**
 - [`2026-04-27-persistence-os-v1.0-roadmap.md`](2026-04-27-persistence-os-v1.0-roadmap.md) — v1.0 ferrari-first roadmap
-- [`2026-04-28-v0.7.0a1-module-7-repl-design.md`](2026-04-28-v0.7.0a1-module-7-repl-design.md) — Module 7 REPL (token / capability / WS / JSON-RPC primitives this stream extends)
+- [`2026-04-28-v0.7.0a1-module-7-repl-design.md`](2026-04-28-v0.7.0a1-module-7-repl-design.md) — Module 7 REPL (token / capability / JSON-RPC primitives this stream extends; Module 7's WS transport is REPL-only and explicitly NOT used for the v0.8 MCP server — see ADR-15 § 5)
 - conductor track `persistence-os-product_20260429/STATUS.md` — Phase 1 substrate-completion plan, this stream is item #1
 - existing module surfaces: `src/persistence/{fact,effect,plan,replay,txn,spec,repl}/__init__.py`
 - pyproject.toml license: **AGPL-3.0-or-later** — load-bearing for the open-core decision
@@ -96,7 +96,8 @@ One new sub-package under `src/persistence/sdk/` with five new internal files, o
 | 9 | `src/persistence/sdk/mcp/_server.py` | MCP server: lifecycle (`initialize` → `notifications/initialized` → `tools/list`/`tools/call` / `resources/*`); JSON-RPC dispatch; transport stdio + Streamable HTTP per ADR-15 | NEW |
 | 10 | `src/persistence/sdk/mcp/_tools.py` | the 6 tools (`persistence_*`) as pure functions over `(Substrate, args) → Result`; budget enforcement per ADR-13 | NEW |
 | 11 | `src/persistence/sdk/mcp/_budgets.py` | `MCP_REPLAY_MAX_WINDOW`, `MCP_REPLAY_MAX_WALLCLOCK_S`, `MCP_REPLAY_RATE_LIMIT_PER_TOKEN` constants per ADR-13 | NEW |
-| 12 | `src/persistence/sdk/mcp/__main__.py` | `python -m persistence.sdk.mcp` runner (token-file / env-var bootstrap per ADR-15a) | NEW |
+| 11a | `src/persistence/sdk/mcp/_http_security.py` | EXPERIMENTAL Streamable-HTTP transport: bind-loopback enforcement, Origin allowlist + DNS-rebinding mitigation, Bearer-token authn middleware, per-connection session, rate-limit per ADR-15 § 5 + ADR-15b — see G12 | NEW (experimental, not @stable in v0.8) |
+| 12 | `src/persistence/sdk/mcp/__main__.py` | `python -m persistence.sdk.mcp` runner (token-file / env-var bootstrap per ADR-15a; `--enable-experimental-http` gate per ADR-15b) | NEW |
 | 13 | `docs/spec/adapter-contract-v0.8.md` | stability surface spec; ~300 lines (auto-generated from decorators + TypedDicts + `_NAMES`) | NEW |
 | 14 | `docs/spec/adapter-contract-v0.8.lock.json` | machine-readable signature-sha lockfile per ADR-16 + G10b; ~80 lines | NEW |
 | 15 | `scripts/gen_adapter_contract.py` | spec + lockfile generator; CI gate per G7 + G10 | NEW |
@@ -225,10 +226,43 @@ All 6 tools publish a JSON-Schema `inputSchema` and (when emitting structured da
 
 ### 5.1 Tool envelope details
 
-- **`inputSchema`** is a JSON-Schema `draft-2020-12` object with `type: object`, `additionalProperties: false`, `required` populated. Schemas are checked by the dispatcher BEFORE any handler runs (`-32602 invalid params` on schema-fail).
+- **`inputSchema`** is a JSON-Schema document declaring `$schema: "http://json-schema.org/draft-07/schema#"` (W2-revised — see "Schema Profile v0.8" pin below) with `type: object`, `additionalProperties: false`, `required` populated. Schemas are checked by the dispatcher BEFORE any handler runs (`-32602 invalid params` on schema-fail).
 - **`outputSchema`** is published for every tool that returns `structuredContent`. The dispatcher validates the structured payload against `outputSchema` before sending — a server-side validator failure surfaces as `isError: true` + reason `internal_output_validation`.
 - **`isError: true`** is reserved for *handled* failures the model is meant to see and react to (capability denial, retractable input, budget exhausted). *Unhandled* failures (transport, validation, internal) use the JSON-RPC `error` envelope.
-- **Pagination.** `recall` and `audit_window` accept `cursor` and return `next_cursor`; opaque server-side cursor format pinned to base64url'd `(last_eid_or_tx, salt)`.
+- **Pagination cursors.** `recall` and `audit_window` accept `cursor` and return `next_cursor`. Per W2 NIT-5: cursor format is `base64url(HMAC-SHA256(secret, payload) || payload || version_byte)` where payload is the canonical-JSON of `{last_eid_or_tx: …, issued_at: iso}`. Cursors are **opaque-but-decodable-with-server-secret**: clients must NOT decode them; the HMAC binds them to the server instance so a cursor from one server cannot be replayed against another. Server secret rotates on process restart (cursors do not survive restart, which is acceptable v0.8 behavior — recall + audit_window callers re-issue from cursor=null on reconnection).
+
+### 5.1.1 Schema Profile v0.8 (W2 BLOCKER-2 closure)
+
+MCP client SDKs in the wild have uneven support for JSON-Schema draft-2020-12 features (e.g. `$dynamicRef`, `unevaluatedProperties`, dependent-schemas under nested keywords). To avoid generator-change-as-contract-change drift AND maximize cross-client interoperability, v0.8 generates schemas under a **conservative profile** — the strict subset of [JSON Schema draft-07](https://json-schema.org/draft-07) that `pydantic.TypeAdapter` and `jsonschema-validator>=4` both consume losslessly, intersected with what current MCP clients (Claude Desktop, Cursor, Cline, Continue, openai-agents-python) handle:
+
+**Allowed keywords:** `type`, `properties`, `required`, `additionalProperties` (always `false` at object root), `items`, `minItems`, `maxItems`, `minLength`, `maxLength`, `minimum`, `maximum`, `enum`, `const`, `pattern`, `description`, `default`, `examples`. `format` allowed for `uuid` / `date-time` / `uri` only.
+
+**Disallowed keywords (generator rejects with `schema_profile_violation` at startup):** `$ref` (inline only — no schema reuse via `$defs`/`$ref` to keep schemas one-pass-readable for clients), `$dynamicRef`, `$dynamicAnchor`, `if`/`then`/`else`, `dependentSchemas`, `unevaluatedProperties`, `unevaluatedItems`, `not`, `oneOf`/`anyOf`/`allOf` (use `enum` instead — TypedDicts disallowing union types is the upstream constraint), `prefixItems`, custom `format` values beyond the three above.
+
+**Schema lockfile.** `adapter-contract-v0.8.lock.json` includes a `schemas` block with the SHA-256 of each tool's canonical-JSON `inputSchema` AND `outputSchema`:
+
+```json
+{
+  "schemas": {
+    "persistence_remember": {
+      "input_schema_sha256": "abc123...",
+      "output_schema_sha256": "def456..."
+    },
+    ...
+  }
+}
+```
+
+CI gate G10b is extended to fail on any schema-SHA diff. A generator change that produces semantically-equivalent but byte-different schemas is THUS a contract change requiring a minor-version bump — the lockfile makes drift detectable, not silently propagated. The generator's profile-violation check guards against accidentally widening the surface.
+
+**TypedDict → JSON Schema generator pin.** The generator is a thin shim around `pydantic.TypeAdapter(TypedDict_class).json_schema(mode='validation')` post-processed to:
+
+1. Strip `$defs` (forces inline);
+2. Reject any disallowed keyword (raise `SchemaProfileViolation`);
+3. Sort keys lexically for byte-identical output;
+4. Stamp `$schema: "http://json-schema.org/draft-07/schema#"` at the root.
+
+If pydantic emits a 2020-12-only construct that the profile disallows, the generator raises at build time and the implementer rewrites the TypedDict to fit the profile. The Phase 1 implementation will exercise this on all 6 tool TypedDicts before SDK-FINAL.1.
 
 ### 5.2 Error model + ADR-15 (tool-error mapping)
 
@@ -239,7 +273,7 @@ All 6 tools publish a JSON-Schema `inputSchema` and (when emitting structured da
 | Capability denied | tool result | `isError: true`, `content[0].text="capability denied: <op>"`, `structuredContent: {error_code: 'capability_denied'}` |
 | Token expired / revoked | JSON-RPC envelope | `code=-32001 capability/token denied`, reused from Module 7 REPL band |
 | Budget exhausted (replay/audit) | tool result | `isError: true`, `structuredContent: {error_code: 'budget_exhausted', retry_after_s}` |
-| Cursor stale (`view_at` parent moved) | JSON-RPC envelope | `code=-32008 stale cursor` (reused from Module 7 REPL band) |
+| ~~Cursor stale (`view_at` parent moved)~~ — **reserved for v0.9** | JSON-RPC envelope | `code=-32008 stale cursor` (reused from Module 7 REPL band; v0.8 has no MCP tool that consumes a cursor as input — see ADR-14 — so this row is non-emitting in v0.8 and the code is reserved-only) |
 
 ### Resources (server → LLM)
 
@@ -249,7 +283,18 @@ All 6 tools publish a JSON-Schema `inputSchema` and (when emitting structured da
 
 ### Wire protocol
 
-The server speaks **MCP `2025-06-18`** over **stdio** (default; the only required transport for v0.8 conformance) and OPTIONALLY over **Streamable HTTP** (`--transport http`, conforming to the spec's Streamable-HTTP transport — POST for client→server, SSE for server→client streams; see [MCP transports](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)). **WebSocket is NOT a standard MCP transport in the targeted spec revision** and is therefore not advertised by the SDK. (The Module 7 REPL `_ws.py` continues to serve the in-house REPL on its own WS port; reusing it for MCP would require either MCP-spec-extension advocacy or a custom non-conformant subset, both of which are explicitly out-of-scope for v0.8.) Capability tokens issued via `python -m persistence.sdk.mcp --mint-token --capabilities mcp.remember,mcp.recall,mcp.forget,mcp.audit-read,mcp.replay,mcp.view --label <label>` follow the existing Module 7 token ceremony — see § 5.3 below for the cross-process token-handoff path that subsumes the stdio-subprocess case.
+**v0.8 conformance target:** stdio is the **sole required transport for v0.8 contract conformance**. Streamable HTTP is **EXPERIMENTAL in v0.8** (`--transport http`, gated behind a launch-time `--enable-experimental-http` flag, prints a red banner at startup, and is explicitly NOT covered by the v0.8 stability decorator system) — its auth + Origin-validation + multi-client semantics are pinned at "loopback-only, single-token, single-process, refuse non-localhost Origin" defaults but the surface itself may break in any patch release. The full conformance + auth specification for Streamable HTTP is deferred to **v0.9**, where it lands as a `@stable("v0.9")` adjunct alongside the privacy-arch work. **WebSocket is NOT a standard MCP transport in the targeted spec revision** and is therefore not advertised by the SDK. (The Module 7 REPL `_ws.py` continues to serve the in-house REPL on its own WS port; reusing it for MCP would require either MCP-spec-extension advocacy or a custom non-conformant subset, both of which are explicitly out-of-scope for v0.8.)
+
+**Streamable-HTTP experimental defaults (v0.8 only).** When `--enable-experimental-http --transport http` is set:
+
+- **Bind:** `127.0.0.1:<port>` ONLY. Server refuses to bind to `0.0.0.0` or any non-loopback address (errors at startup with `bind_non_loopback_refused`). Operators who want LAN/public exposure must run an external reverse proxy and configure it themselves; the SDK ships no `--bind-public` flag.
+- **Origin validation:** Server checks the `Origin` request header on every POST + SSE GET. Allowed values are `null` (no Origin, e.g. local fetch from same-origin), `http://localhost:<port>`, `http://127.0.0.1:<port>`, and exact matches in the `--http-allowed-origin` allowlist (multi-valued; defaults to empty). Mismatches return `403 Forbidden` with body `{"error":"origin_not_allowed","origin":"<value>"}`. This is the standard mitigation for [DNS-rebinding attacks against localhost servers](https://en.wikipedia.org/wiki/DNS_rebinding) and aligns with the MCP spec's HTTP-transport security guidance.
+- **Auth:** Every HTTP request must carry `Authorization: Bearer <token>` matching the bootstrapped capability token (per ADR-15a). Missing / wrong / revoked → `401 Unauthorized` with body `{"error":"capability_denied"}`. The token is single-valued per server invocation in v0.8 (one process = one token = one client identity); multi-token / multi-client is a v0.9 surface.
+- **Sessions:** Each TCP connection presents a token; sessions are per-connection (no session resumption across reconnect in v0.8). The connection's `Authorization` token determines the capability set for all calls on that connection.
+- **Rate-limit:** Per-token rate limits inherit from ADR-13 (replay) and the existing Module 7 token-rate-limit handler. Cross-tool global rate is bounded at 60 req/sec per token (configurable via `--http-rate-limit-rps`).
+- **TLS:** Plaintext only in v0.8 (loopback assumption). Production deployments wrap behind a reverse proxy (nginx / Caddy / Traefik) that handles TLS — same posture as Module 7 REPL.
+
+These defaults are NOT promised stable across patch releases (the `--enable-experimental-http` gate is the contract). Stdio remains the only `@stable("v0.8")` transport. Tokens issued via `python -m persistence.sdk.mcp --mint-token --capabilities mcp.remember,mcp.recall,mcp.forget,mcp.audit-read,mcp.replay,mcp.view --label <label>` follow the existing Module 7 token ceremony — see § 5.3 below for the cross-process token-handoff path that subsumes the stdio-subprocess case.
 
 ### 5.3 Token bootstrap across stdio-subprocess (cross-process semantics)
 
@@ -275,12 +320,16 @@ The server NEVER accepts the token over stdin. The `--token TOKEN` argv form is 
 
 **Decision.** The `Substrate` class exposes the existing Module surfaces via attribute access (`s.fact`, `s.effect`, etc.). It does NOT wrap, proxy, or re-implement any Module method. Adapter authors who need fine control reach through to the underlying Module (`s.fact.transact(...)`).
 
-**Contract-boundary clarification (W1 closure of R1 BLOCKER 3).** The `s.fact` / `s.effect` / `s.plan` / `s.replay` / `s.txn` / `s.spec` / `s.repl` attributes are **escape hatches, not contract**. The v0.8 adapter contract covers ONLY the symbols re-exported under `persistence.sdk.*` and explicitly decorated `@stable("v0.8")` (per ADR-5 + the spec-doc generator at G7). Adapter authors are documented to:
+**Contract-boundary clarification (W1 + W2 closure of R1 BLOCKER 3 + R2 SHOULD-FIX 3).** The `s.fact` / `s.effect` / `s.plan` / `s.replay` / `s.txn` / `s.spec` / `s.repl` attributes are **escape hatches, not contract**. The v0.8 adapter contract covers ONLY the symbols re-exported under `persistence.sdk.*` and explicitly decorated `@stable("v0.8")` (per ADR-5 + the spec-doc generator at G7). Adapter authors are documented to:
 
 - pin their imports to `from persistence.sdk import Substrate` + the curated `persistence.sdk.<sub>` re-exports;
 - treat any reach-through (`s.fact.<anything>`) as **out-of-contract** — its shape may change at any release, including patch bumps;
 - the v0.8 contract spec doc has a top-level box stating "The reachable surface from a `Substrate` instance is larger than the contract; only `persistence.sdk.*` symbols decorated `@stable("v0.8")` are covered. Module attributes (`s.fact` etc.) are escape hatches and may break at any release";
 - the `Substrate.fact` / etc. attribute getters carry a docstring + a `@experimental` marker (NOT `@stable`) so the decorator-driven spec generator (G7) does NOT advertise them in the contract.
+
+**Escape-hatch first-access telemetry (W2 SHOULD-FIX 3 closure).** The first time per-session that an adapter accesses any of the 7 escape-hatch attributes (`s.fact`, `s.effect`, `s.plan`, `s.replay`, `s.txn`, `s.spec`, `s.repl`), the Substrate emits exactly one `:sdk/escape-hatch-access` audit entry recording `{module: "fact" | ...}`, `caller_filename` (best-effort via `sys._getframe`), `session_id`. Subsequent accesses to the same attribute in the same session are silent (no spam). This is a measurement signal — adapter authors who never reach through have a clean audit trail; adapter authors who do reach through generate a record we can use during Phase 2 dogfooding to identify which Module methods need to be folded into a curated `persistence.sdk.<sub>` namespace at v0.9. Adapter authors are NOT required to suppress these entries — they are diagnostic provenance, not warnings or errors. The session-id-keyed deduplication is server-state only; cross-session reach-through emits one entry per session per attribute, which is the right signal granularity for a "is this load-bearing in the wild" observation.
+
+A second, opt-in alternative (`s.escape.fact()` style method-call form) was considered and rejected for v0.8: it would force a one-line refactor on every existing internal call-site (`db = s.fact` style code already lives in v0.7.0a1 examples), and the audit-telemetry path provides the same signal without the ergonomic break. v0.9 may revisit if telemetry data argues for the harder boundary.
 
 **Why option-2 (escape hatches NOT contract) over option-1 (wrap-everything-in-curated-namespaces) for v0.8.** Option-1 would force us to design and freeze a curated namespace API for every `DB`/`Runtime`/etc. method an adapter might want, in 5 days, before the coding-agent build (Phase 2) tells us which Module methods adapters actually reach for. That is the worst possible time to commit. Option-2 keeps escape-hatch ergonomics for Phase-2 dogfooding and uses the spec doc + decorator metadata to make the contract boundary explicit and machine-checkable. v0.9 (post Phase 2) is the right time to fold any reach-through pattern that proves load-bearing into a curated stable namespace.
 
@@ -445,6 +494,18 @@ The fact-store-backed token registry (Module 7 ADR-3) is the source of truth; bo
 
 **Consequence.** v0.8 ships three bootstrap modes (file, env, argv-dev-only). G2 covers all three. Token leakage via `ps` is impossible in production paths. R4 (risk table) gains a new row for cross-process token-handoff to make this explicit.
 
+### ADR-15b: Streamable HTTP is EXPERIMENTAL in v0.8 — explicit non-conformance
+
+**Decision.** The `--transport http` Streamable-HTTP path is **experimental in v0.8** and is NOT part of the v0.8 stability contract. It is gated behind `--enable-experimental-http` (refuses to start without it), prints a red `EXPERIMENTAL` banner at startup, and is excluded from the `@stable("v0.8")` decorator audit set. Any aspect of the HTTP path may break in any patch release. Stdio is the sole `@stable("v0.8")` transport.
+
+**Why experimental, not full conformance, in v0.8.** Adding a network-facing HTTP transport to a 5-day window means specifying (at minimum): (a) localhost-bind defaults + the refusal to bind elsewhere, (b) Origin validation against DNS-rebinding, (c) Authorization header semantics + token-to-session mapping, (d) per-connection rate limiting, (e) interaction with the cross-process token bootstrap path. Each item is a security surface that a hostile reviewer would (rightly) probe. v0.9's privacy-arch work is the natural venue to fold these in alongside the confidentiality story (ADR-17). v0.8 ships the experimental path with conservative locked defaults so internal testing and Phase-2 dogfooding can validate the shape, but does NOT ship a stability promise.
+
+**Pinned defaults in v0.8 (§ 5 wire-protocol block).** Loopback-only bind, Origin allowlist with localhost defaults, single-token-per-server, Bearer-token Authorization, plaintext (TLS via reverse proxy), per-token rate limit. These defaults ARE asserted by gate G12 — the EXPERIMENTAL marker means consumers shouldn't pin their integration to them, NOT that the defaults are unenforced. The implementation enforces them; the contract just doesn't promise to keep them stable.
+
+**Path to stability.** v0.9 design-doc (Phase 3 privacy-arch) re-evaluates the HTTP path against: (a) multi-tenant deployments, (b) per-token capability sets across connections, (c) TLS termination, (d) OAuth 2.0 / SSO bootstrap as alternative to `--token-file`, (e) audit-emission semantics for HTTP-side metadata (Origin, IP, User-Agent). The v0.9 path may either freeze the v0.8 defaults as `@stable("v0.9")` or supersede them.
+
+**Consequence.** The MCP server's `--version` banner shows `transport: stdio (stable) | http (EXPERIMENTAL — not covered by v0.8 contract)`. The contract spec doc explicitly states the same.
+
 ### ADR-16: `@stable("v0.8")` semantics — what counts as a breaking change
 
 **Decision.** A symbol decorated `@stable("v0.8")` carries the following machine-checkable promises across all `0.8.x` releases. Breaking ANY of these is a contract violation that requires a minor-version bump (`0.9.0`):
@@ -555,6 +616,25 @@ Three sub-gates, all asserted against the running MCP server from G2:
 - README, spec doc, AND `python -m persistence.sdk.mcp --version` output all emit the line "v0.8 MCP makes NO confidentiality guarantees — for trusted-host scenarios only; sensitive-data deployments wait for v0.9 privacy-arch."
 - A unit test grep-asserts the line is present in all three.
 
+### G12 — Streamable-HTTP experimental defaults regression test (W2 BLOCKER 1)
+
+The `--enable-experimental-http --transport http` server is exercised in a separate test module (NOT in the conformance suite — the gate emits `experimental` markers everywhere). Tests assert:
+
+- **G12a (bind):** `--bind 0.0.0.0` exits with `bind_non_loopback_refused` at startup. `--bind 127.0.0.1` succeeds.
+- **G12b (Origin):** A POST with `Origin: http://evil.example` returns `403 origin_not_allowed`. A POST with `Origin: http://localhost:<port>` succeeds. A POST with no Origin header succeeds. The `--http-allowed-origin http://my.dev` flag adds that origin to the allowlist.
+- **G12c (Auth):** A POST with no `Authorization` header returns `401 capability_denied`. A POST with `Authorization: Bearer <wrong-token>` returns `401`. A POST with the correct token succeeds. A POST after `revoke_token` of the in-use token returns `401`.
+- **G12d (Banner + experimental marker):** Server startup with `--enable-experimental-http` prints a red-coded banner to stderr containing `EXPERIMENTAL` and a link to the v0.9 stability promise. A unit test grep-asserts the banner text.
+- **G12e (Rate-limit):** 61 successive successful POSTs in <1 second; 60 succeed, the 61st returns `429 rate_limit_exceeded` with `Retry-After`.
+
+These gates are NOT part of the v0.8 contract conformance suite (HTTP is experimental); they are part of the v0.8 *implementation* test suite to ensure that the experimental defaults the doc commits to are actually enforced. v0.9 will fold the HTTP path into the conformance suite when the surface stabilizes.
+
+### G13 — Schema Profile v0.8 enforcement (W2 BLOCKER 2)
+
+- **G13a:** The generator (`scripts/gen_adapter_contract.py`) on every TypedDict produces a JSON-Schema document with `$schema: "http://json-schema.org/draft-07/schema#"` and zero disallowed keywords (per § 5.1.1 closed list). Disallowed keyword usage at any nesting depth raises `SchemaProfileViolation`.
+- **G13b:** Every emitted schema is validated by `jsonschema-validator>=4` against draft-07 metaschema. Profile-conformant + metaschema-valid both required.
+- **G13c:** Every tool's `inputSchema` AND `outputSchema` SHA-256 is recorded in `adapter-contract-v0.8.lock.json` `schemas` block. CI gate fails on any SHA diff.
+- **G13d:** The 6 tools' canonical TypedDicts in `_types.py` are exercised by a smoke test that calls `pydantic.TypeAdapter(TD).validate_python({...})` against representative payloads (one valid + one invalid per tool); validates the generator-emitted JSON-Schema accepts/rejects matching values.
+
 ---
 
 ## 8. Task breakdown (subagent dispatch model)
@@ -610,6 +690,8 @@ R1 round-1 surfaced that the original 5 OQs were not the actual blockers. The li
 | R10 | **(R1 W1 add)** `replay_check` resource burn / state exfil via diff returns | medium | high | ADR-13 — fixed budgets (window 256, wallclock 5s, rate 6/min/token), result is verdict+reason-code only, NEVER raw diff. G8 asserts all four budget paths and the closed-key-set output shape. |
 | R11 | **(R1 W1 add)** Cross-process token bootstrap from MCP host leaks token via argv (`ps`) | medium | high | ADR-15a — `--token-file` (read+unlink) and `PERSISTENCE_MCP_TOKEN` env-var are the supported paths; `--token` argv form deprecation-warns. G2 fixture uses `--token-file` exclusively. |
 | R12 | **(R1 W1 add)** First-party MCP exposes plaintext content with no privacy guarantees → users assume confidentiality where none exists | medium | high | ADR-17 — explicit non-goal in v0.8; banner / README / spec-doc / `--version` all carry the "no confidentiality guarantees in v0.8" line. G11 asserts the line appears in all three artifacts. v0.9 privacy-arch is the proper venue. |
+| R13 | **(R1 W2 add)** Local-web attack surface from experimental Streamable-HTTP transport (DNS-rebinding, cross-origin token theft, multi-client confusion) | medium | high | ADR-15b — HTTP path is EXPERIMENTAL in v0.8 (not @stable, gated behind `--enable-experimental-http`, prints `EXPERIMENTAL` banner). Pinned defaults: loopback-only bind (refuses non-loopback), Origin allowlist with localhost defaults, Bearer-token Authorization, single-token-per-server-process, per-token rate limit. G12a-e asserts each default is enforced. Stability promise deferred to v0.9 alongside privacy-arch. |
+| R14 | **(R1 W2 add)** Schema generator drift / cross-client incompatibility from MCP clients with uneven JSON-Schema 2020-12 support | medium | high | ADR-15 § 5.1.1 (Schema Profile v0.8) pins draft-07 with conservative-keyword subset; generator rejects disallowed keywords; per-tool schema SHA recorded in `adapter-contract-v0.8.lock.json`. G13a-d asserts profile + lockfile + metaschema validity + round-trip pydantic↔JSON-Schema. |
 
 ---
 

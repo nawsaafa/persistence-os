@@ -14,6 +14,7 @@ import functools
 import uuid
 from typing import Any, Callable, Optional
 
+from persistence.txn.atom import Atom
 from persistence.txn.errors import RefValueNotImmutable
 from persistence.txn.ref import Ref, is_immutable_value
 
@@ -209,9 +210,61 @@ def _dosync(
 
     raise RuntimeError("unreachable: dosync invocation pattern not recognised")
 
+def _atom(self: Any, eid: str, *, initial: Any) -> Atom:
+    """DB.atom(eid, *, initial) — construct a fresh single-cell CAS atom.
+
+    Atoms are the "I want CAS without a transaction" ergonomic fast-path
+    Clojure ``Atom.java`` ships. ``initial`` is written immediately under
+    the fixed atom attribute (``"value"``) on ``eid`` and returned as the
+    atom's starting state.
+
+    Raises ``ValueError`` if ``eid`` already has a ``:value`` datom — the
+    constructor is for fresh allocation only. Use :meth:`Atom.reset` if
+    you want to overwrite an existing atom's value.
+
+    The pre-existence check uses the same log-walk as
+    ``Atom._read_latest_value``: looks for any non-invalidated, open-
+    interval ``"value"`` assert under ``eid``.
+    """
+    if not isinstance(eid, str):
+        raise TypeError(f"eid must be str, got {type(eid).__name__}")
+    # Pre-existence guard. Walks the log once; for fresh DBs and small
+    # logs this is O(N) but cheap. The same scan ``Atom._read_latest_value``
+    # uses, but we don't need to instantiate the atom yet — keeps the
+    # error path on ValueError instead of constructing+probing.
+    for d in self.log():
+        if d.e != eid or d.a != "value":
+            continue
+        if d.op != "assert":
+            continue
+        if d.invalidated_by is not None:
+            continue
+        if d.valid_to is not None:
+            continue
+        raise ValueError(
+            f"db.atom: eid {eid!r} already has an open ``:value`` datom; "
+            f"use atom.reset(...) to overwrite an existing atom's value."
+        )
+
+    atom = Atom(eid=eid, db_id=_get_db_id(self), _db=self)
+    # Write the initial value via the same path swap/reset use. Holding
+    # the lock here is unnecessary — there's no read-modify-write window
+    # at construction (the existence check above already failed-fast on
+    # any prior assert) — but db.transact internally takes store._lock
+    # via allocate_and_append, so the write itself is still atomic w.r.t.
+    # other writers.
+    self.transact([{
+        "e": eid,
+        "a": "value",
+        "v": initial,
+        "valid_from": self._clock(),
+    }])
+    return atom
+
+
 def _attach_txn_methods(db_cls: type) -> None:
-    """Attach the txn DB-level methods (``ref``, ``new_ref``, ``dosync``)
-    to ``db_cls``.
+    """Attach the txn DB-level methods (``ref``, ``new_ref``, ``dosync``,
+    ``atom``) to ``db_cls``.
 
     Re-entrant safe — repeated calls overwrite the attributes with the
     same module-level functions, so the result is unchanged. Test code
@@ -220,6 +273,7 @@ def _attach_txn_methods(db_cls: type) -> None:
     db_cls.ref = _ref            # type: ignore[attr-defined]
     db_cls.new_ref = _new_ref    # type: ignore[attr-defined]
     db_cls.dosync = _dosync      # type: ignore[attr-defined]
+    db_cls.atom = _atom          # type: ignore[attr-defined]
 
 
 __all__ = ["_attach_txn_methods"]

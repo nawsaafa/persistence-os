@@ -151,6 +151,19 @@ _intent_element_spec = keys(
         ":kwargs": map_of(str_(), _edn_value_spec),
     },
 )
+# v0.5.2 § F3 — per-element shape for ``:persistence.txn/commute-log``.
+# Each entry is a fixed-key map of ``{":ref": eid_str, ":fn-id": fn_id_str,
+# ":args": [edn_value_or_seq, ...]}``. ``:args`` reuses ``_EdnValueSpec``
+# (which accepts lists/tuples/dicts/scalars but rejects datetime + custom
+# classes), wrapped at the top level by the registered ``seq_of`` so a
+# bare list-of-args can be conformed positionally.
+_commute_element_spec = keys(
+    required={
+        ":ref": str_(),
+        ":fn-id": str_(),
+        ":args": _edn_value_spec,
+    },
+)
 
 
 def register_txn_specs() -> None:
@@ -175,6 +188,12 @@ def register_txn_specs() -> None:
     # ``seq_of(_uuid_str_spec)``, which was registered before the intent-log
     # was ever emitted on a commit datom.
     register(":persistence.txn/intent-log", seq_of(_intent_element_spec))
+    # v0.5.2 § F3 — body-order list of commute reapplications. Empty list
+    # when the body never called ``tx.commute``. ``:args`` is permissive
+    # (any EDN-conformant value) because the curated registry's fns
+    # accept arbitrary positional shapes (int for inc-by, frozenset/list
+    # for set-union, dict/PMap for dict-merge-shallow).
+    register(":persistence.txn/commute-log", seq_of(_commute_element_spec))
     register(":persistence.txn/commit", _uuid_str_spec)
 
 

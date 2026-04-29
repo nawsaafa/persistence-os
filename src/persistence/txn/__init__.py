@@ -3,7 +3,7 @@
 See ``docs/plans/2026-04-27-v0.5-txn-design.md`` for the full design.
 """
 
-__version__ = "0.5.0a1"
+__version__ = "0.5.2"
 
 from persistence.txn._commute import (
     lookup_commute,

@@ -67,6 +67,35 @@ class NestedDosyncNotSupported(TxnError):
     """
 
 
+class AtomCASExhausted(TxnError):
+    """Raised when ``Atom.swap`` exhausts ``max_retries`` without committing.
+
+    Under the writer-lock idiom (``with db.store._lock:`` held across
+    read+write) this should never trigger — the lock guarantees no
+    interleave between the read and the transact, so the first attempt
+    always succeeds. The cap is defensive against future lock-free CAS
+    fast paths and against pathological ``fn`` callbacks that themselves
+    raise (in which case retry is the wrong remedy — ``swap`` propagates
+    the body exception immediately rather than swallowing it under
+    retry, but the bound is here as a backstop).
+    """
+
+
+class AtomInDosyncProhibited(TxnError):
+    """Raised when any atom op is invoked under an active ``dosync`` body.
+
+    persistence-os's atom writes are NOT in the ``dosync`` intent-queue
+    + retry domain. Permitting them inside would punch a non-replayable
+    hole in the audit chain — atom writes wouldn't appear in commit-id
+    provenance, and dosync replay would not reproduce the same atom
+    state. The user's in-txn read/write surface is ``tx.deref`` /
+    ``tx.assoc`` / ``tx.alter``. See v0.5.2 design doc § F1
+    "Intentional Clojure-parity deviation" block (this is a deliberate
+    deviation from Clojure, where ``swap!`` inside ``dosync`` runs
+    immediately).
+    """
+
+
 __all__ = [
     "TxnError",
     "TxnRetryExhausted",
@@ -75,4 +104,6 @@ __all__ = [
     "RefValueNotImmutable",
     "EffectInIoBlock",
     "NestedDosyncNotSupported",
+    "AtomCASExhausted",
+    "AtomInDosyncProhibited",
 ]

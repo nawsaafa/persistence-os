@@ -3,9 +3,17 @@
 See ``docs/plans/2026-04-27-v0.5-txn-design.md`` for the full design.
 """
 
-__version__ = "0.5.0a1"
+__version__ = "0.5.2"
 
+from persistence.txn._commute import (
+    lookup_commute,
+    register_commute,
+    unregister_commute,
+)
+from persistence.txn.atom import Atom
 from persistence.txn.errors import (
+    AtomCASExhausted,
+    AtomInDosyncProhibited,
     EffectInIoBlock,
     NestedDosyncNotSupported,
     RefBranchMismatch,
@@ -18,17 +26,23 @@ from persistence.txn.ref import Ref, freeze, is_immutable_value
 from persistence.txn.transaction import Transaction
 
 __all__ = [
+    "Atom",
+    "AtomCASExhausted",
+    "AtomInDosyncProhibited",
     "EffectInIoBlock",
     "freeze",
     "is_immutable_value",
+    "lookup_commute",
     "NestedDosyncNotSupported",
     "Ref",
     "RefBranchMismatch",
     "RefValueNotImmutable",
+    "register_commute",
+    "Transaction",
     "TxnDeadlineExceeded",
     "TxnError",
     "TxnRetryExhausted",
-    "Transaction",
+    "unregister_commute",
     "__version__",
 ]
 

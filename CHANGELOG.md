@@ -3,6 +3,78 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.5.2 — 2026-04-29 (Module 5: Txn — Clojure-parity closure)
+
+Module-5 Clojure-parity sub-version that lives next to the v0.7.0a1
+substrate trunk (branched from v0.7.0a1 `5deca24`, merged into substrate
+trunk via `--no-ff` for the cumulative train into `main`). The package
+version stays at v0.7.0a1 on this train; v0.5.2 is the txn-module
+internal version stamp tracked in `CHANGELOG-txn.md` (see also
+`docs/plans/2026-04-29-v0.5.2-clojure-parity-design.md` for design and
+ADR rationale).
+
+Six closures across N6 / N7 / N8 / F1 / F2 / F3:
+
+- **N6** — `tx.alter` Hypothesis `@given` byte-identity at
+  `max_examples=200` over a curated `_ALTER_FNS` table.
+- **N7** — `tx.effect` Hypothesis `@given` byte-identity at
+  `max_examples=200`; audit-chain projection helper using `position`
+  surrogate for `prev_hash` (because `txn_commit` UUID hashes into entry
+  content); deterministic `_recording_handler` conftest.
+- **N8** — `Ref.spec_attr` regex tightened to EDN-keyword grammar
+  (rejects leading-digit segments, multi-`/`, empty segments,
+  special-leader-then-digit; permits trailing digits, `-foo`/`+bar`/`.baz`).
+- **F1** — Atoms (single-cell CAS over datom-refs): `Atom` frozen
+  dataclass + `db.atom(eid, *, initial)` + `swap` / `compare_and_set` /
+  `reset` / `deref`. CAS uses spanning `store._lock`. Atom-in-dosync
+  prohibition raises `AtomInDosyncProhibited` (intentional Clojure-parity
+  deviation — preserves audit-chain replayability).
+- **F2** — `tx.ensure(ref)` read-set padding: returns `deref`'d snapshot
+  AND adds to `ensure_set`. Conflict-detection union at commit reads
+  `read_set | ensure_set | write_set`. Provenance emits
+  `:persistence.txn/ensure-set` separately so auditors can distinguish
+  "deref'd for value" vs "padded for conflict-detection only".
+- **F3** — `tx.commute(ref, fn_id, *args)` two-phase eager-at-body +
+  reapply-at-commit: curated registry of 4 fns (`inc-by`, `sum-into`,
+  `set-union`, `dict-merge-shallow`); `register_commute` gated by
+  `PERSISTENCE_TXN_ALLOW_RUNTIME_REGISTRATION` env sentinel; commute
+  refs deliberately NOT added to `read_set` (conflict-free by design);
+  4 intra-txn cases specified — assoc-then-commute and commute-then-assoc
+  both drop commute on `write_set` membership at commit (uniform
+  invariant). Provenance emits `:persistence.txn/commute-log` in
+  body-order.
+
+### ARIS gate
+
+- **R1 design fitness:** PASS at mean **8.6 / min 8** after 2 W-cycles.
+- **R2 code quality:** PASS at mean **8.75 / min 8.6** after 2 rounds
+  (codex `gpt-5.2` hard-mode high-reasoning). Round-1 PASSed gate at
+  8.53 / 8.2 with 2 MAJORs flagged; W1 closed both in `ed3ad4a`
+  (MAJOR-1: `db.atom()` allocation race — spanning `store._lock` at
+  `_db_extension.py:240` + regression test
+  `test_db_atom_concurrent_allocation_linearises`; MAJOR-2:
+  `Transaction.commute()` docstring case-3 contradiction — rewrote
+  docstring at `transaction.py:194-211` + adjacent eager-base comment +
+  `_build_commute_facts` docstring). Round-2 closed at 8.75 / 8.6, zero
+  new MAJORs, 1 MINOR nit closed in `b0f4abe` (literal "exactly one
+  winner" assertions in race regression test). Per-axis Round 2:
+  Correctness 8.9 / Concurrency Safety 9.0 / Audit-Chain Integrity 8.6 /
+  Determinism 8.6 / API & Specs 8.7 / Maintainability 8.7. See
+  `review-stage/v0.5.2-clojure-parity-r2/AUTO_REVIEW.md`.
+- **R3 + R4** skipped — same warrant as v0.4.0a1 / v0.5.1 / v0.6.0a1
+  (zero proposition / paper claim change).
+
+### Suite
+
+88 txn / 1492 full at branch start → **130 txn / 1560 + 7 xfailed full**
+at the merge. All threading + Hypothesis tests deterministic across
+5+ consecutive runs.
+
+### Predecessor
+
+`v0.7.0a1` substrate trunk at `5deca24`. Tagged `v0.5.2` (annotated,
+local-only) at `b0f4abe` per project convention.
+
 ## v0.7.0a1 — 2026-04-29 (Module 7: capability-gated live REPL — WS + browser console)
 
 Stream D of the v1.0 ferrari-first roadmap. Adds a live, capability-gated,

@@ -75,7 +75,17 @@ deterministic across 5+ consecutive runs.
 - R1 design fitness: PASS at mean 8.6 / min 8 after 2 W-cycles
   (`docs/plans/2026-04-29-v0.5.2-clojure-parity-design.md` § "ARIS
   R1 status").
-- R2 code quality: pending (final code-review pass).
+- R2 code quality: PASS at mean **8.75 / min 8.6** after 2 rounds
+  (codex `gpt-5.2` hard-mode high-reasoning). Round-1 PASSed gate at
+  8.53 / 8.2 with 2 MAJORs flagged; W1 closed both in `ed3ad4a`
+  (MAJOR-1: `db.atom()` allocation race — spanning `store._lock` at
+  `_db_extension.py:240` + regression test
+  `test_db_atom_concurrent_allocation_linearises`; MAJOR-2:
+  `Transaction.commute()` docstring case-3 contradiction — rewrote
+  194-211 + adjacent eager-base + `_build_commute_facts`). Round-2
+  closed at 8.75 / 8.6, zero new MAJORs, 1 nit closed in `b0f4abe`
+  (literal "exactly one winner" assertions). See
+  `review-stage/v0.5.2-clojure-parity-r2/AUTO_REVIEW.md`.
 - R3 + R4 skipped — same warrant as v0.4.0a1 / v0.5.1 / v0.6.0a1
   (zero proposition / paper claim change).
 

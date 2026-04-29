@@ -96,7 +96,7 @@ One new sub-package under `src/persistence/sdk/` with five new internal files, o
 | 9 | `src/persistence/sdk/mcp/_server.py` | MCP server: lifecycle (`initialize` → `notifications/initialized` → `tools/list`/`tools/call` / `resources/*`); JSON-RPC dispatch; transport stdio + Streamable HTTP per ADR-15 | NEW |
 | 10 | `src/persistence/sdk/mcp/_tools.py` | the 6 tools (`persistence_*`) as pure functions over `(Substrate, args) → Result`; budget enforcement per ADR-13 | NEW |
 | 11 | `src/persistence/sdk/mcp/_budgets.py` | `MCP_REPLAY_MAX_WINDOW`, `MCP_REPLAY_MAX_WALLCLOCK_S`, `MCP_REPLAY_RATE_LIMIT_PER_TOKEN` constants per ADR-13 | NEW |
-| 11a | `src/persistence/sdk/mcp/_http_security.py` | EXPERIMENTAL Streamable-HTTP transport: bind-loopback enforcement, Origin allowlist + DNS-rebinding mitigation, Bearer-token authn middleware, per-connection session, rate-limit per ADR-15 § 5 + ADR-15b — see G12 | NEW (experimental, not @stable in v0.8) |
+| 11a | `src/persistence/sdk/mcp/_http_security.py` | EXPERIMENTAL Streamable-HTTP transport: bind-loopback enforcement, Origin allowlist + DNS-rebinding mitigation, per-request Bearer-token authn middleware (no per-connection session — see § 5 wire-protocol block + ADR-15b § "Sessions"), rate-limit per ADR-15 § 5 + ADR-15b — see G12 | NEW (experimental, not @stable in v0.8) |
 | 12 | `src/persistence/sdk/mcp/__main__.py` | `python -m persistence.sdk.mcp` runner (token-file / env-var bootstrap per ADR-15a; `--enable-experimental-http` gate per ADR-15b) | NEW |
 | 13 | `docs/spec/adapter-contract-v0.8.md` | stability surface spec; ~300 lines (auto-generated from decorators + TypedDicts + `_NAMES`) | NEW |
 | 14 | `docs/spec/adapter-contract-v0.8.lock.json` | machine-readable signature-sha lockfile per ADR-16 + G10b; ~80 lines | NEW |
@@ -110,7 +110,7 @@ One new sub-package under `src/persistence/sdk/` with five new internal files, o
 ### Out of scope (explicit deferrals)
 
 - **LangChain adapter / OpenAI Assistants adapter** — Phase 2 once the in-tree contract has dogfooding signal from `persistence-coder`.
-- **Non-Python clients (TypeScript / Go / Rust SDKs)** — Phase 3. Non-Python integrators in v0.8 use the MCP wire protocol (already JSON-RPC over stdio or WS).
+- **Non-Python clients (TypeScript / Go / Rust SDKs)** — Phase 3. Non-Python integrators in v0.8 use the MCP wire protocol (already JSON-RPC over stdio; Streamable HTTP is experimental and gated per ADR-15b — see § 5).
 - **Persistent SDK sessions across process restart** — Phase 3. SDK sessions live in process memory; underlying datoms persist via the fact store.
 - **Per-tenant resource quotas** — covered by capability tokens already (Module 7 REPL gives us per-token rate limiting). Quota enforcement is a Phase 3 multi-tenant ops concern.
 - **Telemetry / observability** — emit `:sdk/...` audit attrs but no Prometheus / OpenTelemetry export. Phase 3.
@@ -227,7 +227,7 @@ All 6 tools publish a JSON-Schema `inputSchema` and (when emitting structured da
 ### 5.1 Tool envelope details
 
 - **`inputSchema`** is a JSON-Schema document declaring `$schema: "http://json-schema.org/draft-07/schema#"` (W2-revised — see "Schema Profile v0.8" pin below) with `type: object`, `additionalProperties: false`, `required` populated. Schemas are checked by the dispatcher BEFORE any handler runs (`-32602 invalid params` on schema-fail).
-- **`outputSchema`** is published for every tool that returns `structuredContent`. The dispatcher validates the structured payload against `outputSchema` before sending — a server-side validator failure surfaces as `isError: true` + reason `internal_output_validation`.
+- **`outputSchema`** is published for every tool that returns `structuredContent`. The dispatcher validates the structured payload against `outputSchema` before sending — a server-side validator failure is an *unhandled* internal fault (the model cannot react to it usefully) and surfaces via the JSON-RPC `error` envelope as `code=-32603 internal error`, `data: {reason: 'internal_output_validation'}` (per § 5.2 error table), NOT via `isError: true`. This keeps the rule "handled failures use `isError: true`; unhandled / transport / validation / internal failures use the JSON-RPC error envelope" applied consistently.
 - **`isError: true`** is reserved for *handled* failures the model is meant to see and react to (capability denial, retractable input, budget exhausted). *Unhandled* failures (transport, validation, internal) use the JSON-RPC `error` envelope.
 - **Pagination cursors.** `recall` and `audit_window` accept `cursor` and return `next_cursor`. Per W2 NIT-5: cursor format is `base64url(HMAC-SHA256(secret, payload) || payload || version_byte)` where payload is the canonical-JSON of `{last_eid_or_tx: …, issued_at: iso}`. Cursors are **opaque-but-decodable-with-server-secret**: clients must NOT decode them; the HMAC binds them to the server instance so a cursor from one server cannot be replayed against another. Server secret rotates on process restart (cursors do not survive restart, which is acceptable v0.8 behavior — recall + audit_window callers re-issue from cursor=null on reconnection).
 
@@ -296,9 +296,9 @@ If pydantic emits a 2020-12-only construct that the profile disallows, the gener
 
 ### Resources (server → LLM)
 
-| Resource | URI | Content |
-|---|---|---|
-| `audit_tail` | `persistence-os://audit/tail` | Live audit-chain projection (last N entries by default). Subscribed via `resources/subscribe`; server-pushed events follow MCP `notifications/resources/updated` semantics. |
+| Resource | URI | Capability | Content |
+|---|---|---|---|
+| `audit_tail` | `persistence-os://audit/tail` | `mcp.audit-read` (same cap as `persistence_audit_window` per ADR-15) | Live audit-chain projection (last N entries by default). Subscribed via `resources/subscribe`; server-pushed events follow MCP `notifications/resources/updated` semantics. The `mcp.audit-read` capability is the resource-shaped cap that gates ALL audit-chain reads (current `audit_window` tool + this `audit_tail` resource subscription); future audit-shape tools (e.g. v0.9 `audit_replay_at(tx)`) sit under the same cap. |
 
 ### Wire protocol
 
@@ -491,7 +491,7 @@ A second, opt-in alternative (`s.escape.fact()` style method-call form) was cons
 | `Datom.a` storage | `mcp/op-<verb>` slashed kebab | no | `mcp/op-remember` |
 | `AuditEntry.op` wire | `:mcp/op-<verb>` colon-prefixed | **yes** | `:mcp/op-remember` |
 
-**Rationale.** Module 7 REPL set the precedent for the storage-vs-wire colon split (ADR-12 of that doc). The MCP server inherits the same pattern. The new `persistence_<verb>` form is the public-facing tool name (host-aggregator-collision-safe via the `persistence_` prefix per MCP server-tools naming guidance); the internal `mcp.<verb>` capability name stays in the existing Module 7 capability namespace; the `Datom.a` and `AuditEntry.op` forms preserve the stored-vs-wire convention `audit_entry_to_datom` already enforces (`src/persistence/effect/handlers/audit.py:611-717` post-v0.5.2 merge — function lives in the same module's lower half alongside `datom_to_audit_entry`).
+**Rationale.** Module 7 REPL set the precedent for the storage-vs-wire colon split (ADR-12 of that doc). The MCP server inherits the same pattern. The new `persistence_<verb>` form is the public-facing tool name (host-aggregator-collision-safe via the `persistence_` prefix per MCP server-tools naming guidance); the internal `mcp.<verb>` capability name stays in the existing Module 7 capability namespace; the `Datom.a` and `AuditEntry.op` forms preserve the stored-vs-wire convention `audit_entry_to_datom` already enforces (`src/persistence/effect/handlers/audit.py:612-720` post-v0.5.2 merge — function lives in the same module's lower half alongside `datom_to_audit_entry` at `audit.py:721`).
 
 **Capability-name asymmetry note.** Five tools take a `mcp.<wire-verb>` capability (`mcp.remember`, `mcp.recall`, `mcp.forget`, `mcp.replay`, `mcp.view`); `audit_window` takes `mcp.audit-read` instead of `mcp.audit-window`. This is deliberate, not an oversight: the capability grants *read access to the audit chain* as a resource, not *use of one specific tool*. Future MCP additions like `audit_tail` (already a resource subscription, not a tool) or a v0.9 `audit_replay_at(tx)` would all sit under the same `mcp.audit-read` cap rather than minting a new `mcp.<tool-verb>` per surface. Renaming to `mcp.audit-window` would tie the cap to one tool name and force a breaking cap rename when new audit-shape tools land. v0.9 may introduce `mcp.audit-write` as a sibling if any audit-mutation tool ever ships; the resource-shaped cap namespace stays open.
 
@@ -506,7 +506,7 @@ A second, opt-in alternative (`s.escape.fact()` style method-call form) was cons
 | replay_check | `persistence_replay_check` | `mcp.replay` | `mcp/op-replay` | `:mcp/op-replay` |
 | view_at | `persistence_view_at` | `mcp.view` | `mcp/op-view` | `:mcp/op-view` |
 
-The decorator-driven spec generator (G7) reads this table from a single `_NAMES` dict in `persistence.sdk.mcp._tools` and emits all four forms — drift is impossible by construction.
+The decorator-driven spec generator (G7) reads this table from a single `_NAMES` dict in `persistence.sdk.mcp._names` (per the § 3 file table — `_names.py` is the dedicated single-source-of-truth file; `_tools.py` imports from it) and emits all four forms — drift is impossible by construction.
 
 ### ADR-15a: Cross-process token bootstrap for stdio-launched MCP servers
 
@@ -520,7 +520,7 @@ The decorator-driven spec generator (G7) reads this table from a single `_NAMES`
 
 The fact-store-backed token registry (Module 7 ADR-3) is the source of truth; bootstrap just delivers an opaque pointer to a record that already exists. For an in-memory `--store memory` server (the common case for desktop hosts that don't want to wire up sqlite), the host launches with `--mint-token --serve` in a single invocation so minting and serving share the in-process store.
 
-**Consequence.** v0.8 ships three bootstrap modes (file, env, argv-dev-only). G2 covers all three. Token leakage via `ps` is impossible in production paths. R4 (risk table) gains a new row for cross-process token-handoff to make this explicit.
+**Consequence.** v0.8 ships three bootstrap modes (file, env, argv-dev-only). G2 exercises the `--token-file` path (sqlite case) and the in-process `--mint-token --serve` path (memory case); the `PERSISTENCE_MCP_TOKEN` env-var path is exercised by an additional unit test in SDK4 that grep-asserts the env-var read + value-redaction in logs (G2 itself stays focused on the lifecycle conformance + token-file path that hosts ship). The `--token` argv path is covered by a deprecation-warning unit test in SDK4. Token leakage via `ps` is impossible in production paths. R11 (risk table) is the corresponding cross-process token-handoff row (originally drafted as R4 in the ADR-15a W1 patch before the risk-list renumbering during the W2 cycle that added R8-R12).
 
 ### ADR-15b: Streamable HTTP is EXPERIMENTAL in v0.8 — explicit non-conformance
 
@@ -557,7 +557,7 @@ The fact-store-backed token registry (Module 7 ADR-3) is the source of truth; bo
 
 **Rationale.** Privacy-arch is a Phase 3 line item (per the v1.0 roadmap). Promising any confidentiality property in v0.8 with 5 days of design + impl time would either (a) ship a hand-wavy claim that fails under audit, or (b) bloat the scope. Better to be explicit: v0.8 MCP is for trusted-host scenarios (developer's own laptop running their own substrate). Sensitive-data deployments wait for Phase 3.
 
-**Consequence.** The README, the spec doc, AND the `--version` banner of the MCP server all carry an explicit "no confidentiality guarantees in v0.8" line. Risk table R8 (added below) captures this. v0.9 may introduce per-attribute confidentiality tiers ("public" / "redacted" / "encrypted"); v0.8 is plaintext-only.
+**Consequence.** The README, the spec doc, AND the `--version` banner of the MCP server all carry an explicit "no confidentiality guarantees in v0.8" line. Risk table R12 (privacy expectation gap; added in the R1 W1 cycle below) captures this. v0.9 may introduce per-attribute confidentiality tiers ("public" / "redacted" / "encrypted"); v0.8 is plaintext-only.
 
 ---
 
@@ -615,7 +615,7 @@ Run a doc-generation script (`scripts/gen_adapter_contract.py`) that reads decor
 
 - import-order is deterministic (alphabetical by module then symbol);
 - TypedDict registry from `persistence.sdk.types` is included for every `@stable` dict-returning symbol; CI fails if a `@stable` symbol returns `dict | Any` without a TypedDict (per ADR-16);
-- ADR-15's tool-name table is read from the `_NAMES` dict in `persistence.sdk.mcp._tools` (single source of truth — drift impossible by construction);
+- ADR-15's tool-name table is read from the `_NAMES` dict in `persistence.sdk.mcp._names` (single source of truth — `_names.py` is the dedicated file per § 3 file table; drift impossible by construction);
 - output is byte-identical across Python 3.11+ on macOS and Linux (no platform-dependent ordering / timestamps in the output).
 
 ### G8 — `persistence_replay_check` safety budget enforced

@@ -1,7 +1,7 @@
 # Adapter SDK Contract — Design
 
 **Date:** 2026-04-29
-**Status:** DRAFT. Open for ARIS R1 review before implementation.
+**Status:** ARIS R1 PASS (mean 8.56 / min 8.20 at `5e5fc64`); ARIS R2 PASS post-W4 polish (mean 8.66 / min 8.40 at R2-R3 stamp). READY for SDK1 implementation dispatch.
 **Author:** Nawfal Saadi (with Claude Opus 4.7)
 **Audience:** persistence-os engineering — Phase 1 substrate-completion stream
 **Predecessors:**
@@ -763,9 +763,31 @@ R1 round-1 surfaced that the original 5 OQs were not the actual blockers. The li
 4. **G2 wording polish** — `memory` is a bare keyword per ADR-9 (not URI scheme `memory:`); `sqlite:///` is URI form. Clarified the parametrized-fixture per-backend token-bootstrap path: memory case mints + serves in one invocation per ADR-15a; sqlite case mints out-of-band first.
 5. **ADR-9 cross-ref to Postgres design** added — cross-references the Postgres design doc's ADR-10 (psycopg + lazy-import + `BackendNotInstalled` semantics) so the SDK1 stub-arm contract is traceable to where it lands.
 
-**No ADR added or removed; no gate added or removed; no risk added or removed.** Design semantics unchanged from R3-PASS state. ARIS R2 (post-polish re-review) is dispatched as a separate run to validate the polish doesn't drift the score.
+**No ADR added or removed; no gate added or removed; no risk added or removed.** Design semantics unchanged from R3-PASS state. ARIS R2 (post-polish re-review) was dispatched as a separate run to validate the polish doesn't drift the score.
 
-**Bar:** mean ≥ 8.5 / min ≥ 7.5 — **PASSED** at R3, re-validated post-W4 in R4 (see `review-stage/v0.8.0-adapter-sdk-r2/AUTO_REVIEW.md` once R4 completes).
+**ARIS R2 result (2026-04-29 evening, 3 rounds):**
+
+| Round | Mean | Min | Verdict | Δ | W-cycle commits |
+|---|---|---|---|---|---|
+| R2-R1 | 8.60 | 8.40 | READY | +0.04 / +0.20 vs R1 PASS | (7 cross-ref drift defects flagged) |
+| R2-R2 | 8.63 | 8.40 | READY | +0.03 / +0.00 | R2-W1 = `5fb0fd3` (closes 7 cross-ref drift defects + adds sound `mcp.audit-read` capability column on Resources table) |
+| R2-R3 | **8.66** | **8.40** | **READY** (final stamp) | +0.03 / +0.00 | R2-W2 = `94a90a0` (closes 2 last-mile drift defects: `_server.py` HTTP-experimental qualifier + `examples` keyword generator-policy clarification) |
+
+**ARIS R2 final score: mean 8.66 / min 8.40 — PASS.** All 5 W4 polish items APPROVED across the 3 rounds; R2 surfaced 9 cumulative cross-reference drift defects (no new BLOCKERs, no new ADRs/gates/risks); R2-W3 = `<final commit>` updates the Status header + this final-score block.
+
+**R2 closed across the 3 rounds:**
+- 7 cross-ref drift defects in R2-R1 (W1): `_NAMES` location, `G2 covers all three` overstatement + R4-vs-R11 ref bug, output-schema wire-form contradiction, stale "stdio or WS", `_http_security.py` "per-connection session" description, ADR-17 "R8" vs actual R12, `audit.py:611-717` → 612-720
+- 2 last-mile drift defects in R2-R2 (W2): `_server.py` row 9 HTTP-experimental qualifier, `examples` keyword schema-profile vs generator-policy clarification
+- 1 final-stamp drift defect in R2-R3 (W3): top-of-doc Status header still said "DRAFT" while body said R1 PASS
+
+**Patterns surfaced in R2 (carried into reviewer memory for v0.9 reviews):**
+- Cross-ref drift is the dominant post-churn risk after multi-round W-cycles: risk IDs, gate coverage claims, file-table summaries, top-of-doc Status headers all silently fall out of sync even when "semantics unchanged."
+- Single-source-of-truth claims must match file layout exactly (otherwise implementers split the truth).
+- Risk-list renumbering during a W-cycle creates orphan in-doc cross-refs; future W-cycles that add risk rows should grep + fix all in-doc R-number cites in the same commit.
+- Schema-profile text vs generator-pipeline text can diverge subtly (allowed-keywords list vs preserve-at-root policy) — worth treating as a mini-contract in v0.9.
+- Capability gating on resources (not just tools) is easy to leave implicit; Resources table should carry an explicit `Capability` column when capability-gating is the architectural rule.
+
+**Bar:** mean ≥ 8.5 / min ≥ 7.5 — **PASSED at R3 (R1)**, re-validated and re-passed post-W4 across R2-R1 / R2-R2 / R2-R3. Doc is READY for SDK1 implementation dispatch.
 
 **Closed across the loop:**
 - 3 R1 BLOCKERs (MCP transport+lifecycle, tool schemas + result shapes, Substrate stable-surface leak)
@@ -788,5 +810,10 @@ R1 round-1 surfaced that the original 5 OQs were not the actual blockers. The li
 - `review-stage/v0.8.0-adapter-sdk-r1/round1_raw.txt` — R1 6.4/5.5
 - `review-stage/v0.8.0-adapter-sdk-r1/round2_raw.txt` — R2 7.99/7.60
 - `review-stage/v0.8.0-adapter-sdk-r1/round3_raw.txt` — R3 8.56/8.20 PASS
-- `review-stage/v0.8.0-adapter-sdk-r1/REVIEWER_MEMORY.md` — codex's persistent suspicions across rounds
-- `review-stage/v0.8.0-adapter-sdk-r1/AUTO_REVIEW.md` — cumulative review log
+- `review-stage/v0.8.0-adapter-sdk-r1/REVIEWER_MEMORY.md` — codex's persistent suspicions across R1 rounds
+- `review-stage/v0.8.0-adapter-sdk-r1/AUTO_REVIEW.md` — R1 cumulative review log
+- `review-stage/v0.8.0-adapter-sdk-r2/round1_raw.txt` — R2-R1 8.60/8.40 (post-W4 first-pass; 7 cross-ref drift defects)
+- `review-stage/v0.8.0-adapter-sdk-r2/round2_raw.txt` — R2-R2 8.63/8.40 (post-W1 closure; 2 last-mile drift)
+- `review-stage/v0.8.0-adapter-sdk-r2/round3_raw.txt` — R2-R3 8.66/8.40 (post-W2 closure; final stamp)
+- `review-stage/v0.8.0-adapter-sdk-r2/REVIEWER_MEMORY.md` — codex's persistent suspicions across R2 rounds
+- `review-stage/v0.8.0-adapter-sdk-r2/AUTO_REVIEW.md` — R2 cumulative review log

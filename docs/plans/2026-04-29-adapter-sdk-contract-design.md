@@ -30,7 +30,7 @@ All three preserve the existing AGPL-3.0-or-later license. The MCP server is **A
 
 **Not** in this stream: LangChain adapter, OpenAI Assistants adapter, multi-language client (TypeScript / Go / Rust). Those land in Phase 2 once the in-tree contract has 2-3 weeks of dogfooding.
 
-**Ships:** ~1100 LOC src + ~310 tests + spec doc. **5 days.** (Per § 8 task table — the earlier "~600 LOC" line was a residual estimate that pre-dated the spec-doc generator + e2e suite.)
+**Ships:** ~1200 LOC src + ~310 tests + spec doc. **5 days.** (Per § 8 task table — the earlier "~600 LOC" R0-draft line pre-dated the spec-doc generator + e2e suite; bumped 1100 → 1200 in W3 to absorb the schema-generator `$ref` inliner per § 5.1.1.)
 
 ---
 
@@ -255,12 +255,31 @@ MCP client SDKs in the wild have uneven support for JSON-Schema draft-2020-12 fe
 
 CI gate G10b is extended to fail on any schema-SHA diff. A generator change that produces semantically-equivalent but byte-different schemas is THUS a contract change requiring a minor-version bump — the lockfile makes drift detectable, not silently propagated. The generator's profile-violation check guards against accidentally widening the surface.
 
-**TypedDict → JSON Schema generator pin.** The generator is a thin shim around `pydantic.TypeAdapter(TypedDict_class).json_schema(mode='validation')` post-processed to:
+**TypedDict → JSON Schema generator pin (W3 SHOULD-FIX 1 detail).** Pydantic's `TypeAdapter(TD).json_schema(mode='validation')` emits `$defs` + `$ref` + `title` by default — "strip `$defs`" alone is insufficient because `$ref` pointers into the stripped `$defs` would dangle. The v0.8 generator therefore implements a pre-pass that DEREFERENCES + INLINES every `$ref` against the source `$defs`, then strips the now-empty `$defs` block, then strips emitted `title` fields (which would otherwise add a non-functional surface to the schema and trigger profile-violation if pydantic's title interacts with `examples`). Concretely:
 
-1. Strip `$defs` (forces inline);
-2. Reject any disallowed keyword (raise `SchemaProfileViolation`);
-3. Sort keys lexically for byte-identical output;
-4. Stamp `$schema: "http://json-schema.org/draft-07/schema#"` at the root.
+```python
+# scripts/gen_adapter_contract.py — schema generator pipeline
+def emit_schema(td_class) -> dict:
+    raw = pydantic.TypeAdapter(td_class).json_schema(mode='validation')
+    # 1. Recursive $ref inliner: walk `raw`; for each {"$ref": "#/$defs/<name>"},
+    #    replace the dict containing the $ref with a deep-copy of raw["$defs"][name],
+    #    recursing through nested $refs. Cycle detection: refuse + error if a $ref
+    #    cycle exists (TypedDicts shouldn't produce these; cycle = bug in TypedDict).
+    inlined = inline_refs(raw)
+    # 2. Strip metadata keys we don't need: $defs, title, examples-at-non-root.
+    stripped = strip_keys(inlined, keys={"$defs", "title"}, preserve_at_root={"examples"})
+    # 3. Profile-validate: walk every node; if any disallowed keyword present (per
+    #    § 5.1.1 closed list), raise SchemaProfileViolation with the offending path.
+    validate_profile(stripped)
+    # 4. Sort all dict keys lexically (recursive) for byte-identical output across
+    #    Python versions / dict insertion-order changes.
+    sorted_ = canonical_sort(stripped)
+    # 5. Stamp the root with the draft-07 metaschema URI.
+    sorted_["$schema"] = "http://json-schema.org/draft-07/schema#"
+    return sorted_
+```
+
+The inliner is ~40 LOC (recursive walk + cycle-detection set + deep-copy); the validator is ~30 LOC (closed-keyword set membership check at every node); the canonicalizer is `json.dumps(d, sort_keys=True, separators=(",", ":"))` followed by `json.loads`. The generator is approximately 150 LOC including the 6 TypedDict declarations exercised by G13d. If the inliner discovers a `$ref` to a TypedDict class outside the file's local set (e.g. one TypedDict embedding another), the inliner recurses into the embedded TypedDict's `$defs` and inlines the referenced shape there too. Phase 1 implementation MUST land the inliner before any tool can publish a schema; the budget for "thin shim" was ~30 LOC, and the realistic budget per W3 review is ~150 LOC. SDK5's LOC estimate is bumped from 250 → 350 to absorb this; the test count stays at 30 because the inliner is exercised through the same per-tool `inputSchema`/`outputSchema` round-trips.
 
 If pydantic emits a 2020-12-only construct that the profile disallows, the generator raises at build time and the implementer rewrites the TypedDict to fit the profile. The Phase 1 implementation will exercise this on all 6 tool TypedDicts before SDK-FINAL.1.
 
@@ -288,9 +307,14 @@ If pydantic emits a 2020-12-only construct that the profile disallows, the gener
 **Streamable-HTTP experimental defaults (v0.8 only).** When `--enable-experimental-http --transport http` is set:
 
 - **Bind:** `127.0.0.1:<port>` ONLY. Server refuses to bind to `0.0.0.0` or any non-loopback address (errors at startup with `bind_non_loopback_refused`). Operators who want LAN/public exposure must run an external reverse proxy and configure it themselves; the SDK ships no `--bind-public` flag.
-- **Origin validation:** Server checks the `Origin` request header on every POST + SSE GET. Allowed values are `null` (no Origin, e.g. local fetch from same-origin), `http://localhost:<port>`, `http://127.0.0.1:<port>`, and exact matches in the `--http-allowed-origin` allowlist (multi-valued; defaults to empty). Mismatches return `403 Forbidden` with body `{"error":"origin_not_allowed","origin":"<value>"}`. This is the standard mitigation for [DNS-rebinding attacks against localhost servers](https://en.wikipedia.org/wiki/DNS_rebinding) and aligns with the MCP spec's HTTP-transport security guidance.
+- **Origin validation (W3 NIT-4 detail):** Server checks the `Origin` request header on every POST + SSE GET. Three cases, distinct treatment:
+  1. **Origin header absent entirely** (e.g. plain CLI / curl that doesn't send Origin) → ALLOWED (legitimate non-browser callers don't send Origin).
+  2. **`Origin: null`** (literal four-character string `null`, sent by sandboxed iframes / `data:` URIs / file:// origins) → REJECTED with `403 origin_not_allowed`. The `null` literal is a documented browser-emitted value for opaque/sandboxed origins and is the wedge attackers exploit to bypass naive Origin checks.
+  3. **`Origin: <url>`** present → must match the allowlist exactly (default: `http://localhost:<port>` + `http://127.0.0.1:<port>` + values from `--http-allowed-origin`). Allowlist comparison is case-sensitive scheme + host + port; trailing slashes and path components are NOT permitted in allowlist entries.
+  
+  Mismatches return `403 Forbidden` with body `{"error":"origin_not_allowed","origin":"<value>"}`. This is the standard mitigation for [DNS-rebinding attacks against localhost servers](https://en.wikipedia.org/wiki/DNS_rebinding) and aligns with the MCP spec's HTTP-transport security guidance.
 - **Auth:** Every HTTP request must carry `Authorization: Bearer <token>` matching the bootstrapped capability token (per ADR-15a). Missing / wrong / revoked → `401 Unauthorized` with body `{"error":"capability_denied"}`. The token is single-valued per server invocation in v0.8 (one process = one token = one client identity); multi-token / multi-client is a v0.9 surface.
-- **Sessions:** Each TCP connection presents a token; sessions are per-connection (no session resumption across reconnect in v0.8). The connection's `Authorization` token determines the capability set for all calls on that connection.
+- **Sessions (W3 SHOULD-FIX-3 detail):** Each individual HTTP request authenticates independently via its `Authorization: Bearer <token>` header — there is NO server-side session state attached to a TCP connection. The optional SSE stream (`GET /sse`) is also authenticated by the `Authorization` header on the GET request itself; the server holds the SSE response open and pushes `notifications/resources/updated` events on the same response. If the underlying TCP connection drops mid-stream, the client reconnects with a fresh `GET /sse` carrying the same `Authorization` header — there is no session-id, no resume cookie, no replay-from-last-event. This is the simplest correct interpretation of "Streamable HTTP" for v0.8: stateless POST request/response + a long-lived SSE GET, both authenticated per-request. v0.9 may introduce session-id semantics if the privacy-arch work demands it.
 - **Rate-limit:** Per-token rate limits inherit from ADR-13 (replay) and the existing Module 7 token-rate-limit handler. Cross-tool global rate is bounded at 60 req/sec per token (configurable via `--http-rate-limit-rps`).
 - **TLS:** Plaintext only in v0.8 (loopback assumption). Production deployments wrap behind a reverse proxy (nginx / Caddy / Traefik) that handles TLS — same posture as Module 7 REPL.
 
@@ -327,7 +351,9 @@ The server NEVER accepts the token over stdin. The `--token TOKEN` argv form is 
 - the v0.8 contract spec doc has a top-level box stating "The reachable surface from a `Substrate` instance is larger than the contract; only `persistence.sdk.*` symbols decorated `@stable("v0.8")` are covered. Module attributes (`s.fact` etc.) are escape hatches and may break at any release";
 - the `Substrate.fact` / etc. attribute getters carry a docstring + a `@experimental` marker (NOT `@stable`) so the decorator-driven spec generator (G7) does NOT advertise them in the contract.
 
-**Escape-hatch first-access telemetry (W2 SHOULD-FIX 3 closure).** The first time per-session that an adapter accesses any of the 7 escape-hatch attributes (`s.fact`, `s.effect`, `s.plan`, `s.replay`, `s.txn`, `s.spec`, `s.repl`), the Substrate emits exactly one `:sdk/escape-hatch-access` audit entry recording `{module: "fact" | ...}`, `caller_filename` (best-effort via `sys._getframe`), `session_id`. Subsequent accesses to the same attribute in the same session are silent (no spam). This is a measurement signal — adapter authors who never reach through have a clean audit trail; adapter authors who do reach through generate a record we can use during Phase 2 dogfooding to identify which Module methods need to be folded into a curated `persistence.sdk.<sub>` namespace at v0.9. Adapter authors are NOT required to suppress these entries — they are diagnostic provenance, not warnings or errors. The session-id-keyed deduplication is server-state only; cross-session reach-through emits one entry per session per attribute, which is the right signal granularity for a "is this load-bearing in the wild" observation.
+**Escape-hatch first-access telemetry (W2 SHOULD-FIX 3 closure; W3 NIT-5 contract-shape pin).** The first time per-session that an adapter accesses any of the 7 escape-hatch attributes (`s.fact`, `s.effect`, `s.plan`, `s.replay`, `s.txn`, `s.spec`, `s.repl`), the Substrate emits exactly one `:sdk/escape-hatch-access` audit entry recording `{module: "fact" | ...}`, `caller_filename` (best-effort via `sys._getframe`), `session_id`. Subsequent accesses to the same attribute in the same session are silent (no spam). This is a measurement signal — adapter authors who never reach through have a clean audit trail; adapter authors who do reach through generate a record we can use during Phase 2 dogfooding to identify which Module methods need to be folded into a curated `persistence.sdk.<sub>` namespace at v0.9. Adapter authors are NOT required to suppress these entries — they are diagnostic provenance, not warnings or errors. The session-id-keyed deduplication is server-state only; cross-session reach-through emits one entry per session per attribute, which is the right signal granularity for a "is this load-bearing in the wild" observation.
+
+**The audit-entry shape is `@experimental` (W3 NIT-5 closure), NOT `@stable("v0.8")`.** Specifically, the `:sdk/escape-hatch-access` AuditEntry's `args` payload shape (`{module, caller_filename, session_id}`) is decorated `@experimental` in `_stability.py` and is therefore EXCLUDED from the spec generator's contract output (G7). The shape MAY change in any patch release; downstream tooling that parses these entries does so at its own risk. This protects the diagnostic-telemetry use case (we want to evolve the shape during Phase-2 dogfooding) while preventing it from accidentally becoming a relied-upon contract surface. A docstring on the audit-entry-emitting helper makes this explicit.
 
 A second, opt-in alternative (`s.escape.fact()` style method-call form) was considered and rejected for v0.8: it would force a one-line refactor on every existing internal call-site (`db = s.fact` style code already lives in v0.7.0a1 examples), and the audit-telemetry path provides the same signal without the ergonomic break. v0.9 may revisit if telemetry data argues for the harder boundary.
 
@@ -563,7 +589,7 @@ Start `python -m persistence.sdk.mcp --store sqlite:///$TMP/g2.db --transport st
 7. Client sends `resources/subscribe` for the `audit_tail` URI. Within 2 seconds the test triggers another `tools/call persistence_remember`; the client receives an MCP `notifications/resources/updated` for `audit_tail` referencing the new tx.
 8. Inspect the underlying `--store` (sqlite) directly: assert exactly 3 entries with `Datom.a in {"mcp/op-remember", "mcp/op-recall", "mcp/op-remember"}` (one per tool call), all `prev_hash`-chained correctly via `verify_chain`.
 
-The test runs against BOTH `sqlite:` and `memory:` stores (parametrized), and against BOTH `--transport stdio` and `--transport http` (Streamable HTTP, second invocation only — the http variant adds a 9th step that issues an SSE subscribe + asserts `notifications/resources/updated` over SSE).
+The test runs against BOTH `sqlite:` and `memory:` stores (parametrized), but **stdio transport ONLY** — Streamable HTTP is EXPERIMENTAL (per ADR-15b) and exercised separately in G12 (HTTP-experimental regression). G2 is the v0.8 *conformance* gate; mixing HTTP into it would conflate "stable contract you can pin against" with "experimental surface that may break in patch". (W3 SHOULD-FIX-2 closure: explicit conformance/experimental separation.)
 
 ### G3 — Stability decorator system
 
@@ -647,12 +673,12 @@ Per the v0.5-txn Phase B / v0.6.0a1 / v0.6.5 / v0.7.0a1 precedent: per-task suba
 | **SDK2** — `_health.py` + `health_check`, `version_info`, `module_status` + ~10 tests | health probes | ~120 / ~40 |
 | **SDK3** — `mcp/_server.py` + `mcp/_tools.py` + 6 tools + JSON-RPC dispatch + ~30 tests | MCP server core | ~250 / ~120 |
 | **SDK4** — `mcp/__main__.py` runner + token mint CLI + AGPL banner + ~15 tests | runnable artifact | ~80 / ~40 |
-| **SDK5** — `docs/spec/adapter-contract-v0.8.md` + `scripts/gen_adapter_contract.py` + CI gate | spec doc generator | ~250 / ~30 |
+| **SDK5** — `docs/spec/adapter-contract-v0.8.md` + `scripts/gen_adapter_contract.py` (with `$ref` inliner, profile validator, key canonicalizer per § 5.1.1) + CI gate | spec doc + schema generator | ~350 / ~30 |
 | **SDK-INT** — end-to-end integration test: open Substrate → mint MCP token → boot MCP server → remember/recall/forget → verify_chain across SDK + REPL + MCP traffic | e2e | ~150 |
 | **SDK-FINAL.1** — ARIS R2 code-quality (codex hard-mode) | review | — |
 | **SDK-FINAL.2** — CHANGELOG + version bump `0.7.0a1` → `0.8.0a1` + local tag | release | — |
 
-Total estimated impl: ~1100 LOC src + ~310 tests. 5 days.
+Total estimated impl: ~1200 LOC src + ~310 tests. 5 days. (Bumped from 1100 → 1200 in W3 to absorb the schema-generator $ref-inliner per W3 SHOULD-FIX-1.)
 
 ---
 
@@ -711,4 +737,44 @@ R1 round-1 surfaced that the original 5 OQs were not the actual blockers. The li
 2. Check ARIS R1 result at `review-stage/v0.8-adapter-sdk-r1/REVIEW.md`. If PASS, proceed; if FAIL, run W1 fix-pass against the listed MAJORs.
 3. Branch `feat/v0.8-adapter-sdk` from `main` post-merge-train.
 4. Subagent-dispatch SDK1 → SDK5 → SDK-INT → SDK-FINAL.{1,2} per the v0.7.0a1 precedent.
-5. On SDK-FINAL.2 PASS: tag `v0.8.0`, append CHANGELOG, persist Serena + vault + auto-memory, conductor STATUS Phase 1 block close.
+5. On SDK-FINAL.2 PASS: tag `v0.8.0a1`, append CHANGELOG, persist Serena + vault + auto-memory, conductor STATUS Phase 1 block close.
+
+---
+
+## ARIS R1 status — PASS at mean 8.56 / min 8.20 (W3)
+
+**Auto-review-loop hard mode**, codex CLI gpt-5.2 high reasoning, MAX_ROUNDS=4, autonomous (no human checkpoint), 2026-04-29.
+
+| Round | Mean | Min | Verdict | Δ | W-cycle commits |
+|---|---|---|---|---|---|
+| R1 | 6.40 | 5.50 | NOT READY | — | (3 BLOCKERs, 3 SHOULD-FIX, 1 NIT) |
+| R2 | 7.99 | 7.60 | NOT READY | +1.59 / +2.10 | W1 = `1a312f5` (7 fixes — MCP transport / lifecycle / tool schemas / Substrate escape-hatch boundary / view_at cursor / replay_check budget / naming convention) |
+| R3 | **8.56** | **8.20** | **READY** | +0.57 / +0.60 | W2 = `60380e2` (5 fixes — HTTP experimental gate / Schema Profile v0.8 / escape-hatch first-access telemetry / doc consistency / opaque cursor format) |
+
+**R3 W3 polish** applied in the present commit: schema-generator `$ref` inliner explicit, G2 stdio-only conformance vs G12 HTTP experimental separation, HTTP per-request auth (no per-connection session) clarification, `Origin: null` literal vs missing-Origin distinction, escape-hatch audit-entry shape pinned `@experimental`. SDK5 + total LOC bumped 250→350 / 1100→1200.
+
+**Bar:** mean ≥ 8.5 / min ≥ 7.5 — **PASSED** at R3.
+
+**Closed across the loop:**
+- 3 R1 BLOCKERs (MCP transport+lifecycle, tool schemas + result shapes, Substrate stable-surface leak)
+- 3 R1 SHOULD-FIX (`branch_at`→`view_at` cursor, replay safety budget, naming convention)
+- 1 R1 NIT (LOC reconciliation + `v0.8.0`→`v0.8.0a1`)
+- 2 R2 BLOCKERs (Streamable-HTTP under-specified, schema dialect/profile not pinned)
+- 2 R2 SHOULD-FIX (escape-hatch ergonomics, doc consistency)
+- 1 R2 NIT (cursor opacity)
+- 5 R3 SHOULD-FIX/NIT (generator pipeline, conformance/experimental separation, HTTP session, Origin null, telemetry-shape contract)
+
+**ADR additions across the loop:** ADR-13, ADR-14, ADR-15, ADR-15a, ADR-15b, ADR-16, ADR-17 (7 new ADRs vs. R0's 12 → final 19 ADRs).
+
+**Gate additions across the loop:** G8a-d (replay budget), G9a-c (`view_at` cursor), G10a-c (TypedDict + signature lockfile), G11 (confidentiality non-goal), G12a-e (HTTP experimental defaults), G13a-d (Schema Profile v0.8 enforcement). 7 → 13 gates.
+
+**Risk additions across the loop:** R8 (surface leakage), R9 (tool collision), R10 (replay burn / state exfil), R11 (token bootstrap argv leak), R12 (privacy expectation gap), R13 (HTTP local-web attack surface), R14 (schema generator drift). 7 → 14 risks.
+
+**Open-question rewrite:** R0's 5 OQs (recall ranking, audit subscribe, in-process token, health window, context propagation) demoted to OQ-6..OQ-10; OQ-1..OQ-5 are now the structural blockers (surface enforcement, MCP rev drift, schema authoring, cursor lifetime, budget calibration).
+
+**Raw transcripts:**
+- `review-stage/v0.8.0-adapter-sdk-r1/round1_raw.txt` — R1 6.4/5.5
+- `review-stage/v0.8.0-adapter-sdk-r1/round2_raw.txt` — R2 7.99/7.60
+- `review-stage/v0.8.0-adapter-sdk-r1/round3_raw.txt` — R3 8.56/8.20 PASS
+- `review-stage/v0.8.0-adapter-sdk-r1/REVIEWER_MEMORY.md` — codex's persistent suspicions across rounds
+- `review-stage/v0.8.0-adapter-sdk-r1/AUTO_REVIEW.md` — cumulative review log

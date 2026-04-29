@@ -192,3 +192,86 @@ def test_db_atom_rejects_duplicate_eid():
 
     with pytest.raises(ValueError, match="already has an open"):
         db.atom("counter", initial=0)
+
+
+def test_db_atom_concurrent_allocation_linearises():
+    """v0.5.2 R2 W1 (MAJOR-1 closure): smoke-test — N threads racing
+    on ``db.atom(eid, ...)`` for the SAME eid must produce exactly
+    one open ``"value"`` assert end-state, regardless of timing.
+
+    The MAJOR-1 fix wraps the pre-existence scan AND the initial
+    transact under one ``store._lock`` window so concurrent
+    allocators linearise. Without the lock, multiple threads can
+    pass the guard before either writes and silently allocate two
+    "fresh" atoms over the same eid (final count of ``"value"``
+    asserts > 1, both handles compare equal).
+
+    Note: on CPython, the GIL often makes the unlocked race
+    win-by-default (the log()-walk + transact pair is short enough
+    bytecode-wise that no other thread interleaves). The strongest
+    cross-platform invariant we assert is the post-fix end-state:
+    exactly one open assert per eid. This is a lock-spanning
+    *property* test, not a deterministic bug reproduction —
+    free-threaded CPython, no-GIL, or busier hosts may surface the
+    race more aggressively, and the spanning lock is the structural
+    fix that protects all of them.
+    """
+    import threading
+
+    n_threads = 8
+    iterations = 20
+    bug_total_open_asserts = 0
+    bug_total_winners = 0
+    for i in range(iterations):
+        db = DB()
+        eid = f"shared-counter-{i}"
+        results: list = []
+        errors: list = []
+        start = threading.Event()
+
+        def w(tag: int):
+            start.wait()
+            try:
+                a = db.atom(eid, initial=tag * 100)
+                results.append((tag, a))
+            except ValueError:
+                errors.append(tag)
+
+        threads = [threading.Thread(target=w, args=(t,)) for t in range(n_threads)]
+        for t in threads:
+            t.start()
+        start.set()
+        for t in threads:
+            t.join(timeout=10)
+
+        # Winners + losers must sum to N: every thread either committed
+        # or raised ValueError; no thread silently dropped.
+        assert len(results) + len(errors) == n_threads, (
+            f"iter {i}: results={len(results)} + errors={len(errors)}"
+            f" != n_threads={n_threads}"
+        )
+
+        # End-state: exactly one open ``value`` assert. This is the
+        # strongest invariant and what MAJOR-1 actually breaks.
+        opens = [
+            d
+            for d in db.log()
+            if d.e == eid
+            and d.a == "value"
+            and d.op == "assert"
+            and d.invalidated_by is None
+            and d.valid_to is None
+        ]
+        assert len(opens) == 1, (
+            f"iter {i}: expected 1 open value assert on {eid},"
+            f" got {len(opens)} (race fired — fix is missing)"
+        )
+        bug_total_open_asserts += len(opens)
+        bug_total_winners += len(results)
+
+    # Defensive aggregate sanity (in case any single-iter assertion
+    # would have a `len(opens)==1` accidental pass with multiple
+    # winners — should not happen because we assert per-iter, but
+    # keeps the cumulative invariant cheap to read).
+    assert bug_total_open_asserts == iterations
+    assert bug_total_winners >= iterations  # ≥1 winner per iter

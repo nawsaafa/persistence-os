@@ -197,10 +197,17 @@ class Transaction:
           eager value at call N is ``fn(eager_value_at_N-1, *args)``.
         - **Commute then assoc/alter:** explicit write WINS at commit;
           commute log entries on that ref are dropped.
-        - **Assoc/alter then commute:** the body-eager value seen by
-          the commute is the just-set explicit value; at commit, the
-          explicit fact emits and the commute reapplies against the
-          explicit-write's value.
+        - **Assoc/alter then commute:** body-eager value seen by the
+          commute is the just-set explicit value (so subsequent body
+          reads see ``fn(explicit, *args)``); **at commit the explicit
+          write WINS and the commute on that ref is DROPPED** —
+          structurally identical to case 2 (write_set membership at
+          commit-time drops commute regardless of body order). The
+          design doc § F3 line 311 prose ("both apply; commute
+          reapplies against explicit-write's value") is superseded by
+          case 2's drop-on-write_set-membership invariant; v0.5.2 R2
+          MAJOR-2 closure pinned the realised behavior in
+          ``tests/persistence/txn/test_commute.py:328-367``.
         - **Deref after commute:** returns the optimistic body-eager
           value; idempotent on repeated derefs.
 
@@ -231,11 +238,15 @@ class Transaction:
             )
         # Eager base resolution — see intra-txn cases.
         if ref in self.write_set:
-            # Case 3: explicit write happened earlier in body; commute
-            # eager-applies on top of that. (At commit, case 2 says
-            # the explicit write wins and the commute is dropped — so
-            # this body-eager value influences subsequent body reads
-            # only, not the committed log.)
+            # Case 3: explicit write happened earlier in body. Commute
+            # eager-applies on top of the explicit value so subsequent
+            # body reads see ``fn(explicit, *args)``. **At commit, the
+            # explicit write wins and this commute entry is dropped**
+            # (case 2's drop-on-write_set-membership rule covers cases
+            # 2 and 3 uniformly — see ``_build_commute_facts`` and the
+            # docstring above for the realised invariant). The
+            # body-eager value here influences subsequent in-body reads
+            # only, not the committed log.
             eager_base = self.write_set[ref]
         elif ref in self._commute_eager:
             # Case 1: a previous commute on the same ref produced an
@@ -390,10 +401,16 @@ def _build_commute_facts(tx: "Transaction") -> tuple[list[dict], dict[Ref, Any]]
     against the latest committed value as the seed).
 
     Refs that ALSO appear in ``tx.write_set`` are SKIPPED — the
-    explicit write wins per § F3 intra-txn case 2 ("set after commute
-    overrides"). The explicit write fact is emitted separately by
+    explicit write wins per § F3 intra-txn cases 2 AND 3 (commute-
+    then-set OR set-then-commute both drop the commute fact at commit;
+    the realised invariant is "any ref in write_set drops its commute
+    log entries, regardless of body-order interleaving"). The
+    explicit write fact is emitted separately by
     :func:`_build_write_facts`; this helper just refrains from
-    emitting a competing commute fact for those refs.
+    emitting a competing commute fact for those refs. See
+    ``Transaction.commute`` docstring + the case-3 pinning test in
+    ``tests/persistence/txn/test_commute.py:328-367`` for the
+    superseding-rationale on the design doc § F3 line 311 prose.
 
     Called from inside the writer-lock window in :func:`_commit_attempt`
     AFTER the conflict-detection check passes. Reads the latest

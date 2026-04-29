@@ -228,37 +228,43 @@ def _atom(self: Any, eid: str, *, initial: Any) -> Atom:
     """
     if not isinstance(eid, str):
         raise TypeError(f"eid must be str, got {type(eid).__name__}")
-    # Pre-existence guard. Walks the log once; for fresh DBs and small
-    # logs this is O(N) but cheap. The same scan ``Atom._read_latest_value``
-    # uses, but we don't need to instantiate the atom yet — keeps the
-    # error path on ValueError instead of constructing+probing.
-    for d in self.log():
-        if d.e != eid or d.a != "value":
-            continue
-        if d.op != "assert":
-            continue
-        if d.invalidated_by is not None:
-            continue
-        if d.valid_to is not None:
-            continue
-        raise ValueError(
-            f"db.atom: eid {eid!r} already has an open ``:value`` datom; "
-            f"use atom.reset(...) to overwrite an existing atom's value."
-        )
+    # v0.5.2 R2 W1 (MAJOR-1 closure): pre-existence scan AND initial
+    # write happen under one ``store._lock`` window so two concurrent
+    # ``db.atom(eid, ...)`` calls on the same eid linearise — one wins
+    # with the initial value, the other raises ``ValueError``. Without
+    # the spanning lock the scan can pass on both threads before either
+    # writes, then both transact and we silently allocate two "fresh"
+    # atoms over the same eid. ``store._lock`` is an RLock so the
+    # nested ``self.transact(...)`` re-acquire in ``allocate_and_append``
+    # is safe (matches ``_commit_attempt`` at ``transaction.py:325``).
+    with self.store._lock:
+        # Pre-existence guard. Walks the log once; for fresh DBs and small
+        # logs this is O(N) but cheap. The same scan ``Atom._read_latest_value``
+        # uses, but we don't need to instantiate the atom yet — keeps the
+        # error path on ValueError instead of constructing+probing.
+        for d in self.log():
+            if d.e != eid or d.a != "value":
+                continue
+            if d.op != "assert":
+                continue
+            if d.invalidated_by is not None:
+                continue
+            if d.valid_to is not None:
+                continue
+            raise ValueError(
+                f"db.atom: eid {eid!r} already has an open ``:value`` datom; "
+                f"use atom.reset(...) to overwrite an existing atom's value."
+            )
 
-    atom = Atom(eid=eid, db_id=_get_db_id(self), _db=self)
-    # Write the initial value via the same path swap/reset use. Holding
-    # the lock here is unnecessary — there's no read-modify-write window
-    # at construction (the existence check above already failed-fast on
-    # any prior assert) — but db.transact internally takes store._lock
-    # via allocate_and_append, so the write itself is still atomic w.r.t.
-    # other writers.
-    self.transact([{
-        "e": eid,
-        "a": "value",
-        "v": initial,
-        "valid_from": self._clock(),
-    }])
+        atom = Atom(eid=eid, db_id=_get_db_id(self), _db=self)
+        # Write the initial value via the same path swap/reset use.
+        # Lock held across check+write linearises concurrent allocators.
+        self.transact([{
+            "e": eid,
+            "a": "value",
+            "v": initial,
+            "valid_from": self._clock(),
+        }])
     return atom
 
 

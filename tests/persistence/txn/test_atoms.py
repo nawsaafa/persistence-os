@@ -251,6 +251,23 @@ def test_db_atom_concurrent_allocation_linearises():
             f" != n_threads={n_threads}"
         )
 
+        # v0.5.2 R2 W1 round-2 nit closure: pin the contract literally —
+        # exactly ONE winner, the rest raise ``ValueError``. The
+        # end-state ``len(opens) == 1`` invariant below already implied
+        # this (since each successful db.atom emits an open assert),
+        # but the explicit count assertion is what the docstring
+        # promises and surfaces a regression earlier if a future patch
+        # breaks the "exactly one wins" property without breaking the
+        # open-assert count (e.g. a hypothetical retraction-then-write
+        # path).
+        assert len(results) == 1, (
+            f"iter {i}: expected exactly 1 winner, got {len(results)}"
+        )
+        assert len(errors) == n_threads - 1, (
+            f"iter {i}: expected {n_threads - 1} ValueError losers,"
+            f" got {len(errors)}"
+        )
+
         # End-state: exactly one open ``value`` assert. This is the
         # strongest invariant and what MAJOR-1 actually breaks.
         opens = [

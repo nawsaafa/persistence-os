@@ -773,7 +773,7 @@ R1 round-1 surfaced that the original 5 OQs were not the actual blockers. The li
 | R2-R2 | 8.63 | 8.40 | READY | +0.03 / +0.00 | R2-W1 = `5fb0fd3` (closes 7 cross-ref drift defects + adds sound `mcp.audit-read` capability column on Resources table) |
 | R2-R3 | **8.66** | **8.40** | **READY** (final stamp) | +0.03 / +0.00 | R2-W2 = `94a90a0` (closes 2 last-mile drift defects: `_server.py` HTTP-experimental qualifier + `examples` keyword generator-policy clarification) |
 
-**ARIS R2 final score: mean 8.66 / min 8.40 — PASS.** All 5 W4 polish items APPROVED across the 3 rounds; R2 surfaced 9 cumulative cross-reference drift defects (no new BLOCKERs, no new ADRs/gates/risks); R2-W3 = `<final commit>` updates the Status header + this final-score block.
+**ARIS R2 final score: mean 8.66 / min 8.40 — PASS.** All 5 W4 polish items APPROVED across the 3 rounds; R2 surfaced 9 cumulative cross-reference drift defects (no new BLOCKERs, no new ADRs/gates/risks); R2-W3 = `d27ec03` updates the Status header + this final-score block.
 
 **R2 closed across the 3 rounds:**
 - 7 cross-ref drift defects in R2-R1 (W1): `_NAMES` location, `G2 covers all three` overstatement + R4-vs-R11 ref bug, output-schema wire-form contradiction, stale "stdio or WS", `_http_security.py` "per-connection session" description, ADR-17 "R8" vs actual R12, `audit.py:611-717` → 612-720

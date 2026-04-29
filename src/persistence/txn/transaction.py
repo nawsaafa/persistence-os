@@ -50,6 +50,7 @@ class Transaction:
     attempt: int
     read_set: set[Ref] = field(default_factory=set)
     write_set: dict[Ref, Any] = field(default_factory=dict)
+    ensure_set: set[Ref] = field(default_factory=set)
     effect_intent_log: list[EffectIntent] = field(default_factory=list)
     commit_id: str | None = None
 
@@ -139,6 +140,44 @@ class Transaction:
         new_value = fn(current, *args)
         self.assoc(ref, new_value)
         return new_value
+
+    def ensure(self, ref: Ref) -> Any:
+        """Add ``ref`` to ``ensure_set`` AND return its snapshot value.
+
+        Mirrors Clojure ``LockingTransaction.ensure(ref)`` which returns
+        the deref'd value so ``ensure`` is a strict superset of ``deref``
+        for ergonomic chained reads. Internally calls ``self.deref(ref)``
+        (which adds ``ref`` to ``read_set`` and returns the snapshot) then
+        adds ``ref`` to ``ensure_set`` so any subsequent body code that
+        ignores the return value still gets the conflict-padding behavior.
+
+        Conflict detection at commit reads ``read_set | write_set |
+        ensure_set`` against ``db.store.since(t_start)`` — if any datom
+        on any of the three sets has ``tx_time > t_start``, the dosync
+        retries.
+
+        Note on the dual sets: because ``tx.ensure(ref)`` calls
+        ``tx.deref(ref)`` which already adds to ``read_set``, the
+        conflict-detection union is mathematically equivalent to just
+        unioning ``ensure_set`` into ``read_set``. The semantic value
+        of a separate ``ensure_set`` is **provenance distinguishability**
+        — at commit time an external auditor reading the commit datom
+        can tell which refs were "actually deref'd for value" (in
+        ``:persistence.txn/read-set``) vs which were "padded for
+        conflict-detection only" (in ``:persistence.txn/ensure-set``).
+
+        See v0.5.2 design § F2.
+        """
+        from persistence.txn.errors import RefBranchMismatch
+        from persistence.txn._db_extension import _get_db_id
+
+        if ref.db_id != _get_db_id(self.db):
+            raise RefBranchMismatch(
+                f"ref {ref!r} belongs to a different DB than this dosync"
+            )
+        value = self.deref(ref)  # also adds to read_set + branch-checks
+        self.ensure_set.add(ref)
+        return value
 
 
 
@@ -263,6 +302,7 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
             tx, "_deadline_set", False
         ),
         ":persistence.txn/read-set": sorted(r.eid for r in tx.read_set),
+        ":persistence.txn/ensure-set": sorted(r.eid for r in tx.ensure_set),
         ":persistence.txn/intent-log": intent_log_wire,
     }
 
@@ -323,7 +363,11 @@ def _commit_attempt(tx: "Transaction") -> bool:
     # narrow the lock window to the conflict-check + transact-batch core.
     provenance = _build_commit_provenance(tx, commit_id)
     with tx.db.store._lock:
-        touched = {r.eid for r in tx.read_set} | {r.eid for r in tx.write_set}
+        touched = (
+            {r.eid for r in tx.read_set}
+            | {r.eid for r in tx.write_set}
+            | {r.eid for r in tx.ensure_set}
+        )
         if any_datoms_since(tx.db, tx.t_start, touched):
             return False
         # Apply atomically as one db.transact() — write_set + commit datom.

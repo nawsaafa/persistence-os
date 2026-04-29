@@ -164,6 +164,12 @@ def register_txn_specs() -> None:
     register(":persistence.txn/committed-at", inst())
     register(":persistence.txn/retry-count", _non_negative_int_spec)
     register(":persistence.txn/read-set", seq_of(str_()))
+    # v0.5.2 § F2 — refs added to ``ensure_set`` via ``tx.ensure(ref)`` for
+    # conflict-detection padding without value semantics. Same shape as
+    # read-set (sorted list of eids); auditor can distinguish "deref'd
+    # for value" (read-set) from "padded for conflict-detection only"
+    # (ensure-set) at commit time.
+    register(":persistence.txn/ensure-set", seq_of(str_()))
     register(":persistence.txn/non-deterministic-retry", bool_())
     # v0.5.1: per-element fixed-key map shape replaces the v0.5.0a1 placeholder
     # ``seq_of(_uuid_str_spec)``, which was registered before the intent-log

@@ -381,7 +381,7 @@ A second, opt-in alternative (`s.escape.fact()` style method-call form) was cons
 
 ### ADR-4: Audit chain uses `:mcp/...` namespace; no new prev-hash chain
 
-**Decision.** All MCP-emitted datoms use `Datom.a = "mcp/op-{remember,recall,forget,audit-window,replay,branch}"`. The `prev_hash` field chains into the same root audit chain as `:audit/`, `:tx/`, `:repl/`, `:mcts/`, etc.
+**Decision.** All MCP-emitted datoms use `Datom.a = "mcp/op-{remember,recall,forget,audit-window,replay,view}"` (six verbs — see ADR-15 for the full single-source-of-truth `_NAMES` table). The `prev_hash` field chains into the same root audit chain as `:audit/`, `:tx/`, `:repl/`, `:mcts/`, etc.
 
 **Rationale.** Module 7 set the precedent — REPL ops chain into the same audit chain rather than forking a per-Module chain. MCP follows. A reviewer asking "does this session have any unaudited MCP traffic" gets a single chain to walk, not a graph of chains.
 
@@ -423,9 +423,9 @@ A second, opt-in alternative (`s.escape.fact()` style method-call form) was cons
 
 **Decision.** `Substrate.open(store="memory")` / `Substrate.open(store="sqlite:///path/to/db")` / `Substrate.open(store="postgres://user:pass@host/db")`. URI is parsed; backend is loaded from a registered map.
 
-**Rationale.** The Postgres backend (#137) ships in Phase 1 alongside this stream; using a URI from day one means adopters don't refactor when they migrate from sqlite to postgres. Three backends in v0.8: `memory` (existing), `sqlite` (existing), `postgres` (Phase 1 #137 — depends on optional `[postgres]` extra).
+**Rationale.** The Postgres backend (#137) ships in Phase 1 alongside this stream — see `docs/plans/2026-04-30-v0.8.0-postgres-store-design.md` ADR-10 for psycopg + lazy-import + `BackendNotInstalled` semantics this contract relies on. Using a URI from day one means adopters don't refactor when they migrate from sqlite to postgres. Three backends in v0.8: `memory` (bare keyword, existing), `sqlite:///<path>` (URI, existing), `postgres://...` (URI, Phase 1 #137 — depends on optional `[postgres]` extra).
 
-**Consequence.** The URI parser is a 30-line addition; the backend dispatch is a `match` statement. The `Substrate.open()` keyword `store` is a positional convenience that maps to `Store.open(uri=...)` under the hood.
+**Consequence.** The URI parser is a 30-line addition; the backend dispatch is a `match` statement keyed on URI scheme (`memory` → `InMemoryStore`, `sqlite` → `SQLiteStore`, `postgres` → `PostgresStore`). The `Substrate.open()` keyword `store` is a positional convenience that maps to `Store.open(uri=...)` under the hood. PG5 (Postgres design doc § 12 task table) wires this in coordination with SDK1 — the Postgres impl assumes ADR-9's dispatcher exists; SDK1 stubs the `postgres://` arm to raise `BackendNotInstalled` until PG2 lands.
 
 ### ADR-10: First-party adapters in v0.8 = Python SDK + MCP. LangChain / OpenAI Assistants are Phase 2.
 
@@ -491,7 +491,9 @@ A second, opt-in alternative (`s.escape.fact()` style method-call form) was cons
 | `Datom.a` storage | `mcp/op-<verb>` slashed kebab | no | `mcp/op-remember` |
 | `AuditEntry.op` wire | `:mcp/op-<verb>` colon-prefixed | **yes** | `:mcp/op-remember` |
 
-**Rationale.** Module 7 REPL set the precedent for the storage-vs-wire colon split (ADR-12 of that doc). The MCP server inherits the same pattern. The new `persistence_<verb>` form is the public-facing tool name (host-aggregator-collision-safe via the `persistence_` prefix per MCP server-tools naming guidance); the internal `mcp.<verb>` capability name stays in the existing Module 7 capability namespace; the `Datom.a` and `AuditEntry.op` forms preserve the stored-vs-wire convention `audit_entry_to_datom` already enforces (`src/persistence/effect/handlers/audit.py:92-96`).
+**Rationale.** Module 7 REPL set the precedent for the storage-vs-wire colon split (ADR-12 of that doc). The MCP server inherits the same pattern. The new `persistence_<verb>` form is the public-facing tool name (host-aggregator-collision-safe via the `persistence_` prefix per MCP server-tools naming guidance); the internal `mcp.<verb>` capability name stays in the existing Module 7 capability namespace; the `Datom.a` and `AuditEntry.op` forms preserve the stored-vs-wire convention `audit_entry_to_datom` already enforces (`src/persistence/effect/handlers/audit.py:611-717` post-v0.5.2 merge — function lives in the same module's lower half alongside `datom_to_audit_entry`).
+
+**Capability-name asymmetry note.** Five tools take a `mcp.<wire-verb>` capability (`mcp.remember`, `mcp.recall`, `mcp.forget`, `mcp.replay`, `mcp.view`); `audit_window` takes `mcp.audit-read` instead of `mcp.audit-window`. This is deliberate, not an oversight: the capability grants *read access to the audit chain* as a resource, not *use of one specific tool*. Future MCP additions like `audit_tail` (already a resource subscription, not a tool) or a v0.9 `audit_replay_at(tx)` would all sit under the same `mcp.audit-read` cap rather than minting a new `mcp.<tool-verb>` per surface. Renaming to `mcp.audit-window` would tie the cap to one tool name and force a breaking cap rename when new audit-shape tools land. v0.9 may introduce `mcp.audit-write` as a sibling if any audit-mutation tool ever ships; the resource-shaped cap namespace stays open.
 
 **Consequence.** All 6 tools have a fixed, enumerated row in this table:
 
@@ -589,7 +591,7 @@ Start `python -m persistence.sdk.mcp --store sqlite:///$TMP/g2.db --transport st
 7. Client sends `resources/subscribe` for the `audit_tail` URI. Within 2 seconds the test triggers another `tools/call persistence_remember`; the client receives an MCP `notifications/resources/updated` for `audit_tail` referencing the new tx.
 8. Inspect the underlying `--store` (sqlite) directly: assert exactly 3 entries with `Datom.a in {"mcp/op-remember", "mcp/op-recall", "mcp/op-remember"}` (one per tool call), all `prev_hash`-chained correctly via `verify_chain`.
 
-The test runs against BOTH `sqlite:` and `memory:` stores (parametrized), but **stdio transport ONLY** — Streamable HTTP is EXPERIMENTAL (per ADR-15b) and exercised separately in G12 (HTTP-experimental regression). G2 is the v0.8 *conformance* gate; mixing HTTP into it would conflate "stable contract you can pin against" with "experimental surface that may break in patch". (W3 SHOULD-FIX-2 closure: explicit conformance/experimental separation.)
+The test runs against BOTH the `memory` (bare keyword, in-process) and `sqlite:///<tmp>` (URI, durable) backends per ADR-9's URI-dispatch contract — parametrized as a single test fixture that swaps backends. The `memory` case mints + serves in one invocation (`python -m persistence.sdk.mcp --store memory --mint-token --label g2 --serve`) per ADR-15a since an in-memory token store cannot be pre-populated out-of-band; the `sqlite:///` case mints into the same store first (`--mint-token --label g2`) and then launches the server pointing at it (`--token-file <tmp>/g2.tok --serve`). Both run **stdio transport ONLY** — Streamable HTTP is EXPERIMENTAL (per ADR-15b) and exercised separately in G12 (HTTP-experimental regression). G2 is the v0.8 *conformance* gate; mixing HTTP into it would conflate "stable contract you can pin against" with "experimental surface that may break in patch". (W3 SHOULD-FIX-2 closure: explicit conformance/experimental separation.)
 
 ### G3 — Stability decorator system
 
@@ -753,7 +755,17 @@ R1 round-1 surfaced that the original 5 OQs were not the actual blockers. The li
 
 **R3 W3 polish** applied in the present commit: schema-generator `$ref` inliner explicit, G2 stdio-only conformance vs G12 HTTP experimental separation, HTTP per-request auth (no per-connection session) clarification, `Origin: null` literal vs missing-Origin distinction, escape-hatch audit-entry shape pinned `@experimental`. SDK5 + total LOC bumped 250→350 / 1100→1200.
 
-**Bar:** mean ≥ 8.5 / min ≥ 7.5 — **PASSED** at R3.
+**W4 coherence polish (2026-04-29 evening, post-R3-PASS)** — pause-and-polish pass before impl dispatch (user-requested; covers post-3-round-churn risks codex doesn't catch on its own). Five touch-ups, design semantics unchanged:
+
+1. **ADR-4 stale `branch` → `view`** in the Datom.a example list: post-W1 rename of `branch_at` → `view_at` (per Module 7 ADR-13 cursor-not-fork alignment) had not propagated to ADR-4's example string. Fixed.
+2. **ADR-15 file:line corrected** for `audit_entry_to_datom` reference: doc said `audit.py:92-96`; actual location post-v0.5.2 merge is `audit.py:611-717`. Verified via Serena `find_symbol`.
+3. **ADR-15 capability-name asymmetry rationale added.** Five tools take `mcp.<wire-verb>` caps; `audit_window` takes `mcp.audit-read`. Documented why this is deliberate (resource-shaped cap namespace lets future audit tools sit under same cap; renaming to `mcp.audit-window` would tie cap to one tool name and force breaking rename).
+4. **G2 wording polish** — `memory` is a bare keyword per ADR-9 (not URI scheme `memory:`); `sqlite:///` is URI form. Clarified the parametrized-fixture per-backend token-bootstrap path: memory case mints + serves in one invocation per ADR-15a; sqlite case mints out-of-band first.
+5. **ADR-9 cross-ref to Postgres design** added — cross-references the Postgres design doc's ADR-10 (psycopg + lazy-import + `BackendNotInstalled` semantics) so the SDK1 stub-arm contract is traceable to where it lands.
+
+**No ADR added or removed; no gate added or removed; no risk added or removed.** Design semantics unchanged from R3-PASS state. ARIS R2 (post-polish re-review) is dispatched as a separate run to validate the polish doesn't drift the score.
+
+**Bar:** mean ≥ 8.5 / min ≥ 7.5 — **PASSED** at R3, re-validated post-W4 in R4 (see `review-stage/v0.8.0-adapter-sdk-r2/AUTO_REVIEW.md` once R4 completes).
 
 **Closed across the loop:**
 - 3 R1 BLOCKERs (MCP transport+lifecycle, tool schemas + result shapes, Substrate stable-surface leak)

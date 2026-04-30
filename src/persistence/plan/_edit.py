@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 
 __all__ = [
     "edit_step",
+    "insert_step_after",
+    "insert_step_before",
+    "delete_step",
 ]
 
 
@@ -98,6 +101,49 @@ def _replace_first(
     return _dc_replace(node, children=tuple(new_children)), matched
 
 
+def _splice_first(
+    node: Node,
+    step_id: str,
+    splicer: Callable[[tuple[Node, ...], int], tuple[Node, ...]],
+) -> tuple[Node, Node | None]:
+    """Walk pre-order DFS; on first match of a CHILD whose id == ``step_id``,
+    call ``splicer(siblings_tuple, idx)`` to produce the new sibling tuple.
+
+    Used by insert_step_after / insert_step_before / delete_step where
+    the operation rewrites the parent's children list rather than the
+    matched node itself.
+
+    Returns ``(new_tree, matched_old_node)`` or ``(node, None)`` if no
+    match. Note: a root-level match (``node.id == step_id``) is NOT
+    found by this walker — root has no parent to splice into. Callers
+    surface that as ``StepIdNotFound`` with a "root cannot be a sibling-
+    relative target" message.
+    """
+    # Search children directly first (so the parent gets to splice).
+    for idx, child in enumerate(node.children):
+        if child.id == step_id:
+            new_children = splicer(node.children, idx)
+            return _dc_replace(node, children=tuple(new_children)), child
+
+    # No direct child match — recurse.
+    new_children_list: list[Node] = []
+    matched: Node | None = None
+    for child in node.children:
+        if matched is None:
+            new_child, child_matched = _splice_first(child, step_id, splicer)
+            if child_matched is not None:
+                matched = child_matched
+                new_children_list.append(new_child)
+            else:
+                new_children_list.append(child)
+        else:
+            new_children_list.append(child)
+
+    if matched is None:
+        return node, None
+    return _dc_replace(node, children=tuple(new_children_list)), matched
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -139,5 +185,139 @@ def edit_step(
             f"duplicate-subtree caveat."
         )
     # Audit emission lands in C4 — this commit is functional shape only.
+    _ = tx  # unused-arg gate for typecheckers; wired up in C4
+    return new_tree
+
+
+def insert_step_after(
+    plan: Node,
+    step_id: str,
+    new_step: Node,
+    *,
+    tx: "Transaction",
+) -> Node:
+    """Insert ``new_step`` immediately after the child step matching ``step_id``.
+
+    The matched step's parent's ``children`` tuple is rebuilt as
+    ``(..., matched, new_step, ...)``. ``step_id`` MUST be a non-root
+    node — root-level inserts have no defined parent.
+
+    Args:
+        plan: the Plan AST root.
+        step_id: the 32-hex ``Node.id`` of the step that ``new_step``
+            should appear AFTER.
+        new_step: the node to insert.
+        tx: the active ``Transaction``.
+
+    Returns:
+        A new ``Node`` (root) with ``new_step`` spliced in.
+
+    Raises:
+        PlanEditOutsideDosync: if called outside a ``dosync`` body.
+        StepIdNotFound: if ``step_id`` is missing OR matches the root
+            (root has no parent slot for sibling-relative inserts;
+            wrap the plan in a ``:seq`` for top-level prepend / append).
+    """
+    _require_dosync()
+    plan_id_before = plan.id
+
+    def _splicer(siblings: tuple[Node, ...], idx: int) -> tuple[Node, ...]:
+        return siblings[: idx + 1] + (new_step,) + siblings[idx + 1 :]
+
+    new_tree, matched = _splice_first(plan, step_id, _splicer)
+    if matched is None:
+        raise StepIdNotFound(
+            f"insert_step_after: step_id {step_id!r} not found as a "
+            f"non-root node in plan (root={plan_id_before!r}). Root-level "
+            f"sibling inserts are undefined (root has no parent); wrap "
+            f"the plan in a :seq if you need to prepend / append at the "
+            f"top level."
+        )
+    _ = tx  # unused-arg gate for typecheckers; wired up in C4
+    return new_tree
+
+
+def insert_step_before(
+    plan: Node,
+    step_id: str,
+    new_step: Node,
+    *,
+    tx: "Transaction",
+) -> Node:
+    """Insert ``new_step`` immediately before the child step matching ``step_id``.
+
+    Symmetric to :func:`insert_step_after`. Same root-level constraint.
+    """
+    _require_dosync()
+    plan_id_before = plan.id
+
+    def _splicer(siblings: tuple[Node, ...], idx: int) -> tuple[Node, ...]:
+        return siblings[:idx] + (new_step,) + siblings[idx:]
+
+    new_tree, matched = _splice_first(plan, step_id, _splicer)
+    if matched is None:
+        raise StepIdNotFound(
+            f"insert_step_before: step_id {step_id!r} not found as a "
+            f"non-root node in plan (root={plan_id_before!r}). Root-level "
+            f"sibling inserts are undefined (root has no parent); wrap "
+            f"the plan in a :seq if you need to prepend / append at the "
+            f"top level."
+        )
+    _ = tx  # unused-arg gate for typecheckers; wired up in C4
+    return new_tree
+
+
+def delete_step(
+    plan: Node,
+    step_id: str,
+    *,
+    tx: "Transaction",
+) -> Node:
+    """Remove the child step matching ``step_id`` from its parent's children.
+
+    Args:
+        plan: the Plan AST root.
+        step_id: the 32-hex ``Node.id`` of the step to remove.
+        tx: the active ``Transaction``.
+
+    Returns:
+        A new ``Node`` (root) with the matched step removed.
+
+    Raises:
+        PlanEditOutsideDosync: if called outside a ``dosync`` body.
+        StepIdNotFound: if ``step_id`` is missing OR matches the root
+            (deleting the root has no defined return plan; restructure
+            to delete a child of a wrapping ``:seq``).
+
+    Caveat (Phase 2.0a):
+        The design § 4.1 line 285 specifies "only allowed if no
+        downstream step has executed". That falsifiable check requires
+        threading a ``completed_step_ids`` set through the Transaction
+        object — a substrate change deferred to a follow-up
+        (substrate-backlog #200; see scratch impl plan decision 2).
+        Until then, ``delete_step`` is permissive: any step inside a
+        dosync may be deleted regardless of whether downstream steps
+        have already run. Callers that care MUST validate at the call
+        site.
+    """
+    _require_dosync()
+    plan_id_before = plan.id
+
+    # TODO #140 follow-up: downstream-execution check (substrate-backlog #200)
+    # Once Transaction tracks completed_step_ids, raise
+    # PlanEditDownstreamExecuted here when any downstream step's id is
+    # in the completed set. Until then, deletion is unconditional.
+
+    def _splicer(siblings: tuple[Node, ...], idx: int) -> tuple[Node, ...]:
+        return siblings[:idx] + siblings[idx + 1 :]
+
+    new_tree, matched = _splice_first(plan, step_id, _splicer)
+    if matched is None:
+        raise StepIdNotFound(
+            f"delete_step: step_id {step_id!r} not found as a non-root "
+            f"node in plan (root={plan_id_before!r}). Root-level deletes "
+            f"are undefined (no parent to splice from, no defined return "
+            f"plan); restructure to delete a child of a wrapping :seq."
+        )
     _ = tx  # unused-arg gate for typecheckers; wired up in C4
     return new_tree

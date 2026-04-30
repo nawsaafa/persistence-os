@@ -33,7 +33,7 @@ import uuid
 from typing import Any, Optional
 
 from persistence.sdk._audit import build_escape_hatch_payload
-from persistence.sdk._stability import stable
+from persistence.sdk._stability import experimental, stable
 from persistence.sdk.uri import open_store
 
 
@@ -166,6 +166,30 @@ class _TxnNamespace:
         pass-through to :meth:`persistence.fact.DB.ref`.
         """
         return self._substrate._db.ref(ref_id, **kwargs)
+
+    @experimental(
+        reason=(
+            "PG6 R3-M1: speculation / rollback / checkpointing primitive. "
+            "Surface may evolve in v0.9 once Phase-2 dogfooding identifies "
+            "the load-bearing sub-shape; adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def fold(self, seed, items, fn, **kwargs):
+        """Curated re-export of :meth:`persistence.fact.DB.fold`.
+
+        Folds ``items`` through ``fn`` against the substrate's underlying
+        :class:`DB`, accumulating fact-emission transactionally per
+        checkpoint. See :meth:`persistence.fact.DB.fold` for the full
+        signature, error-handling discipline (``on_error``), batch
+        semantics (``checkpoint_every``), and stability promise.
+
+        ``@experimental`` per Adapter SDK ADR-5 — this is a new surface
+        that the v0.8 contract intentionally does NOT cover; the v0.9
+        cycle decides whether to fold the shape into a curated stable
+        namespace based on Phase-2 dogfooding signal.
+        """
+        return self._substrate._db.fold(seed, items, fn, **kwargs)
 
 
 class _ReplNamespace:

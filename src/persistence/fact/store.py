@@ -39,16 +39,29 @@ will race.
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Protocol
+from typing import Iterable, Iterator, Protocol
 
 from persistence.fact.datom import Datom
+from persistence.store._codec import (
+    TX_PLACEHOLDER as _CODEC_TX_PLACEHOLDER,
+    TextDatomCodec,
+    with_tx as _shared_with_tx,
+)
 
 _MIGRATION_DIR = Path(__file__).with_suffix("").parent / "migrations"
+
+# Module-level codec instance — shared by SQLiteStore (encode +
+# decode) and re-exported as the SQLite/text wire shape. PG2 (Phase 1
+# stream #165) consolidates the previously module-local ``_encode`` /
+# ``_decode`` helpers into ``persistence.store._codec.TextDatomCodec``;
+# the names below are kept as thin module-level shims so existing
+# call-sites and any external imports of ``persistence.fact.store._encode``
+# / ``_decode`` / ``_with_tx`` continue to resolve.
+_codec = TextDatomCodec()
 
 
 def load_migrations() -> list[tuple[str, str]]:
@@ -349,40 +362,36 @@ class SQLiteStore:
 
 
 # ---------------------------------------------------------------------------
-# Row <-> Datom encoding. Values are serialized as JSON so SQLite and Postgres
-# can both store them in a TEXT column. Timestamps go ISO-8601 for the same
-# reason. A thicker codec (BSON, MessagePack) is a drop-in replacement.
+# Codec shims — the canonical codec lives at ``persistence.store._codec``.
 # ---------------------------------------------------------------------------
+# Row <-> Datom encoding is canonical-JSON for ``v`` / ``provenance``
+# (so SQLite and Postgres both store them in a TEXT column) and ISO-8601
+# for the SQLite TEXT timestamp columns. PG2 (Phase 1 stream #165)
+# consolidates the helpers into ``persistence.store._codec.TextDatomCodec``
+# so the same canonical implementation backs both SQLite and any future
+# text-wire backend; PostgresStore uses ``NativeDatomCodec`` for its
+# native TIMESTAMPTZ adapter path. See ADR-16 in the design doc for the
+# decision record.
+#
+# These module-level names stay as thin aliases so any existing import
+# of ``from persistence.fact.store import _encode, _decode, _with_tx,
+# TX_PLACEHOLDER`` continues to resolve unchanged. The body is a single
+# delegation to the codec instance.
+
+
 def _encode(d: Datom) -> tuple:
-    return (
-        d.e,
-        d.a,
-        json.dumps(d.v, default=str, sort_keys=True),
-        d.tx,
-        d.tx_time.isoformat(),
-        d.valid_from.isoformat(),
-        d.valid_to.isoformat() if d.valid_to else None,
-        d.op,
-        json.dumps(d.provenance, default=str, sort_keys=True),
-        d.invalidated_by,
-    )
+    """Encode a Datom for SQLite — TEXT-wire shape via :class:`TextDatomCodec`."""
+    return _codec.encode(d)
 
 
 def _decode(row) -> Datom:
-    from datetime import datetime as _dt
+    """Decode a SQLite row back into a Datom via :class:`TextDatomCodec`.
 
-    return Datom(
-        e=row["e"],
-        a=row["a"],
-        v=json.loads(row["v"]),
-        tx=row["tx"],
-        tx_time=_dt.fromisoformat(row["tx_time"]),
-        valid_from=_dt.fromisoformat(row["valid_from"]),
-        valid_to=_dt.fromisoformat(row["valid_to"]) if row["valid_to"] else None,
-        op=row["op"],
-        provenance=json.loads(row["provenance"]),
-        invalidated_by=row["invalidated_by"],
-    )
+    ``row`` may be a :class:`sqlite3.Row` (mapping access by column name,
+    used by SQLiteStore's read paths) or a positional tuple (older test
+    fixtures). The codec accepts both shapes via feature detection.
+    """
+    return _codec.decode(row)
 
 
 #: Sentinel value used in place of a real tx id while a transaction's
@@ -391,32 +400,19 @@ def _decode(row) -> Datom:
 #: any provenance key pointing at the sentinel (e.g. ``superseded_by_tx``)
 #: so downstream readers never observe the placeholder. Kept as -1 (an
 #: impossible real tx) so a stray leak fails loudly in tests.
-TX_PLACEHOLDER: int = -1
+TX_PLACEHOLDER: int = _CODEC_TX_PLACEHOLDER
 
 
 def _with_tx(d: Datom, tx: int) -> Datom:
-    """Return a copy of ``d`` with ``tx`` replaced. ``Datom`` is frozen.
+    """Return a copy of ``d`` with ``tx`` replaced.
 
-    Also rewrites any provenance value equal to :data:`TX_PLACEHOLDER`
-    to the real ``tx`` — this carries forward the
-    ``{"superseded_by_tx": <tx>}`` reference that ``DB.transact`` sets
-    on companion retract datoms before the real tx is known.
+    Thin alias around :func:`persistence.store._codec.with_tx` so that
+    existing imports of ``persistence.fact.store._with_tx`` keep
+    resolving. Behaviour is byte-identical: rewrites any provenance
+    value equal to :data:`TX_PLACEHOLDER` to ``tx``, leaves everything
+    else untouched.
     """
-    prov = d.provenance
-    if prov and any(v == TX_PLACEHOLDER for v in prov.values()):
-        prov = {k: (tx if v == TX_PLACEHOLDER else v) for k, v in prov.items()}
-    return Datom(
-        e=d.e,
-        a=d.a,
-        v=d.v,
-        tx=tx,
-        tx_time=d.tx_time,
-        valid_from=d.valid_from,
-        valid_to=d.valid_to,
-        op=d.op,
-        provenance=prov,  # type: ignore[arg-type]  # D2 ripple — see db.py:251
-        invalidated_by=d.invalidated_by,
-    )
+    return _shared_with_tx(d, tx)
 
 
 __all__ = ["InMemoryStore", "SQLiteStore", "Store", "load_migrations"]

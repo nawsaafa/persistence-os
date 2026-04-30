@@ -23,6 +23,12 @@ from persistence.plan._coerce import (
     register_coercion,
     unregister_coercion,
 )
+from persistence.plan._edit import (
+    delete_step,
+    edit_step,
+    insert_step_after,
+    insert_step_before,
+)
 from persistence.plan._errors import (
     EvaluatorContractError,
     ExpanderContractError,
@@ -31,6 +37,9 @@ from persistence.plan._errors import (
     OptimizerNotAvailable,
     ParseError,
     PlanDepthExceeded,
+    PlanEditDownstreamExecuted,
+    PlanEditOutsideDosync,
+    StepIdNotFound,
     UnimplementedNodeKindError,
 )
 from persistence.plan._walk import walk
@@ -114,18 +123,25 @@ __all__ = [
     "ParseError",
     "PLAN_CANONICAL_VERSION",
     "PlanDepthExceeded",
+    "PlanEditDownstreamExecuted",
+    "PlanEditOutsideDosync",
     "PromotionRecord",
     "ReplayEngine",
     "SkillLibrary",
+    "StepIdNotFound",
     "SubstituteLeafAction",
     "TrainingExample",
     "UnimplementedNodeKindError",
     "apply_action",
+    "delete_step",
+    "edit_step",
     "execute",
     "gate_g1_replay_byte_identity",
     "gate_g2_audit_chain",
     "gate_g3_score_delta",
     "gate_g4_stub",
+    "insert_step_after",
+    "insert_step_before",
     "lookup_coercion",
     "lookup_metric",
     "mcts_promote",

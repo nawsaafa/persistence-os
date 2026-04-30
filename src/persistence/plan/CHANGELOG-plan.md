@@ -1,5 +1,86 @@
 # persistence.plan CHANGELOG
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Plan Edit API (#140)
+
+Phase 2.0a of the persistence-coder MVP (Phase 2 of the v1.0 roadmap).
+Ships in-flight Plan mutation under transaction so the agent can revise
+its Plan AST mid-execution without aborting and re-transacting. Every
+edit emits a ``:plan/edit`` audit datom (ADR-6 invariant) that rides
+the existing Merkle chain at ``effect/handlers/audit.py``.
+
+### Added
+
+- **`_edit.py`** — Plan Edit API module.
+  - `edit_step(plan, step_id, new_op, *, tx) -> Node` — replace a Plan
+    AST node by content-address.
+  - `insert_step_after(plan, step_id, new_step, *, tx) -> Node` —
+    splice a sibling after the matched step.
+  - `insert_step_before(plan, step_id, new_step, *, tx) -> Node` —
+    splice a sibling before the matched step.
+  - `delete_step(plan, step_id, *, tx) -> Node` — remove a step.
+  - All ops are functional / immutable (return a new ``Node``; original
+    unchanged via frozen-dataclass invariant).
+  - All ops require an enclosing ``db.dosync(...)`` body —
+    ``PlanEditOutsideDosync`` raised otherwise.
+- **`step_id` resolution:** ``Node.id`` (32-hex content-address). On
+  duplicate-content subtrees, edit ops target the first occurrence in
+  pre-order DFS walk. See module docstring + scratch impl plan
+  (`docs/plans/2026-04-30-phase-2.0a-plan-edit-impl.md`) decision 1.
+- **Audit invariant (ADR-6):** every successful edit queues a
+  ``:plan/edit`` effect intent via ``tx.effect()`` carrying
+  ``{plan_id, step_id, before_op_hash, after_op_hash}``. The
+  ``txn_commit`` (commit_id) is injected at intent-replay time by
+  ``persistence.txn._replay_effect_intents``. The intent rides the
+  existing Merkle chain — no new chain code.
+- **Errors:** `StepIdNotFound`, `PlanEditOutsideDosync`,
+  `PlanEditDownstreamExecuted` (reserved for substrate-backlog
+  follow-up — see Known gaps below). All exported from
+  ``persistence.plan``.
+- **Public surface in `__init__.py`:** `edit_step`, `insert_step_after`,
+  `insert_step_before`, `delete_step`, `StepIdNotFound`,
+  `PlanEditOutsideDosync`, `PlanEditDownstreamExecuted`.
+
+### Tests
+
+- `tests/plan/test_edit.py` — 19 cases. Unit + Hypothesis @
+  max_examples=200 across 4 properties (round-trip byte-identity under
+  edit, sibling preservation under insert, count-reduction under
+  delete, sequential-edit composition). The "byte-identity replay
+  reconstructs P with the M edits applied at exactly the same
+  Plan-AST positions" gate from § 4.1 line 290 is the round-trip
+  property.
+- `tests/plan/test_edit_audit.py` — 4 cases. 3-edit chain-reconstruction
+  via `before_op_hash` / `after_op_hash` on the matched-step axis;
+  outside-dosync gate trips before any silent emission;
+  `make_audit_handler({:plan/edit})` integration confirms entries
+  share the same Merkle chain (`verify_chain` accepts the sequence,
+  `entries[1].prev_hash == entries[0].id`); mixed edit / insert /
+  delete in one dosync emits 3 chained AuditEntries with shared
+  `txn_commit`.
+
+### Known gaps (Phase 2.0a documented; deferred)
+
+- `delete_step` ships permissive: design § 4.1 line 285 ("only allowed
+  if no downstream step has executed") requires threading a
+  `completed_step_ids` set through `Transaction`. Substrate-backlog
+  follow-up — needs cross-module substrate change with own ADR. Until
+  then, `delete_step` allows any step inside a dosync to be deleted
+  regardless of execution state. `PlanEditDownstreamExecuted` exception
+  is exported (reserved) so downstream callers can pre-write `except`
+  blocks. A `# TODO #140 follow-up` comment marks the spot in
+  `_edit.py::delete_step`.
+- A separate `find_step_by_path` helper for path-based addressing on
+  duplicate-content subtrees is out of scope for #140 — log if Phase
+  2 dogfood surfaces a need.
+
+### Test counts
+
+Pre-2.0a baseline: 1880 passed, 32 skipped, 7 xfailed in 27.91s.
+Post-2.0a: 1903 passed, 32 skipped, 7 xfailed in 32.47s. (+23 new
+tests, no regressions.)
+
+---
+
 ## v0.6.5 (2026-04-28) — MCTS: PUCT search + skill-library 4-gate closed loop
 
 Stream B of the v1.0 ferrari-first roadmap. Adds PUCT tree search over

@@ -72,14 +72,14 @@ This matches Adapter SDK ADR-9.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Iterable, Iterator, TYPE_CHECKING
+from typing import Iterable, Iterator, TYPE_CHECKING
 
 from persistence.fact.datom import Datom
+from persistence.store._codec import NativeDatomCodec, with_tx as _with_tx
 
 if TYPE_CHECKING:  # pragma: no cover — import only for static type checkers
     import psycopg
@@ -224,6 +224,13 @@ class PostgresStore:
         # and the inner ``allocate_and_append`` re-acquires on the same
         # thread.
         self._lock = threading.RLock()
+
+        # Canonical codec — datetime fields pass through psycopg's
+        # TIMESTAMPTZ adapter (ADR-16). PG2 consolidation: this is the
+        # only place the encoded-row shape is defined; ``_encode`` and
+        # ``_decode_tuple`` previously redefined locally here have been
+        # promoted to :class:`persistence.store._codec.NativeDatomCodec`.
+        self._codec = NativeDatomCodec()
 
         # Capture the IsolationLevel enum in closure — psycopg 3 exposes
         # it at the module level. Resolving once avoids re-importing on
@@ -414,7 +421,7 @@ class PostgresStore:
                                 VALUES (%s, %s, %s, %s, %s, %s,
                                         %s, %s, %s, %s)
                                 """,
-                                [_encode(d) for d in stamped],
+                                [self._codec.encode(d) for d in stamped],
                             )
                         # 4. COMMIT — releases the row lock.
                         conn.commit()
@@ -462,7 +469,7 @@ class PostgresStore:
         :meth:`transact_serializable` so the allocator owns the tx
         space.
         """
-        rows = [_encode(d) for d in datoms]
+        rows = [self._codec.encode(d) for d in datoms]
         if not rows:
             return
         with self._lock:
@@ -512,7 +519,7 @@ class PostgresStore:
                     )
                     rows = cur.fetchall()
                 conn.commit()  # release the read snapshot's locks
-        return (_decode_tuple(r) for r in rows)
+        return (self._codec.decode(r) for r in rows)
 
     def since(self, tx_time: datetime) -> Iterator[Datom]:
         """Yield datoms whose ``tx_time`` is strictly greater than ``tx_time``."""
@@ -528,7 +535,7 @@ class PostgresStore:
                     )
                     rows = cur.fetchall()
                 conn.commit()
-        return (_decode_tuple(r) for r in rows)
+        return (self._codec.decode(r) for r in rows)
 
     def mark_invalidated(self, tx: int, invalidated_by_tx: int) -> None:
         """Stamp ``invalidated_by`` on every assert datom with ``tx == tx``."""
@@ -593,98 +600,15 @@ class PostgresStore:
 
 
 # ---------------------------------------------------------------------------
-# Codec — byte-identical to ``persistence.fact.store._encode`` /
-# ``_decode``. We keep a local copy (rather than importing) so PostgresStore
-# remains importable on machines without sqlite3 (which the codec module
-# pulls in via the SQLiteStore class definition).
+# Codec — see ``persistence.store._codec.NativeDatomCodec``.
 # ---------------------------------------------------------------------------
-
-# Sentinel matches ``persistence.fact.store.TX_PLACEHOLDER`` exactly. We
-# do not import it because that would tie this optional backend to the
-# substrate's `fact` layout in a way that PG3+ may want to revisit.
-_TX_PLACEHOLDER: int = -1
-
-
-def _encode(d: Datom) -> tuple:
-    """Encode a Datom as a 10-tuple matching the SQLite codec.
-
-    ``v`` and ``provenance`` are canonical JSON (``sort_keys=True``).
-    Timestamps are passed through as :class:`datetime.datetime` —
-    psycopg 3's TIMESTAMPTZ adapter handles serialisation directly,
-    so no isoformat round-trip is needed (which would lose tzinfo
-    precision on edge-of-second nanoseconds).
-    """
-    return (
-        d.e,
-        d.a,
-        json.dumps(d.v, default=str, sort_keys=True),
-        d.tx,
-        d.tx_time,
-        d.valid_from,
-        d.valid_to,
-        d.op,
-        json.dumps(d.provenance, default=str, sort_keys=True),
-        d.invalidated_by,
-    )
-
-
-def _decode_tuple(row: tuple[Any, ...]) -> Datom:
-    """Decode a 10-tuple from psycopg back to a Datom.
-
-    The default psycopg row factory returns tuples; we use positional
-    access to match. The column order is fixed by the SELECT in
-    ``all_datoms`` / ``since``.
-    """
-    (
-        e,
-        a,
-        v,
-        tx,
-        tx_time,
-        valid_from,
-        valid_to,
-        op,
-        provenance,
-        invalidated_by,
-    ) = row
-    return Datom(
-        e=e,
-        a=a,
-        v=json.loads(v),
-        tx=tx,
-        tx_time=tx_time,
-        valid_from=valid_from,
-        valid_to=valid_to,
-        op=op,
-        provenance=json.loads(provenance),
-        invalidated_by=invalidated_by,
-    )
-
-
-def _with_tx(d: Datom, tx: int) -> Datom:
-    """Return a copy of ``d`` with ``tx`` replaced.
-
-    Mirrors ``persistence.fact.store._with_tx`` exactly — including the
-    ``TX_PLACEHOLDER`` rewrite for ``superseded_by_tx`` provenance keys.
-    """
-    prov = d.provenance
-    if prov and any(v == _TX_PLACEHOLDER for v in prov.values()):
-        prov = {
-            k: (tx if val == _TX_PLACEHOLDER else val)
-            for k, val in prov.items()
-        }
-    return Datom(
-        e=d.e,
-        a=d.a,
-        v=d.v,
-        tx=tx,
-        tx_time=d.tx_time,
-        valid_from=d.valid_from,
-        valid_to=d.valid_to,
-        op=d.op,
-        provenance=prov,  # type: ignore[arg-type]  # see fact.store._with_tx
-        invalidated_by=d.invalidated_by,
-    )
-
+# PG2 (Phase 1 stream #165) replaced the locally-redefined
+# ``_encode`` / ``_decode_tuple`` / ``_with_tx`` helpers with a single
+# canonical implementation in ``persistence.store._codec``. The
+# datetime-as-TIMESTAMPTZ shape is preserved exactly: psycopg 3's
+# adapter handles encode + decode, so no ISO round-trip is forced on
+# the Postgres path. See ADR-16 in
+# ``docs/plans/2026-04-30-v0.8.0-postgres-store-design.md`` § 13a for
+# the codec-strategy decision record.
 
 __all__ = ["PostgresStore"]

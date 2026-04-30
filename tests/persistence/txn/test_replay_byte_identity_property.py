@@ -109,12 +109,29 @@ def _alter_op(draw):
 _alpha = "abcdefghijklmnopqrstuvwxyz"
 
 
+#: Reserved kwarg names that ``tx.effect(op_str, **kwargs)`` cannot accept.
+#: ``"op"`` collides with the positional parameter name in
+#: :meth:`Transaction.effect` (``def effect(self, op: str, **kwargs)`` —
+#: ``transaction.py:97``); passing ``op="..."`` and ``op=None`` together
+#: surfaces as ``TypeError: effect() got multiple values for argument
+#: 'op'``. ``"_txn_commit"`` is the runtime sentinel injected by
+#: ``Runtime.perform`` (``runtime.py:191``) — letting the strategy draw
+#: it as a kwarg key would collide with the runtime's own injection
+#: when the audit handler runs at commit. PG2 (Phase 1 stream #165)
+#: surfaces the underlying root cause that produced the historical
+#: ``('effect', ':metric/observe', dict([('op', None)]))`` shrink case;
+#: the right fix is at the strategy boundary, not the test body.
+_RESERVED_EFFECT_KWARG_KEYS = frozenset({"op", "_txn_commit"})
+
+
 @st.composite
 def _effect_op(draw):
     op = draw(st.sampled_from([":metric/observe", ":log/write", ":io/print"]))
     kwargs = draw(
         st.dictionaries(
-            keys=st.text(_alpha, min_size=1, max_size=8),
+            keys=st.text(_alpha, min_size=1, max_size=8).filter(
+                lambda s: s not in _RESERVED_EFFECT_KWARG_KEYS
+            ),
             values=st.one_of(
                 st.text(max_size=16),
                 st.integers(),

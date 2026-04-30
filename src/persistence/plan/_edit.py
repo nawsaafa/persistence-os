@@ -5,11 +5,42 @@ See ``docs/plans/2026-04-30-phase-2-persistence-coder-design.md`` § 4.1
 truth, and ``docs/plans/2026-04-30-phase-2.0a-plan-edit-impl.md`` for
 the impl decisions.
 
-## Public surface (incremental — see commit history)
+## Public surface
 
-C2 (this commit) lands :func:`edit_step` and the dosync-gate helper.
-C3 adds insert/delete. C4 wires the ``:plan/edit`` audit datom into
-each op via ``tx.effect()``.
+- :func:`edit_step` — replace a Plan AST node, valid only inside a
+  ``dosync`` txn
+- :func:`insert_step_after` / :func:`insert_step_before` — inject a
+  new step adjacent to ``step_id``
+- :func:`delete_step` — remove a step (downstream-execution check
+  deferred; see ``TODO #140 follow-up`` comment in the impl)
+
+## Audit invariant (ADR-6)
+
+Every successful edit emits a ``:plan/edit`` effect intent via
+``tx.effect()`` with kwargs::
+
+    {
+      "plan_id": <Node.id of the plan root before edit>,
+      "step_id": <Node.id of the step being edited>,
+      "before_op_hash": <Node.id of the old subtree (or old root)>,
+      "after_op_hash": <Node.id of the new subtree (or new root)>,
+    }
+
+The ``txn_id`` referenced in the design § 3.7 row is supplied
+automatically by ``persistence.txn.transaction._replay_effect_intents``
+at commit time (passed as ``txn_commit`` kwarg into the effect runtime;
+the audit handler chains the entry into the existing Merkle chain at
+``effect/handlers/audit.py``). No new chain code is required here —
+``:plan/edit`` inherits the existing Merkle chain by being a regular
+effect intent.
+
+For replace-style edits (`edit_step`), ``before_op_hash`` is the matched
+subtree's id (= ``step_id``) and ``after_op_hash`` is the replacement's
+id. For splice-style edits (`insert_step_*`, `delete_step`), the parent
+id changes too, so ``before_op_hash`` / ``after_op_hash`` are the OLD
+ROOT id / NEW ROOT id — that's the pair an auditor uses to chain
+sequential edits ("edit N+1 starts from edit N's after_op_hash"); the
+``step_id`` records the anchor / target.
 
 ## Identity contract — `step_id` is `Node.id`
 
@@ -144,6 +175,29 @@ def _splice_first(
     return _dc_replace(node, children=tuple(new_children_list)), matched
 
 
+def _emit_edit_datom(
+    tx: "Transaction",
+    plan_id: str,
+    step_id: str,
+    before_op_hash: str,
+    after_op_hash: str,
+) -> None:
+    """Queue the ``:plan/edit`` audit datom on the Transaction's intent log.
+
+    The actual emission to the effect runtime (and Merkle-chain hook
+    in ``effect/handlers/audit.py``) happens at commit time via
+    ``persistence.txn.transaction._replay_effect_intents``, which
+    injects the ``txn_commit`` (commit_id) alongside these kwargs.
+    """
+    tx.effect(
+        ":plan/edit",
+        plan_id=plan_id,
+        step_id=step_id,
+        before_op_hash=before_op_hash,
+        after_op_hash=after_op_hash,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -184,8 +238,13 @@ def edit_step(
             f"(Node.id, 32-hex). See _edit.py module docstring for the "
             f"duplicate-subtree caveat."
         )
-    # Audit emission lands in C4 — this commit is functional shape only.
-    _ = tx  # unused-arg gate for typecheckers; wired up in C4
+    _emit_edit_datom(
+        tx,
+        plan_id=plan_id_before,
+        step_id=step_id,
+        before_op_hash=matched.id,
+        after_op_hash=new_op.id,
+    )
     return new_tree
 
 
@@ -233,7 +292,13 @@ def insert_step_after(
             f"the plan in a :seq if you need to prepend / append at the "
             f"top level."
         )
-    _ = tx  # unused-arg gate for typecheckers; wired up in C4
+    _emit_edit_datom(
+        tx,
+        plan_id=plan_id_before,
+        step_id=step_id,
+        before_op_hash=plan_id_before,
+        after_op_hash=new_tree.id,
+    )
     return new_tree
 
 
@@ -263,7 +328,13 @@ def insert_step_before(
             f"the plan in a :seq if you need to prepend / append at the "
             f"top level."
         )
-    _ = tx  # unused-arg gate for typecheckers; wired up in C4
+    _emit_edit_datom(
+        tx,
+        plan_id=plan_id_before,
+        step_id=step_id,
+        before_op_hash=plan_id_before,
+        after_op_hash=new_tree.id,
+    )
     return new_tree
 
 
@@ -319,5 +390,11 @@ def delete_step(
             f"are undefined (no parent to splice from, no defined return "
             f"plan); restructure to delete a child of a wrapping :seq."
         )
-    _ = tx  # unused-arg gate for typecheckers; wired up in C4
+    _emit_edit_datom(
+        tx,
+        plan_id=plan_id_before,
+        step_id=step_id,
+        before_op_hash=plan_id_before,
+        after_op_hash=new_tree.id,
+    )
     return new_tree

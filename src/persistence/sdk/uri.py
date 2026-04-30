@@ -228,18 +228,106 @@ def _open_sqlite(uri: str, kwargs: dict[str, str]) -> Store:
 
 
 def _open_postgres(uri: str, kwargs: dict[str, str]) -> Store:
-    """``postgres://...`` opener — placeholder until PG1 ships.
+    """``postgres://...`` opener — wires through to PG1's PostgresStore.
 
-    Per the dispatcher's task spec for SDK1, the postgres scheme dispatches
-    correctly but the actual backend is not yet implemented; PG1 (the
-    parallel Postgres-Store stream) lands the real opener. SDK1's
-    placeholder raises :class:`BackendNotInstalled` with a helpful message.
+    Per Adapter SDK ADR-9 + Phase 1 stream #137 (PG1):
+
+    1. Lazy-import :class:`persistence.store.postgres.PostgresStore`. If
+       the ``[postgres]`` extra is not installed (``psycopg`` /
+       ``psycopg_pool`` unavailable), raise
+       :class:`BackendNotInstalled` with a clean install hint — the
+       contract guarantees adopters that ``except ImportError`` catch
+       this path uniformly across schemes.
+    2. Pass the URI through to PostgresStore as the libpq DSN. psycopg
+       accepts both the ``postgres://`` and ``postgresql://`` schemes
+       directly in the DSN body so no URI rewriting is needed for the
+       DSN body itself; the ``open_store`` registry only knows
+       ``postgres`` though, so callers who want the ``postgresql://``
+       body must construct the URI accordingly.
+    3. Honour optional pool-tuning query params: ``?pool_min=N``,
+       ``?pool_max=N``, ``?pool_timeout=S``. These are popped from the
+       kwargs dict AND stripped from the URI's query string BEFORE the
+       DSN reaches libpq so libpq does not reject the unknown
+       ``pool_*`` keys. Any other query params (sslmode,
+       application_name, etc.) stay in the DSN and reach psycopg.
+
+    Args:
+        uri: full ``postgres://...`` DSN.
+        kwargs: parsed query-string kwargs (last-write-wins per
+            :func:`open_store`).
+
+    Returns:
+        a fresh :class:`PostgresStore`.
+
+    Raises:
+        BackendNotInstalled: if psycopg or psycopg_pool are not
+            installed. Message includes the pip install hint.
+        ValueError: if a pool-tuning kwarg is malformed (non-numeric
+            ``pool_min`` etc.).
     """
-    raise BackendNotInstalled(
-        "postgres:// backend is not yet available — Phase 1 PG1 stream "
-        "lands it; track via docs/plans/2026-04-30-v0.8.0-postgres-store"
-        "-design.md. Install the [postgres] extra once PG1 ships."
-    )
+    # Pop the SDK-level pool-tuning kwargs BEFORE we hand the DSN to
+    # libpq — libpq does not understand ``pool_*`` keys and would
+    # reject the connection with "invalid URI query parameter".
+    pool_kwargs: dict[str, Any] = {}
+    for k_int in ("pool_min", "pool_max"):
+        if k_int in kwargs:
+            raw = kwargs.pop(k_int)
+            try:
+                pool_kwargs[k_int] = int(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"_open_postgres: {k_int}={raw!r} is not an integer"
+                ) from exc
+    if "pool_timeout" in kwargs:
+        raw = kwargs.pop("pool_timeout")
+        try:
+            pool_kwargs["pool_timeout"] = float(raw)
+        except ValueError as exc:
+            raise ValueError(
+                f"_open_postgres: pool_timeout={raw!r} is not a number"
+            ) from exc
+
+    # Strip the popped kwargs from the URI's query string before
+    # forwarding to libpq. Rebuild with the residual query intact so
+    # e.g. ``sslmode=require`` still reaches psycopg.
+    if pool_kwargs and ":" in uri:
+        split = urlsplit(uri)
+        if split.query:
+            consumed = {"pool_min", "pool_max", "pool_timeout"}
+            kept: list[str] = []
+            for pair in split.query.split("&"):
+                if not pair:
+                    continue
+                k = pair.split("=", 1)[0]
+                if k not in consumed:
+                    kept.append(pair)
+            new_query = "&".join(kept)
+            # Reconstruct using SplitResult._replace — keeps scheme +
+            # netloc + path + fragment exactly.
+            uri = split._replace(query=new_query).geturl()
+
+    # Lazy import — module-level import would force psycopg into the
+    # substrate's required dependency closure, which is exactly what
+    # the optional-extras pattern exists to avoid.
+    try:
+        from persistence.store.postgres import PostgresStore
+    except ImportError as exc:
+        # Two reasons this can fire: (a) psycopg / psycopg_pool not
+        # installed (the [postgres] extra was not requested at install
+        # time); (b) the persistence.store package itself failed to
+        # import for some other reason (highly unlikely). The contract
+        # says BackendNotInstalled subclasses ImportError so adopters
+        # that ``except ImportError`` catch (a) cleanly.
+        raise BackendNotInstalled(
+            f"postgres:// backend requires the [postgres] extra: "
+            f'pip install "persistence[postgres]"  '
+            f"(missing: {exc.name or exc})"
+        ) from exc
+
+    # Hand the cleaned URI through to PostgresStore — psycopg's DSN
+    # parser handles both ``postgres://`` and ``postgresql://`` body
+    # forms plus any query params we didn't pop (sslmode, etc.).
+    return PostgresStore(dsn=uri, **pool_kwargs)
 
 
 # Register the three v0.8 backends at import time. The order matches

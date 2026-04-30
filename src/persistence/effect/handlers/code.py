@@ -53,7 +53,12 @@ The seven datom keys are:
 
 Stdout / stderr full captures are NOT in the datom (potentially huge);
 only the hashes are. Audit-replay reads the recorded hashes; re-execution
-replay re-runs and verifies ``output_hash`` matches.
+replay re-runs and verifies ``output_hash`` matches. The caller-side
+``replay_mode`` is also NOT in the datom — two consecutive runs of the
+same source under ``replay_mode="execute"`` and ``"re-execute"`` MUST
+produce byte-identical datoms (they recorded the same outcome under
+the same caps); including the mode would break that invariant. See
+:func:`_emit_code_exec_datom` for the rationale.
 
 ## Replay semantics (§ 3.7)
 
@@ -128,18 +133,37 @@ class CodeExecOutsideDosync(CodeExecError):
 
 
 class CodeExecTimeout(CodeExecError):
-    """The sandboxed subprocess exceeded ``timeout_seconds`` wall-clock."""
+    """The sandboxed subprocess exceeded ``timeout_seconds`` wall-clock.
+
+    Carries both the configured timeout and whatever was captured up to
+    the SIGKILL on stdout AND stderr. ``partial_stderr`` was added in
+    the 2.0b cleanup pass — the kill path was already draining both
+    streams via ``proc.communicate()`` but the stderr half was dropped
+    on the floor. Threading it into the exception lets callers
+    surface partial diagnostic output (e.g. a body that printed a
+    progress message to stderr right before going into an infinite
+    loop). The audit datom still records hashes only — the partial
+    captures do NOT travel into the wire.
+    """
 
     timeout_seconds: float
     partial_stdout: str
+    partial_stderr: str
 
-    def __init__(self, timeout_seconds: float, partial_stdout: str) -> None:
+    def __init__(
+        self,
+        timeout_seconds: float,
+        partial_stdout: str,
+        partial_stderr: str = "",
+    ) -> None:
         super().__init__(
             f":code/exec subprocess timed out after {timeout_seconds}s "
-            f"(captured {len(partial_stdout)} bytes of stdout before kill)"
+            f"(captured {len(partial_stdout)} bytes of stdout, "
+            f"{len(partial_stderr)} bytes of stderr before kill)"
         )
         self.timeout_seconds = timeout_seconds
         self.partial_stdout = partial_stdout
+        self.partial_stderr = partial_stderr
 
 
 class CodeExecMemoryExceeded(CodeExecError):
@@ -368,11 +392,22 @@ _FORBIDDEN_IMPORT_SENTINEL = "PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:"
 # are the only ones the user's source may name in an ``import`` statement;
 # their transitive stdlib closure is computed empirically at child startup
 # and added to ``sys.modules`` as a side-effect of the four warm-imports
-# below — those modules are reachable via ``import json`` etc. but are
-# NOT directly nameable in user code (the filter rejects e.g.
-# ``import os.path`` because ``os`` is not in ALLOWED_TOP_LEVEL even
-# though the closure included it as a transitive dep of ``pathlib``).
-_ALLOWED_TOP_LEVEL = ("json", "re", "dataclasses", "pathlib")
+# inside the bootstrap shim — those modules are reachable via
+# ``import json`` etc. but are NOT directly nameable in user code (the
+# filter rejects e.g. ``import os.path`` because ``os`` is not in
+# ``ALLOWED_TOP_LEVEL`` even though the closure included it as a
+# transitive dep of ``pathlib``).
+#
+# This constant is the **canonical source of truth** for the allowed-set:
+# the bootstrap shim's frozenset literal is computed from it at module
+# load time via ``str.format``, AND the test suite asserts that the
+# emitted shim text contains every name (regression guard against
+# parent-vs-child drift). See ``test_allowed_set_is_canonical_source``
+# in ``tests/effect/test_code_exec.py``. Mutating this tuple is a
+# breaking change to the audit datom contract — the recorded
+# ``:code/exec/source-hash`` is replay-stable only as long as the
+# allowed-set is fixed for a given semver-pinned release.
+_ALLOWED_TOP_LEVEL: tuple[str, ...] = ("json", "re", "dataclasses", "pathlib")
 
 
 # The bootstrap script that runs in the child interpreter. Stays as a
@@ -400,7 +435,14 @@ _ALLOWED_TOP_LEVEL = ("json", "re", "dataclasses", "pathlib")
 #
 # On a forbidden-import attempt, the filter raises ``ImportError`` with
 # the sentinel prefix; the parent catches it via stderr scanning.
-_CHILD_RUNNER_BOOTSTRAP = r'''
+#
+# The ``__ALLOWED_TUPLE__`` placeholder below is substituted at module
+# load time (see the ``.replace(...)`` on the assignment) so the parent's
+# ``_ALLOWED_TOP_LEVEL`` is the canonical source — a future maintainer
+# changing the parent constant automatically updates the child shim, and
+# the regression test ``test_allowed_set_is_canonical_source`` asserts
+# the substitution actually landed.
+_CHILD_RUNNER_BOOTSTRAP_TEMPLATE = r'''
 import builtins as _builtins
 import io as _io
 import sys as _sys
@@ -409,13 +451,17 @@ import sys as _sys
 # the filter is installed, so the transitive closure populates
 # sys.modules unconditionally. After the filter is on, the user code
 # can import any module already in sys.modules (cache hit), plus any
-# of the four explicitly-allowed top-level names.
+# of the four explicitly-allowed top-level names. The four names below
+# MUST stay in sync with the frozenset literal further down — a drift
+# would silently break the warm-import-vs-allowlist invariant. The
+# parent's ``_ALLOWED_TOP_LEVEL`` is the authority; the test suite
+# pins both sides.
 import json  # noqa: F401  # warm-import for sandbox closure
 import re  # noqa: F401
 import dataclasses  # noqa: F401
 import pathlib  # noqa: F401
 
-_ALLOWED_TOP_LEVEL = frozenset(("json", "re", "dataclasses", "pathlib"))
+_ALLOWED_TOP_LEVEL = frozenset(__ALLOWED_TUPLE__)
 
 # Explicit deny-list. Capability-denial-not-detection (ADR-5) means we
 # do not detect bad CALLS (time.time(), random.random()); we just make
@@ -490,6 +536,19 @@ _sys.stdin = _io.StringIO(_user_stdin)
 _globals = {"__name__": "__sandbox__", "__builtins__": _builtins}
 exec(compile(_source, "<sandbox>", "exec"), _globals)
 '''.lstrip()
+
+
+# Substitute the ``__ALLOWED_TUPLE__`` placeholder with the parent-side
+# canonical tuple repr at module load time. Using ``repr()`` of the tuple
+# gives a Python-source-safe literal (e.g.
+# ``('json', 're', 'dataclasses', 'pathlib')``) that compiles inside the
+# child without re-quoting concerns. This is the linkage that makes
+# ``_ALLOWED_TOP_LEVEL`` load-bearing rather than dead documentation —
+# the constant is referenced HERE, and the test suite asserts the
+# substitution landed (regression guard against parent-vs-child drift).
+_CHILD_RUNNER_BOOTSTRAP = _CHILD_RUNNER_BOOTSTRAP_TEMPLATE.replace(
+    "__ALLOWED_TUPLE__", repr(_ALLOWED_TOP_LEVEL)
+)
 
 
 def _build_input_envelope(source: str, user_stdin: str) -> str:
@@ -584,10 +643,11 @@ def _run_subprocess(
             )
         except subprocess.TimeoutExpired:
             proc.kill()
-            partial_stdout, _partial_stderr = proc.communicate()
+            partial_stdout, partial_stderr = proc.communicate()
             raise CodeExecTimeout(
                 timeout_seconds=timeout_seconds,
                 partial_stdout=partial_stdout or "",
+                partial_stderr=partial_stderr or "",
             )
         wall_clock_ms = int((_time.monotonic() - t0) * 1000)
         return stdout, stderr, int(proc.returncode), wall_clock_ms
@@ -610,7 +670,6 @@ def _emit_code_exec_datom(
     wall_clock_ms: int,
     timeout_seconds: float,
     memory_mb: int,
-    replay_mode: str,
 ) -> None:
     """Queue the ``:code/exec`` audit datom on the Transaction's intent log.
 
@@ -632,10 +691,18 @@ def _emit_code_exec_datom(
     - ``:code/exec/timeout-seconds`` — the configured cap
     - ``:code/exec/memory-mb`` — the configured cap
 
-    Replay mode is NOT in the datom — re-execution-replay calls
-    ``exec_code(replay_mode="re-execute", expected_output_hash=...)``
-    and the audit datom for the replay run is identical to the
-    original-run datom (byte-identity goal).
+    **Replay mode is intentionally NOT in the datom.** Two consecutive
+    invocations of the same source under ``replay_mode="execute"`` and
+    ``replay_mode="re-execute"`` MUST produce byte-identical datoms —
+    they ran the same source under the same caps and got the same
+    hashes. Including replay_mode would break that byte-identity
+    invariant (a re-execution-replay datom would not match the
+    original-run datom even though both recorded the same outcome).
+    The 2.0b cleanup pass removed the dead ``replay_mode`` parameter
+    that the helper accepted but dropped on the floor; the public
+    ``exec_code`` surface keeps ``replay_mode`` because the parameter
+    is wired (gates the post-execution ``CodeExecReplayMismatch``
+    check) and tested (cases #11 + #12).
 
     The kwargs reach the effect handler as a dict with leading-underscore
     Python identifiers (``source_hash`` not ``:code/exec/source-hash``);
@@ -754,7 +821,6 @@ def exec_code(
             wall_clock_ms=int(timeout_seconds * 1000),
             timeout_seconds=timeout_seconds,
             memory_mb=memory_mb,
-            replay_mode=replay_mode,
         )
         raise
 
@@ -776,7 +842,6 @@ def exec_code(
         wall_clock_ms=wall_clock_ms,
         timeout_seconds=timeout_seconds,
         memory_mb=memory_mb,
-        replay_mode=replay_mode,
     )
 
     if forbidden is not None:

@@ -131,7 +131,9 @@ def test_happy_path_print_2_plus_2() -> None:
 
 def test_timeout_kills_subprocess_and_emits_datom() -> None:
     """An infinite-loop body raises CodeExecTimeout; the audit datom
-    is still emitted (audit-emit-then-raise pattern).
+    is still emitted (audit-emit-then-raise pattern). Both partial_stdout
+    and partial_stderr fields are present on the exception (added in the
+    2.0b cleanup pass — previously stderr was drained but discarded).
     """
     db = DB()
     captured: list[dict] = []
@@ -143,6 +145,12 @@ def test_timeout_kills_subprocess_and_emits_datom() -> None:
                 exec_code("while True: pass", tx=tx, timeout_seconds=1.0)
 
     assert exc_info.value.timeout_seconds == 1.0
+    # partial_stdout / partial_stderr fields exist + are strings even
+    # when empty. The bare ``while True: pass`` produces no output so
+    # both are "" — the load-bearing assertion is that the attribute
+    # access works without AttributeError.
+    assert isinstance(exc_info.value.partial_stdout, str)
+    assert isinstance(exc_info.value.partial_stderr, str)
     # Datom captured (1 entry) — audit-emit-then-raise.
     assert len(captured) == 1
     payload = captured[0]
@@ -150,6 +158,36 @@ def test_timeout_kills_subprocess_and_emits_datom() -> None:
     assert payload["exit_code"] == -1
     # wall_clock_ms ≈ timeout_seconds * 1000 (we record the configured cap).
     assert payload["wall_clock_ms"] == 1000
+
+
+def test_timeout_captures_partial_stdout_before_kill() -> None:
+    """A body that prints + flushes BEFORE entering the infinite loop
+    has its pre-loop stdout captured on the kill path. Regression guard
+    for the Commit-1 ``proc.kill() + proc.communicate()`` drain — if a
+    refactor swapped to ``proc.terminate()`` without the second
+    communicate, the buffered output would be lost.
+    """
+    db = DB()
+    captured: list[dict] = []
+    rt = Runtime(handlers=[make_fixed_clock_handler(ts=1.0), _capture_handler(captured)])
+
+    src = (
+        "import json\n"
+        "print('progress', flush=True)\n"
+        "print(json.dumps({'k': 1}), flush=True)\n"
+        "while True:\n    pass\n"
+    )
+    with with_runtime(rt):
+        with db.dosync() as tx:
+            with pytest.raises(CodeExecTimeout) as exc_info:
+                exec_code(src, tx=tx, timeout_seconds=1.0)
+
+    # Pre-loop output captured. Both lines flush before the loop, so
+    # both reach the parent's stdout pipe before the kill.
+    assert "progress" in exc_info.value.partial_stdout
+    assert '"k": 1' in exc_info.value.partial_stdout
+    # No stderr writes in this body — partial_stderr is empty string.
+    assert exc_info.value.partial_stderr == ""
 
 
 # ---------------------------------------------------------------------------
@@ -607,3 +645,56 @@ def test_invalid_replay_mode_raises() -> None:
         with db.dosync() as tx:
             with pytest.raises(ValueError, match="replay_mode"):
                 exec_code("print(1)", tx=tx, replay_mode="audit")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Bonus — _ALLOWED_TOP_LEVEL is the canonical source of truth (parent⇄child)
+# ---------------------------------------------------------------------------
+
+
+def test_allowed_set_is_canonical_source() -> None:
+    """The parent-side ``_ALLOWED_TOP_LEVEL`` constant is the single
+    source of truth for the sandbox allowed-set; the child-side
+    bootstrap shim's frozenset literal is generated from it via
+    ``str.format``-style placeholder substitution at module load time.
+
+    This test is the regression guard for parent-vs-child drift — if a
+    future maintainer changes one side and forgets the other, this
+    assertion fails. Without this test the parent constant would be
+    dead code (Pyright "unused" warning was the original signal).
+
+    Specifically asserts:
+
+    - The bootstrap shim text contains every name from ``_ALLOWED_TOP_LEVEL``.
+    - The placeholder ``__ALLOWED_TUPLE__`` was substituted (no leak).
+    - The shim's frozenset literal matches ``repr(_ALLOWED_TOP_LEVEL)``.
+    """
+    from persistence.effect.handlers.code import (
+        _ALLOWED_TOP_LEVEL,
+        _CHILD_RUNNER_BOOTSTRAP,
+    )
+
+    # Substitution happened — no placeholder leaked.
+    assert "__ALLOWED_TUPLE__" not in _CHILD_RUNNER_BOOTSTRAP, (
+        "bootstrap shim still contains the __ALLOWED_TUPLE__ placeholder; "
+        "the module-load-time substitution failed"
+    )
+
+    # Every allowed name appears in the shim text.
+    for name in _ALLOWED_TOP_LEVEL:
+        assert name in _CHILD_RUNNER_BOOTSTRAP, (
+            f"allowed name {name!r} not in bootstrap shim — "
+            f"parent⇄child drift"
+        )
+
+    # The exact frozenset literal lands in the shim.
+    expected_literal = (
+        f"_ALLOWED_TOP_LEVEL = frozenset({_ALLOWED_TOP_LEVEL!r})"
+    )
+    assert expected_literal in _CHILD_RUNNER_BOOTSTRAP, (
+        f"frozenset literal {expected_literal!r} not found in shim — "
+        f"the .replace() substitution did not produce the expected text"
+    )
+
+    # And the four documented names are exactly what the v0.5 design pins.
+    assert set(_ALLOWED_TOP_LEVEL) == {"json", "re", "dataclasses", "pathlib"}

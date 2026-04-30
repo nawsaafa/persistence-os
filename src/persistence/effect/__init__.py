@@ -27,6 +27,17 @@ from persistence.effect.handlers.clock import (
     make_replay_clock_handler,
     make_system_clock_handler,
 )
+from persistence.effect.handlers.code import (
+    CodeExecError,
+    CodeExecForbiddenImport,
+    CodeExecMemoryExceeded,
+    CodeExecOutsideDosync,
+    CodeExecReplayMismatch,
+    CodeExecResult,
+    CodeExecTimeout,
+    exec_code,
+    make_code_exec_handler,
+)
 from persistence.effect.handlers.dry_run import make_dry_run_handler
 from persistence.effect.handlers.pii_redact import make_pii_redact_handler
 from persistence.effect.handlers.policy import (
@@ -84,6 +95,16 @@ __all__ = [
     "datom_to_audit_entry",
     "make_audit_handler",
     "verify_chain",
+    # :code/exec sandbox (#141 / Phase 2.0b)
+    "CodeExecError",
+    "CodeExecForbiddenImport",
+    "CodeExecMemoryExceeded",
+    "CodeExecOutsideDosync",
+    "CodeExecReplayMismatch",
+    "CodeExecResult",
+    "CodeExecTimeout",
+    "exec_code",
+    "make_code_exec_handler",
     # policy
     "ApprovalRequired",
     "PolicyDenied",

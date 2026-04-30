@@ -92,6 +92,20 @@ from typing import Any
 from persistence.effect.canonical import canonical_dumps
 from persistence.effect.runtime import Handler
 
+# POSIX-only resource limits for the child (Linux + macOS Darwin).
+# On Windows, ``resource`` is unavailable; the handler falls back to
+# wall-clock timeout + import-allowlist only — capability-denial via
+# rlimit is a no-op there. The platform skip is honored at runtime so
+# the test suite doesn't crash on import; non-POSIX gets a documented
+# softer guarantee.
+try:
+    import resource as _resource
+
+    _HAS_RESOURCE = True
+except ImportError:  # pragma: no cover — non-POSIX
+    _resource = None  # type: ignore[assignment]
+    _HAS_RESOURCE = False
+
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -259,6 +273,89 @@ def _build_child_command() -> list[str]:
     return [sys.executable, "-I", "-S", "-c", _CHILD_RUNNER_BOOTSTRAP]
 
 
+def _make_preexec(timeout_seconds: float, memory_mb: int) -> Any:
+    """Build a ``preexec_fn`` callable that applies POSIX ``setrlimit`` caps.
+
+    Runs in the child between ``fork()`` and ``exec()``, BEFORE any user
+    code starts; the kernel enforces these caps for the lifetime of the
+    sandboxed interpreter.
+
+    Caps applied:
+
+    - ``RLIMIT_CPU`` = ``timeout_seconds + 1`` — kernel sends SIGXCPU /
+      SIGKILL on overrun (orthogonal to wall-clock; stops infinite-loop
+      bodies even if our parent-side timeout misfires).
+    - ``RLIMIT_AS`` = ``memory_mb * 1024 * 1024`` — address-space cap.
+      Linux honors reductions; macOS often does NOT (kernel may have
+      already mapped > cap of libc segments before fork). Best-effort
+      cross-platform; the memory-cap test is platform-skipped on Darwin.
+    - ``RLIMIT_NOFILE`` = ``32`` — fd cap; prevents fd-flood DoS.
+    - ``RLIMIT_NPROC`` = ``1`` — no fork bombs (the child cannot spawn
+      further processes).
+    - ``RLIMIT_FSIZE`` = ``0`` — no file writes from the child;
+      combined with the working-dir tempdir this makes the child
+      effectively read-only on disk.
+
+    Returns ``None`` on non-POSIX platforms (``resource`` unavailable);
+    the caller must check ``_HAS_RESOURCE`` and pass ``None`` for
+    ``preexec_fn`` in that case.
+
+    Note: the function is closure-captured by Popen and runs in the
+    forked child; any exception inside it kills the child before exec().
+    Failures are swallowed (best-effort) to avoid masking the parent's
+    actual error path; in production a ``setrlimit`` failure means the
+    child runs with default limits — still bounded by wall-clock.
+    """
+    if not _HAS_RESOURCE:
+        return None
+
+    cpu_limit = int(timeout_seconds) + 1
+    as_limit = max(1, int(memory_mb)) * 1024 * 1024
+
+    def _preexec() -> None:
+        # Best-effort each cap. The setrlimit calls can fail when:
+        # - memory_mb is so small that the interpreter cannot start
+        #   (so Popen fails fast, surfaced as exit_code != 0)
+        # - macOS RLIMIT_AS sometimes returns EINVAL on reduction;
+        #   callers see exit_code 0 with no enforcement, hence the
+        #   platform-skip on the memory test.
+        try:
+            _resource.setrlimit(  # type: ignore[union-attr]
+                _resource.RLIMIT_CPU, (cpu_limit, cpu_limit)  # type: ignore[union-attr]
+            )
+        except (ValueError, OSError):
+            pass
+        try:
+            _resource.setrlimit(  # type: ignore[union-attr]
+                _resource.RLIMIT_AS, (as_limit, as_limit)  # type: ignore[union-attr]
+            )
+        except (ValueError, OSError):
+            pass
+        try:
+            _resource.setrlimit(  # type: ignore[union-attr]
+                _resource.RLIMIT_NOFILE, (32, 32)  # type: ignore[union-attr]
+            )
+        except (ValueError, OSError):
+            pass
+        try:
+            _resource.setrlimit(  # type: ignore[union-attr]
+                _resource.RLIMIT_NPROC, (1, 1)  # type: ignore[union-attr]
+            )
+        except (ValueError, OSError):
+            pass
+        try:
+            # FSIZE=0 means any write() call from the child gets SIGXFSZ.
+            # The child is allowed to read /usr/lib/* etc. (file opens
+            # for reading aren't size-bounded); only writes are killed.
+            _resource.setrlimit(  # type: ignore[union-attr]
+                _resource.RLIMIT_FSIZE, (0, 0)  # type: ignore[union-attr]
+            )
+        except (ValueError, OSError):
+            pass
+
+    return _preexec
+
+
 # Commit 1 placeholder — Commits 3+ replace this with a real bootstrap
 # shim that installs the import filter and exec()s the user source.
 _CHILD_RUNNER_BOOTSTRAP = (
@@ -293,6 +390,8 @@ def _run_subprocess(
     # until Commit 3 introduces the envelope protocol.
     stdin_payload = source
 
+    preexec = _make_preexec(timeout_seconds=timeout_seconds, memory_mb=memory_mb)
+
     t0 = _time.monotonic()
     try:
         proc = subprocess.Popen(
@@ -303,7 +402,7 @@ def _run_subprocess(
             cwd=workdir,
             env=child_env,
             text=True,
-            # preexec_fn for setrlimit lands in Commit 2 (POSIX-only).
+            preexec_fn=preexec,  # POSIX-only setrlimit caps; None on non-POSIX
         )
     except (OSError, ValueError) as exc:  # pragma: no cover
         shutil.rmtree(workdir, ignore_errors=True)

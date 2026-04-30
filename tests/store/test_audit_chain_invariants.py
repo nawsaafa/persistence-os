@@ -1056,3 +1056,265 @@ class TestPostgresAuditChainLock:
         """PostgresStore satisfies the runtime-checkable Store
         Protocol after the additive PG3 method declarations."""
         assert isinstance(pg_store, Store)
+
+
+# ===========================================================================
+# 12. PG-W1 — G3d cross-process audit-chain Merkle continuity (PG-only)
+# ===========================================================================
+#
+# The PG3 ``test_concurrent_audit_writers_chain_in_order`` exercises
+# multi-THREAD audit-emit serialisation; the PG4 harness exercises
+# multi-PROCESS write-skew. Neither covered the PG-W1 / ARIS R2 Dim 4
+# finding: two concurrent processes BOTH constructing AuditEntry with
+# the same stale predecessor hash, then racing for ``audit_chain_lock``
+# under ``transact_serializable``.
+#
+# Before PG-W1, the second-arriving process's audit datom would have
+# ``:prev-hash`` pointing at the OLD head (its in-memory pointer was
+# stale by the time it acquired the row lock), so ``verify_chain`` on
+# the persisted log would fail at that entry's chain check.
+#
+# After PG-W1, ``transact_serializable`` reads the locked head under
+# ``SELECT FOR UPDATE`` and calls ``rebind_audit_datom_prev_hash`` on
+# every audit datom in the batch so the persisted ``:prev-hash`` always
+# binds to the actual cross-process chain tip — ``verify_chain``
+# returns True.
+#
+# This test SHOULD have failed before PG-W1; it MUST pass after.
+def _pg_w1_writer_main(
+    *,
+    dsn: str,
+    barrier_handle,  # multiprocessing.Barrier — type elided to keep the
+                     # subprocess module importable on its own.
+    queue,           # multiprocessing.Queue
+    worker_idx: int,
+    base_prev_hash: str | None,
+) -> None:
+    """Subprocess body — emit one ``audit/repl.op`` datom whose
+    Python-side ``prev_hash`` was constructed against the SAME stale
+    predecessor as every sibling worker.
+
+    The barrier ensures all N writers have built their AuditEntry +
+    derived ``prev_hash`` BEFORE any of them calls
+    ``transact_serializable`` — this is the worst-case stale-pointer
+    contention pattern PG-W1 fixes. Each worker then races to acquire
+    ``audit_chain_lock FOR UPDATE``; whoever wins first commits with
+    ``:prev-hash = base_prev_hash``, the next one reads the now-updated
+    lock row + has its datom rebound by the store, and so on.
+    """
+    # Lazy imports — this module is imported into the subprocess via
+    # spawn, and the spawn child has its own module cache. Keep imports
+    # cheap and explicit.
+    from datetime import datetime, timezone
+
+    from persistence.effect.handlers.audit import (
+        AuditEntry,
+        _canonicalise_content,
+        _content_hash,
+        audit_entry_to_datom,
+    )
+    from persistence.fact.datom import Datom
+    from persistence.store.postgres import PostgresStore
+
+    try:
+        # Build an AuditEntry exactly the way emit_repl_op_audit does
+        # (same content shape — see persistence.repl._audit). Per-
+        # worker args_hash so the canonical content (and thus entry.id)
+        # is unique even when prev_hash is identical across workers.
+        recorded_at = datetime(
+            2026, 4, 30, 12, worker_idx, 0, tzinfo=timezone.utc,
+        )
+        content = {
+            "prev_hash": base_prev_hash,
+            "op": ":repl/op",
+            "args_hash": f"sha256:worker-{worker_idx}",
+            "verdict": "ok",
+            "latency_ms": 1,
+            "recorded_at": recorded_at.timestamp(),
+            "result_hash": None,
+            "error": None,
+            "policy_id": None,
+            "handler_chain": (),
+            "principal": {
+                "token_id": "tok",
+                "session_id": f"ses-{worker_idx}",
+            },
+            "run_id": None,
+            "parent": base_prev_hash,
+        }
+        canonical = _canonicalise_content(content)
+        entry = AuditEntry(id=_content_hash(canonical), **canonical)
+
+        # Convert to a Datom shape the store consumes — this mirrors
+        # ``persist_repl_audit``.
+        wire = audit_entry_to_datom(entry)
+        datom = Datom(
+            e=wire[":datom/e"],
+            a=wire[":datom/a"].lstrip(":"),
+            v=wire[":datom/v"],
+            tx=0,
+            tx_time=wire[":datom/tx-time"],
+            valid_from=wire[":datom/valid-from"],
+            valid_to=wire[":datom/valid-to"],
+            op="assert",
+            provenance=wire[":datom/provenance"],
+        )
+
+        # Synchronise: all workers have their stale-prev_hash AuditEntry
+        # built. From here on, whoever acquires audit_chain_lock first
+        # wins the chain head; the rest must rebind.
+        barrier_handle.wait(timeout=30.0)
+
+        # Open a per-process PostgresStore — psycopg connections are
+        # NOT fork-safe (we use spawn anyway, but each process gets a
+        # fresh pool regardless). Route through transact_serializable
+        # so the audit_chain_lock + PG-W1 rebind path fires.
+        store = PostgresStore(dsn=dsn)
+        try:
+            tx = store.transact_serializable([datom], tx_time=recorded_at)
+        finally:
+            store.close()
+
+        queue.put({
+            "outcome": "committed",
+            "worker_idx": worker_idx,
+            "tx": tx,
+            "original_id": entry.id,
+        })
+    except BaseException as exc:  # noqa: BLE001 — last-ditch surface
+        queue.put({
+            "outcome": "error",
+            "worker_idx": worker_idx,
+            "exception_repr": repr(exc),
+        })
+
+
+class TestG3dCrossProcessAuditChainContinuity:
+    """PG-W1 — multi-process ``verify_chain`` continuity under concurrent
+    audit-emit (closes ARIS R2 Dim 4).
+
+    N=4 child processes each construct an ``AuditEntry`` with the SAME
+    stale predecessor hash (the worst-case in-memory-pointer-staleness
+    pattern), barrier-sync to ensure all 4 are built BEFORE any commits,
+    then race ``transact_serializable``. After all 4 join, the parent
+    reads the persisted audit datoms in seq order, decodes them back
+    into AuditEntry form, and runs ``verify_chain``.
+
+    Pre-PG-W1: the second/third/fourth-arriving writer's persisted
+    ``:prev-hash`` would point at the SAME stale predecessor as the
+    first writer's, so ``verify_chain`` would fail on the second entry.
+    Post-PG-W1: ``transact_serializable`` rebinds ``:prev-hash`` to the
+    ``audit_chain_lock`` head observed under ``FOR UPDATE``, so every
+    persisted entry chains correctly.
+
+    Skip-clean when ``PERSISTENCE_PG_DSN`` is unset.
+    """
+
+    def test_verify_chain_holds_after_concurrent_audit_emit(
+        self, pg_store
+    ) -> None:
+        import multiprocessing
+        # ``pg_store`` carries the per-test scoped DSN baked into its
+        # connection pool; we spawn subprocesses against the same
+        # scoped DSN so every writer hits the same schema.
+        scoped_dsn = pg_store._dsn  # populated by PostgresStore.__init__
+
+        n_workers = 4
+        ctx = multiprocessing.get_context("spawn")
+        barrier = ctx.Barrier(parties=n_workers)
+        queue = ctx.Queue(maxsize=n_workers)
+
+        procs = []
+        for i in range(n_workers):
+            p = ctx.Process(
+                target=_pg_w1_writer_main,
+                kwargs={
+                    "dsn": scoped_dsn,
+                    "barrier_handle": barrier,
+                    "queue": queue,
+                    "worker_idx": i,
+                    # All 4 workers see the SAME stale predecessor —
+                    # this is the bug-trigger shape PG-W1 closes.
+                    # Genesis chain: base_prev_hash=None means every
+                    # worker thinks it's the first audit datom.
+                    "base_prev_hash": None,
+                },
+                daemon=False,
+            )
+            p.start()
+            procs.append(p)
+
+        # Drain results.
+        results: list[dict] = []
+        for p in procs:
+            p.join(timeout=60.0)
+            if p.is_alive():
+                p.terminate()
+                p.join(timeout=5.0)
+
+        while not queue.empty():
+            try:
+                results.append(queue.get_nowait())
+            except Exception:
+                break
+
+        assert len(results) == n_workers, (
+            f"expected {n_workers} writer results, got {len(results)}: "
+            f"{results}"
+        )
+
+        # All 4 must have committed (no SerializationFailure expected
+        # for distinct (e, a) audit datoms — the ``audit_chain_lock``
+        # row lock serialises them, but doesn't reject any).
+        committed = [r for r in results if r["outcome"] == "committed"]
+        errored = [r for r in results if r["outcome"] != "committed"]
+        assert len(committed) == n_workers, (
+            f"expected all {n_workers} writers to commit, but "
+            f"{len(errored)} errored: {errored}"
+        )
+
+        # Read all audit datoms back in seq order + decode to AuditEntry.
+        from persistence.effect.handlers.audit import datom_to_audit_entry
+        from persistence.repl._audit import _datom_to_wire_for_audit
+
+        audit_datoms = [
+            d for d in pg_store.all_datoms() if d.a.startswith("audit/")
+        ]
+        assert len(audit_datoms) == n_workers, (
+            f"expected {n_workers} audit datoms in datom_log, got "
+            f"{len(audit_datoms)}"
+        )
+
+        entries: list[AuditEntry] = []
+        for d in audit_datoms:
+            wire = _datom_to_wire_for_audit(d)
+            entries.append(datom_to_audit_entry(wire))
+
+        # G3c-extended: chain continuity ON THE PERSISTED PROJECTION.
+        # This is the assertion that would have failed before PG-W1.
+        assert verify_chain(entries) is True, (
+            "PG-W1 / ARIS R2 Dim 4: verify_chain failed on the persisted "
+            "audit-datom projection after concurrent cross-process emit. "
+            "The transact_serializable audit-chain rebind step failed to "
+            "bind :prev-hash to the actual cross-process head observed "
+            "under audit_chain_lock FOR UPDATE."
+        )
+
+        # Pin the structural shape: each entry.prev_hash links to the
+        # prior entry.id; first entry.prev_hash is None (genesis).
+        assert entries[0].prev_hash is None
+        for i in range(1, len(entries)):
+            assert entries[i].prev_hash == entries[i - 1].id, (
+                f"chain break at index {i}: "
+                f"prev_hash={entries[i].prev_hash!r} != "
+                f"prior id={entries[i - 1].id!r}"
+            )
+
+        # Pin the lock-row tail-hash equals the chain tip's signature.
+        with pg_store._txn() as cur:
+            cur.execute("SELECT last_hash FROM audit_chain_lock")
+            (last_hash,) = cur.fetchone()
+        assert last_hash == entries[-1].id, (
+            "audit_chain_lock.last_hash drifted from the persisted "
+            "chain tip — denormalised pointer cache is inconsistent"
+        )

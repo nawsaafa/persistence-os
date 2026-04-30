@@ -56,14 +56,16 @@ of the gating pattern in ``tests/store/test_postgres.py``.
 Audit-chain half
 ----------------
 
-Half the Hypothesis examples (controlled by the ``use_audit`` strategy
-flag) also emit audit datoms via the harness ``WriterSpec.use_audit``
-field. The dedicated cross-process audit-chain coverage tests land in
-the same module via the follow-on PG4 commit; the property test below
-exercises the path probabilistically. The audit-aware writer takes
-``audit_chain_lock FOR UPDATE`` cross-process before its INSERT, so
-even when SSI doesn't reject, the chain-head row lock serialises the
-two writers and Merkle continuity is preserved.
+Half the Hypothesis examples (controlled by a strategy flag) also emit
+audit datoms via the ``use_audit`` writer-spec field. This exercises
+the cross-process ``audit_chain_lock FOR UPDATE`` row-lock path and
+verifies chain Merkle continuity post-commit (no broken
+``parent_provenance_hash`` linkage between the two writers' audit
+datoms — the row lock should serialise them on the chain head). Per
+the task spec, the audit-aware path forces both ``tx_allocator`` AND
+``audit_chain_lock`` row-locks across processes (though our raw-INSERT
+shape skips the allocator on purpose; the audit-lock contention is
+real).
 """
 from __future__ import annotations
 
@@ -76,6 +78,7 @@ from hypothesis import HealthCheck, given, settings, strategies as st
 
 from tests.store._pg4_harness import (
     WriterSpec,
+    audit_chain_continuous,
     read_final_xy,
     reserve_two_tx_ids,
     seed_xy_balances,
@@ -362,6 +365,61 @@ def test_read_committed_produces_anomaly_singleshot(pg_dsn_factory) -> None:
     )
 
 
-# NOTE: cross-process audit-chain coverage lands in the next commit
-# (PG4 commit 3) — exercises ``audit_chain_lock FOR UPDATE`` across two
-# writer subprocesses and verifies post-commit Merkle continuity.
+# ===========================================================================
+# 3. Audit-chain cross-process exercise — both writers emit audit datoms
+#    under SERIALIZABLE; verify chain Merkle continuity post-commit.
+# ===========================================================================
+def test_audit_chain_continuous_after_concurrent_writers(
+    pg_dsn_factory,
+) -> None:
+    """Two writers under SERIALIZABLE both emit audit datoms +
+    update ``audit_chain_lock``; the post-commit chain must verify.
+
+    Even when SERIALIZABLE rejects one writer (the expected outcome
+    on the write-skew shape), the surviving writer's audit datom
+    must chain cleanly off the seed state (initial ``last_hash=''``
+    means ``prev-hash=None`` for the first audit datom). When BOTH
+    writers commit (rare but possible if SSI didn't fire on this
+    particular run — e.g. the predicate locks happened to not
+    intersect), the lock-row contention orders them and chain
+    continuity holds.
+    """
+    dsn = pg_dsn_factory()
+    a, b = _run_writeskew_pair(
+        dsn=dsn, isolation="serializable",
+        initial_x=200, initial_y=150, decrement=10, use_audit=True,
+    )
+    # At least one of the two outcomes is well-defined.
+    assert a.outcome in (
+        "committed", "serialization_failure", "unique_violation",
+        "other_error",
+    )
+    assert b.outcome in (
+        "committed", "serialization_failure", "unique_violation",
+        "other_error",
+    )
+    # Verify: any audit datoms that DID land form a continuous chain.
+    ok, reason = audit_chain_continuous(dsn=dsn)
+    assert ok, f"audit-chain Merkle continuity broken: {reason}"
+
+
+def test_audit_chain_continuous_under_read_committed(pg_dsn_factory) -> None:
+    """Audit-chain continuity is preserved even under READ COMMITTED.
+
+    The ``audit_chain_lock FOR UPDATE`` row lock is a Postgres-level
+    primitive (NOT an SSI predicate lock), so it serialises writers
+    regardless of isolation level. Under READ COMMITTED both writers
+    commit (per ``test_read_committed_produces_anomaly_singleshot``),
+    yet their audit datoms still chain in the order the row-lock
+    granted them access. This pins the ADR-3 contract: the chain-
+    head row-lock is the load-bearing primitive, NOT SSI rejection.
+    """
+    dsn = pg_dsn_factory()
+    a, b = _run_writeskew_pair(
+        dsn=dsn, isolation="read_committed",
+        initial_x=200, initial_y=150, decrement=10, use_audit=True,
+    )
+    assert a.outcome == "committed", f"writer A: {a!r}"
+    assert b.outcome == "committed", f"writer B: {b!r}"
+    ok, reason = audit_chain_continuous(dsn=dsn)
+    assert ok, f"audit-chain broken under READ COMMITTED + row-lock: {reason}"

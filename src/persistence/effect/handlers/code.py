@@ -596,7 +596,68 @@ def _run_subprocess(
 
 
 # ---------------------------------------------------------------------------
-# Public API (skeleton — Commit 4 wires the audit datom emission)
+# Audit datom emission (Commit 4)
+# ---------------------------------------------------------------------------
+
+
+def _emit_code_exec_datom(
+    tx: Any,
+    *,
+    source_hash: str,
+    stdin_hash: str,
+    output_hash: str,
+    exit_code: int,
+    wall_clock_ms: int,
+    timeout_seconds: float,
+    memory_mb: int,
+    replay_mode: str,
+) -> None:
+    """Queue the ``:code/exec`` audit datom on the Transaction's intent log.
+
+    Mirrors :func:`persistence.plan._edit._emit_edit_datom` from #140.
+    The actual emission to the effect runtime (and Merkle-chain hook
+    in :mod:`persistence.effect.handlers.audit`) happens at commit time
+    via :func:`persistence.txn.transaction._replay_effect_intents`,
+    which injects the ``txn_commit`` (commit_id) alongside these
+    kwargs.
+
+    Datom shape — seven keys per the design § 3.7 / module docstring:
+
+    - ``:code/exec/source-hash`` — sha256 of the source bytes
+    - ``:code/exec/stdin-hash`` — sha256 of the stdin bytes
+    - ``:code/exec/output-hash`` — sha256 of canonical-JSON of the
+      output triple
+    - ``:code/exec/exit-code`` — int (or -1 sentinel on timeout)
+    - ``:code/exec/wall-clock-ms`` — int observed by parent
+    - ``:code/exec/timeout-seconds`` — the configured cap
+    - ``:code/exec/memory-mb`` — the configured cap
+
+    Replay mode is NOT in the datom — re-execution-replay calls
+    ``exec_code(replay_mode="re-execute", expected_output_hash=...)``
+    and the audit datom for the replay run is identical to the
+    original-run datom (byte-identity goal).
+
+    The kwargs reach the effect handler as a dict with leading-underscore
+    Python identifiers (``source_hash`` not ``:code/exec/source-hash``);
+    the keyword-form keys above are the EDN-wire shape that downstream
+    audit-datom encoding uses, NOT what the effect-intent kwargs dict
+    holds. Test 8 asserts the logical shape via the kwargs dict; the
+    EDN-wire keys land at the audit datom serialisation boundary.
+    """
+    tx.effect(
+        ":code/exec",
+        source_hash=source_hash,
+        stdin_hash=stdin_hash,
+        output_hash=output_hash,
+        exit_code=exit_code,
+        wall_clock_ms=wall_clock_ms,
+        timeout_seconds=timeout_seconds,
+        memory_mb=memory_mb,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Public API
 # ---------------------------------------------------------------------------
 
 
@@ -658,28 +719,68 @@ def exec_code(
             "(the recorded :code/exec/output-hash from the audit datom)"
         )
 
-    stdout, stderr, exit_code, wall_clock_ms = _run_subprocess(
-        source=source,
-        stdin=stdin,
-        timeout_seconds=timeout_seconds,
-        memory_mb=memory_mb,
-        env=env,
-    )
+    # Pre-compute the source / stdin hashes BEFORE subprocess so we can
+    # emit the audit datom on a timeout path too (the trajectory needs
+    # to record THAT we tried; partial output captured but kept off the
+    # datom — only the input hashes survive).
+    source_hash = _sha256_bytes(source.encode("utf-8"))
+    stdin_hash = _sha256_bytes(stdin.encode("utf-8"))
 
-    # Forbidden-import detection: when the bootstrap shim's filtering
-    # ``__import__`` rejects a non-allowlisted module, it raises
-    # ``ImportError`` with the sentinel prefix. We surface that as a
-    # typed exception so callers can ``except CodeExecForbiddenImport``.
-    # Detection runs ONLY on non-zero exit (legitimate errors mentioning
-    # the sentinel string would be rare; non-zero exit narrows further
-    # so successful runs that happen to print the sentinel cannot
-    # accidentally trip this).
+    try:
+        stdout, stderr, exit_code, wall_clock_ms = _run_subprocess(
+            source=source,
+            stdin=stdin,
+            timeout_seconds=timeout_seconds,
+            memory_mb=memory_mb,
+            env=env,
+        )
+    except CodeExecTimeout as timeout_exc:
+        # Even on timeout we emit a :code/exec audit datom so the
+        # trajectory records the attempt. wall_clock_ms ≈ timeout_seconds *
+        # 1000 (slight slop from the kill-and-drain step). The recorded
+        # output_hash is the hash of (partial_stdout, "", -1): exit_code
+        # -1 sentinel + empty stderr (we did not capture it on the kill
+        # path) — adequate for replay byte-identity since replay-mode
+        # detects timeout via the sentinel exit and does not re-run.
+        partial_output_hash = _output_hash(
+            timeout_exc.partial_stdout, "", -1
+        )
+        _emit_code_exec_datom(
+            tx=tx,
+            source_hash=source_hash,
+            stdin_hash=stdin_hash,
+            output_hash=partial_output_hash,
+            exit_code=-1,
+            wall_clock_ms=int(timeout_seconds * 1000),
+            timeout_seconds=timeout_seconds,
+            memory_mb=memory_mb,
+            replay_mode=replay_mode,
+        )
+        raise
+
+    # Forbidden-import detection on non-zero exit. Same audit-emit-then-
+    # raise pattern as the timeout path so the audit chain records the
+    # attempt regardless of outcome.
+    forbidden: str | None = None
     if exit_code != 0:
         forbidden = _parse_forbidden_import(stderr)
-        if forbidden is not None:
-            raise CodeExecForbiddenImport(forbidden)
 
     output_hash = _output_hash(stdout, stderr, exit_code)
+
+    _emit_code_exec_datom(
+        tx=tx,
+        source_hash=source_hash,
+        stdin_hash=stdin_hash,
+        output_hash=output_hash,
+        exit_code=exit_code,
+        wall_clock_ms=wall_clock_ms,
+        timeout_seconds=timeout_seconds,
+        memory_mb=memory_mb,
+        replay_mode=replay_mode,
+    )
+
+    if forbidden is not None:
+        raise CodeExecForbiddenImport(forbidden)
 
     if replay_mode == "re-execute":
         if output_hash != expected_output_hash:

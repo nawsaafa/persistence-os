@@ -196,29 +196,35 @@ class TestRegisterBackend:
 
 
 # ---------------------------------------------------------------------------
-# 6. Substrate placeholder import
+# 6. Substrate import + stability marker
 # ---------------------------------------------------------------------------
 class TestSubstrateImport:
     def test_import_works(self):
-        # Per the SDK1 task spec, ``from persistence.sdk import Substrate``
-        # must work even though the body is empty until SDK2.
+        # ``from persistence.sdk import Substrate`` worked since SDK1;
+        # SDK2 fills in the body so calling ``Substrate.open()`` is the
+        # canonical instantiation path. Direct ``Substrate()`` is no
+        # longer the contract surface — adapter authors use ``open``.
         from persistence.sdk import Substrate
 
-        # The placeholder is a frozen dataclass with no fields — it should
-        # be instantiable as Substrate(); SDK2 swaps the body.
-        instance = Substrate()
-        assert isinstance(instance, Substrate)
+        s = Substrate.open("memory")
+        try:
+            assert isinstance(s, Substrate)
+        finally:
+            s.close()
 
-    def test_substrate_carries_experimental_marker(self):
-        # SDK1 marks the placeholder @experimental; SDK2 promotes to
-        # @stable("v0.8") at the same time the body is filled in. This
-        # test pins the marker so SDK2 sees a clean diff at promotion.
+    def test_substrate_carries_stable_marker(self):
+        # SDK1 had the placeholder marked @experimental with the explicit
+        # promotion-handoff string; SDK2 promotes to @stable("v0.8") in
+        # lockstep with the body fill-in. This test was renamed from
+        # ``test_substrate_carries_experimental_marker`` (SDK1) — the
+        # SDK1 version asserted ``level == "experimental"`` and pinned
+        # the placeholder reason string so SDK2's promotion produced a
+        # clean visible diff. SDK2's contract is that the marker now
+        # reads as ``stable / v0.8``.
         from persistence.sdk import Substrate
 
         assert Substrate.__sdk_stability__ == {
-            "level": "experimental",
-            "reason": (
-                'SDK1 placeholder; SDK2 fills in lifecycle + module '
-                'attributes and promotes to @stable("v0.8").'
-            ),
+            "level": "stable",
+            "version": "v0.8",
+            "note": None,
         }

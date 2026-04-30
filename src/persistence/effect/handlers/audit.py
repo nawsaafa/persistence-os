@@ -754,6 +754,104 @@ def datom_to_audit_entry(datom: dict[str, Any]) -> AuditEntry:
     )
 
 
+# ---------------------------------------------------------------------------
+# rebind_audit_datom_prev_hash — PG-W1 ARIS R2 Dim 4 closure (ADR-17)
+# ---------------------------------------------------------------------------
+
+
+def rebind_audit_datom_prev_hash(
+    datom: dict[str, Any],
+    new_prev_hash: str | None,
+) -> dict[str, Any]:
+    """Return a new audit datom with ``:prev-hash`` bound to ``new_prev_hash``.
+
+    PG-W1 / ADR-17: stores that serialise audit-emit cross-process
+    (PostgresStore) read the actual cross-process audit-chain head
+    under ``audit_chain_lock FOR UPDATE`` AT COMMIT TIME. The
+    Python-side ``AuditEntry`` was constructed with whatever
+    ``prev_hash`` the in-process audit chain pointer held; under
+    multi-process contention that pointer is necessarily stale by the
+    time the SERIALIZABLE transaction acquires the row lock. This
+    helper is the rebind seam: when the store discovers the locked
+    head differs from the datom's existing ``:prev-hash``, it calls
+    this function to rebind the chain to reality before the INSERT.
+
+    Recomputes the entry's content hash (because ``prev_hash`` is part
+    of the canonical content), then updates every place the new
+    signature surfaces:
+
+    - ``provenance[':prev-hash']`` — the colon-keyword wire form read
+      by :func:`verify_chain` after re-decoding via
+      :func:`datom_to_audit_entry`.
+    - ``provenance['parent_provenance_hash']`` — the bare-snake_case
+      dual-namespace alias read by ``persistence.fact.DB.causal_history``
+      (D5 typed-Provenance reader). Both keys MUST carry the same
+      value per the dual-namespace policy in
+      :func:`audit_entry_to_datom`.
+    - ``provenance[':signature']`` — the recomputed entry id.
+    - ``:datom/tx`` — also the entry id (audit datoms encode
+      ``entry.id`` here per ``audit_entry_to_datom``).
+    - ``:datom/e`` — only when no ``run_id`` is set (audit datoms use
+      ``run_id or entry.id`` for ``:datom/e``); when ``run_id`` is
+      present, ``:datom/e`` is the run UUID and stays untouched.
+
+    No-op fast-path: when ``datom['provenance'][':prev-hash']`` already
+    equals ``new_prev_hash``, the input dict is returned unchanged
+    (saves the decode/encode round-trip in the steady-state single-
+    writer / monotonic case where the in-memory pointer is fresh).
+
+    Args:
+        datom: An audit-shaped datom in the wire-form dict shape that
+            :func:`audit_entry_to_datom` returns. The datom is NOT
+            mutated; the function returns a fresh dict.
+        new_prev_hash: The actual cross-process audit-chain head hash
+            (``audit_chain_lock.last_hash``), or ``None`` when the
+            chain is empty.
+
+    Returns:
+        A new audit datom dict with the chain rebound to
+        ``new_prev_hash``. The returned dict still conforms to
+        ``:persistence.fact/datom`` because :func:`audit_entry_to_datom`
+        self-conforms at the wire boundary.
+
+    Raises:
+        ValueError: if ``datom`` is not an audit-shaped datom (i.e.,
+            cannot be round-tripped through :func:`datom_to_audit_entry`)
+            or the recomputed datom fails self-conform.
+    """
+    # Fast-path: no-op when prev_hash already matches. Reads from the
+    # provenance map directly to avoid the decode round-trip.
+    provenance = datom.get(":datom/provenance", {})
+    existing_prev = provenance.get(":prev-hash")
+    if existing_prev == new_prev_hash:
+        return datom
+
+    # Decode → mutate prev_hash + recompute id → encode. The encode
+    # path (:func:`audit_entry_to_datom`) handles all the dual-key
+    # provenance writing + ``:datom/e`` / ``:datom/tx`` / signature
+    # updates in one place — we don't need to reach into individual
+    # provenance keys here.
+    entry = datom_to_audit_entry(datom)
+
+    # Build a new content dict with the new prev_hash + matching
+    # parent (the in-memory ``parent`` slot mirrors ``prev_hash`` in
+    # every code-path that constructs an AuditEntry — see
+    # ``make_audit_handler`` clause body and
+    # ``persistence.repl._audit.emit_repl_op_audit``).
+    content = entry.to_dict()
+    content.pop("id")
+    content["prev_hash"] = new_prev_hash
+    content["parent"] = new_prev_hash
+    canonical_content = _canonicalise_content(content)
+    new_id = _content_hash(canonical_content)
+    rebound_entry = AuditEntry(id=new_id, **canonical_content)
+
+    # Re-encode through the wire boundary; this handles ``:datom/e``
+    # (run_id-or-id), ``:datom/tx`` (entry.id), and the dual-namespace
+    # ``:prev-hash`` / ``parent_provenance_hash`` provenance writes.
+    return audit_entry_to_datom(rebound_entry)
+
+
 # Re-export canonical_dumps so callers importing this module don't need
 # to reach into the canonical helper.
 __all__ = [
@@ -762,5 +860,6 @@ __all__ = [
     "canonical_dumps",
     "datom_to_audit_entry",
     "make_audit_handler",
+    "rebind_audit_datom_prev_hash",
     "verify_chain",
 ]

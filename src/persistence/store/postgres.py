@@ -81,6 +81,48 @@ from typing import Iterable, Iterator, TYPE_CHECKING
 from persistence.fact.datom import Datom
 from persistence.store._codec import NativeDatomCodec, with_tx as _with_tx
 
+
+def _is_audit_datom(d: Datom) -> bool:
+    """True iff ``d`` is audit-shaped per ADR-13.
+
+    The audit-chain Merkle continuity invariant applies to any datom
+    whose attribute (after lstripping a leading ``:``) starts with
+    ``audit/``: this covers ``audit/repl.op``, ``audit/llm.call``,
+    ``audit/tool.call``, ``audit/skill.op``, etc. The
+    :func:`transact_serializable` audit-aware path takes
+    ``SELECT FOR UPDATE`` on ``audit_chain_lock`` only when the batch
+    contains at least one such datom, so non-audit batches don't
+    contend on the row lock.
+    """
+    a = d.a
+    if not isinstance(a, str):
+        return False
+    if a.startswith(":"):
+        a = a[1:]
+    return a.startswith("audit/")
+
+
+def _replace_tx_time(d: Datom, tx_time: datetime) -> Datom:
+    """Return a copy of ``d`` with ``tx_time`` replaced — frozen-Datom safe.
+
+    Mirror of :func:`persistence.fact.store._replace_tx_time` (kept
+    local here so :mod:`persistence.store.postgres` does not import
+    :mod:`persistence.fact.store`, which would force the SQLite import
+    chain on every Postgres user).
+    """
+    return Datom(
+        e=d.e,
+        a=d.a,
+        v=d.v,
+        tx=d.tx,
+        tx_time=tx_time,
+        valid_from=d.valid_from,
+        valid_to=d.valid_to,
+        op=d.op,
+        provenance=d.provenance,
+        invalidated_by=d.invalidated_by,
+    )
+
 if TYPE_CHECKING:  # pragma: no cover — import only for static type checkers
     import psycopg
     import psycopg_pool
@@ -127,6 +169,25 @@ CREATE TABLE IF NOT EXISTS tx_allocator (
 );
 
 INSERT INTO tx_allocator (id, next_tx) VALUES (1, 1)
+ON CONFLICT (id) DO NOTHING;
+
+-- audit_chain_lock — PG3 / ADR-3 single-row table that orders the
+-- audit-chain Merkle linkage across processes. Every audit-emitting
+-- ``transact_serializable`` call takes ``SELECT FOR UPDATE`` on this
+-- row before INSERTing audit datoms, so two concurrent writers
+-- hash-chain in commit order, not write order. ``last_seq`` /
+-- ``last_hash`` are denormalised performance hints (the source of
+-- truth is the ``datom_log`` itself); they make the chain head
+-- findable in O(1) for the SDK MCP ``audit_tail`` resource without
+-- forcing a ``ORDER BY seq DESC LIMIT 1`` scan.
+CREATE TABLE IF NOT EXISTS audit_chain_lock (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    last_seq    BIGINT  NOT NULL DEFAULT 0,
+    last_hash   TEXT    NOT NULL DEFAULT ''
+);
+
+INSERT INTO audit_chain_lock (id, last_seq, last_hash)
+VALUES (1, 0, '')
 ON CONFLICT (id) DO NOTHING;
 """
 
@@ -310,12 +371,13 @@ class PostgresStore:
         self,
         datoms: Iterable[Datom],
         *,
+        tx_time: datetime | None = None,
         max_retries: int = _DEFAULT_MAX_RETRIES,
     ) -> int:
         """Atomically allocate a tx-id and insert ``datoms`` under SERIALIZABLE.
 
-        Per ADR-15 W2 this is the load-bearing atomic primitive for
-        cross-process correctness. Inside one SERIALIZABLE transaction:
+        Per ADR-15 W2 + ADR-13 this is the load-bearing atomic primitive
+        for cross-process correctness. Inside one SERIALIZABLE transaction:
 
         1. ``SELECT next_tx FROM tx_allocator WHERE id=1 FOR UPDATE``
            — row-locks the allocator. Any concurrent writer queues
@@ -324,15 +386,30 @@ class PostgresStore:
            — advances the allocator by ONE. The whole batch shares
            this single tx-id (matches InMemoryStore + SQLiteStore
            contract: one transact = one tx).
-        3. ``INSERT INTO datom_log ...`` for every datom in the batch,
+        3. **PG3 audit-chain serialisation:** if any datom in ``datoms``
+           is audit-shaped (``a`` starts with ``audit/`` after lstripping
+           ``:``), additionally take ``SELECT * FROM audit_chain_lock
+           WHERE id=1 FOR UPDATE`` BEFORE the INSERT. This serialises
+           concurrent audit-emitting transactions on the chain head —
+           per ADR-3 / § 6 of the design doc — so two writers commit in
+           a definite order and ``parent_provenance_hash`` always
+           points to the immediately-prior committed audit datom.
+        4. ``INSERT INTO datom_log ...`` for every datom in the batch,
            sharing the allocated tx-id.
-        4. ``COMMIT`` — releases the row lock.
+        5. **PG3:** for audit-shaped batches, ``UPDATE audit_chain_lock
+           SET last_seq, last_hash WHERE id=1`` to denormalise the new
+           head pointer (performance hint for the SDK MCP
+           ``audit_tail`` resource — source of truth is the log).
+        6. ``COMMIT`` — releases all row locks.
 
         Two writers that race the allocator both queue on the
         ``FOR UPDATE`` row lock; their tx-ids are guaranteed disjoint
         by Postgres row-lock semantics — independent of SSI predicate-
         lock placement and independent of the planner's choice for
-        ``MAX()``.
+        ``MAX()``. **Lock ordering** (per ADR-13 / § 4.2a final paragraph):
+        ``tx_allocator`` FIRST, ``audit_chain_lock`` SECOND, then
+        INSERT. The fixed order eliminates deadlock between two
+        concurrent audit-emitting transactions.
 
         On :class:`psycopg.errors.SerializationFailure` (40001) the
         whole transaction is retried with exponential backoff up to
@@ -348,6 +425,13 @@ class PostgresStore:
             datoms: iterable of :class:`Datom`. The ``tx`` field on each
                 input datom is ignored; the allocator picks the real
                 value. Empty iterable is a no-op and burns no tx-id.
+            tx_time: when supplied, every datom's ``tx_time`` is
+                overridden with this value before INSERT. Per ADR-13
+                this is how :func:`persistence.repl._audit.persist_repl_audit`
+                preserves the audit handler's ``recorded_at`` instant
+                through the migration to ``transact_serializable``.
+                When ``None`` (default), each datom's existing
+                ``tx_time`` is preserved unchanged.
             max_retries: maximum SerializationFailure retries before
                 surfacing the error to the caller.
 
@@ -369,6 +453,18 @@ class PostgresStore:
         materialised = list(datoms)
         if not materialised:
             return 0
+
+        # ADR-13 ``tx_time`` override — applied BEFORE the SERIALIZABLE
+        # txn opens so a retry loop sees the same canonical batch
+        # rather than re-stamping different times across attempts.
+        if tx_time is not None:
+            materialised = [_replace_tx_time(d, tx_time) for d in materialised]
+
+        # Audit-aware path detection: any audit-shaped datom flips on
+        # the ``audit_chain_lock`` row lock. Computed once outside the
+        # retry loop because the batch shape doesn't change across
+        # retries.
+        has_audit = any(_is_audit_datom(d) for d in materialised)
 
         last_err: BaseException | None = None
         for attempt in range(max_retries + 1):
@@ -410,7 +506,34 @@ class PostgresStore:
                                 "SET next_tx = next_tx + 1 WHERE id = 1"
                             )
 
-                            # 3. Stamp + INSERT the batch.
+                            # 3. PG3 audit-chain serialisation per
+                            # ADR-3. ``SELECT FOR UPDATE`` blocks any
+                            # other audit-emitting transaction at the
+                            # row lock until we COMMIT, so two
+                            # concurrent writers serialise on the
+                            # chain head. Lock ordering is fixed
+                            # (allocator FIRST, audit_chain_lock
+                            # SECOND) per § 4.2a final paragraph to
+                            # eliminate deadlock risk.
+                            audit_head_hash: str | None = None
+                            if has_audit:
+                                cur.execute(
+                                    "SELECT last_seq, last_hash "
+                                    "FROM audit_chain_lock "
+                                    "WHERE id = 1 FOR UPDATE"
+                                )
+                                head_row = cur.fetchone()
+                                if head_row is None:
+                                    raise RuntimeError(
+                                        "PostgresStore.transact_serializable: "
+                                        "audit_chain_lock row id=1 missing — "
+                                        "schema not initialised"
+                                    )
+                                audit_head_hash = (
+                                    head_row[1] if head_row[1] else None
+                                )
+
+                            # 4. Stamp + INSERT the batch.
                             stamped = [_with_tx(d, new_tx) for d in materialised]
                             cur.executemany(
                                 """
@@ -423,7 +546,74 @@ class PostgresStore:
                                 """,
                                 [self._codec.encode(d) for d in stamped],
                             )
-                        # 4. COMMIT — releases the row lock.
+
+                            # 5. PG3 audit-chain head update —
+                            # denormalise ``last_seq`` + ``last_hash``
+                            # for O(1) chain-tip lookup. Source of
+                            # truth is ``datom_log``; the lock-row
+                            # values are a performance hint that
+                            # ``verify_chain()`` re-derives if it
+                            # ever drifts.
+                            if has_audit:
+                                # Find the canonical-order LAST audit
+                                # datom in the batch — it carries the
+                                # tip's ``provenance[':signature']``,
+                                # which is the new head hash. We
+                                # iterate ``stamped`` in insertion
+                                # order so the *last* audit datom we
+                                # see is the one that lands at the
+                                # highest ``seq`` in the batch.
+                                last_audit = None
+                                for d in stamped:
+                                    if _is_audit_datom(d):
+                                        last_audit = d
+                                # ``last_audit`` is non-None because
+                                # ``has_audit`` is True iff the batch
+                                # has one. The signature lives in
+                                # ``provenance[':signature']`` per
+                                # ``audit_entry_to_datom``; if absent
+                                # we leave ``last_hash`` empty rather
+                                # than raise (defensive: hand-rolled
+                                # audit datoms without the canonical
+                                # shape are accepted at INSERT but
+                                # don't update the head pointer).
+                                last_hash = ""
+                                if last_audit is not None:
+                                    sig = last_audit.provenance.get(":signature")
+                                    if isinstance(sig, str):
+                                        last_hash = sig
+                                # Read back the highest ``seq`` for
+                                # the batch's tx-id. The SERIALIZABLE
+                                # transaction guarantees this is the
+                                # actual physical-order tip we just
+                                # INSERTed — no other writer can
+                                # interpose at the same tx-id (the
+                                # allocator row lock prevents it).
+                                cur.execute(
+                                    "SELECT MAX(seq) FROM datom_log "
+                                    "WHERE tx = %s",
+                                    (new_tx,),
+                                )
+                                seq_row = cur.fetchone()
+                                max_seq = (
+                                    int(seq_row[0])
+                                    if seq_row and seq_row[0] is not None
+                                    else 0
+                                )
+                                cur.execute(
+                                    "UPDATE audit_chain_lock "
+                                    "SET last_seq = %s, last_hash = %s "
+                                    "WHERE id = 1",
+                                    (max_seq, last_hash),
+                                )
+                                # ``audit_head_hash`` (the OLD head
+                                # before this transaction) is read
+                                # primarily to acquire the row lock
+                                # at step 3; downstream consumers who
+                                # want the previous head can re-read
+                                # the lock row at any time.
+                                _ = audit_head_hash
+                        # 6. COMMIT — releases all row locks.
                         conn.commit()
                         return new_tx
                     except BaseException:

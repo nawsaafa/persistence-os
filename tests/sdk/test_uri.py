@@ -105,18 +105,60 @@ class TestSqliteScheme:
 
 
 # ---------------------------------------------------------------------------
-# 3. Postgres dispatch — placeholder until PG1.
+# 3. Postgres dispatch — PG1 wires through to PostgresStore. The
+#    BackendNotInstalled path is now exercised only when psycopg is
+#    actually missing (we mock the lazy import to fail). Live-Postgres
+#    behaviour lives in tests/store/test_postgres.py.
 # ---------------------------------------------------------------------------
 class TestPostgresScheme:
-    def test_postgres_raises_backend_not_installed(self):
-        with pytest.raises(BackendNotInstalled, match="postgres"):
-            open_store("postgres://user:pass@localhost:5432/mydb")
+    def _force_postgres_import_error(self, sys_modules):
+        """Inject a sentinel module that raises ImportError on attribute
+        access, so the lazy ``from persistence.store.postgres import
+        PostgresStore`` in ``_open_postgres`` re-raises and the
+        dispatcher converts to :class:`BackendNotInstalled`."""
+        import types
+
+        broken = types.ModuleType("persistence.store.postgres")
+
+        def _raise(_name):
+            raise ImportError(
+                "No module named 'psycopg' (synthetic — test harness)",
+                name="psycopg",
+            )
+
+        broken.__getattr__ = _raise  # type: ignore[attr-defined]
+        sys_modules["persistence.store.postgres"] = broken
+
+    def test_postgres_raises_backend_not_installed_when_psycopg_missing(self):
+        """When psycopg is not installed, ``open_store("postgres://...")``
+        raises :class:`BackendNotInstalled` with a clean install hint —
+        not an obscure ImportError from deep inside the stack."""
+        import sys
+
+        original = sys.modules.pop("persistence.store.postgres", None)
+        try:
+            self._force_postgres_import_error(sys.modules)
+            with pytest.raises(BackendNotInstalled, match=r"\[postgres\]"):
+                open_store("postgres://user:pass@localhost:5432/mydb")
+        finally:
+            sys.modules.pop("persistence.store.postgres", None)
+            if original is not None:
+                sys.modules["persistence.store.postgres"] = original
 
     def test_postgres_error_subclasses_import_error(self):
-        # ADR-9 says BackendNotInstalled subclasses ImportError so
-        # adapters that ``except ImportError`` catch it.
-        with pytest.raises(ImportError):
-            open_store("postgres://localhost/db")
+        """ADR-9 says BackendNotInstalled subclasses ImportError so
+        adapters that ``except ImportError`` catch it."""
+        import sys
+
+        original = sys.modules.pop("persistence.store.postgres", None)
+        try:
+            self._force_postgres_import_error(sys.modules)
+            with pytest.raises(ImportError):
+                open_store("postgres://localhost/db")
+        finally:
+            sys.modules.pop("persistence.store.postgres", None)
+            if original is not None:
+                sys.modules["persistence.store.postgres"] = original
 
 
 # ---------------------------------------------------------------------------

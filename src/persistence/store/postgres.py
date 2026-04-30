@@ -78,6 +78,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Iterable, Iterator, TYPE_CHECKING
 
+from persistence.effect.handlers.audit import rebind_audit_datom_prev_hash
 from persistence.fact.datom import Datom
 from persistence.store._codec import NativeDatomCodec, with_tx as _with_tx
 from persistence.store._migration_runner import apply_migrations_with_pool
@@ -123,6 +124,90 @@ def _replace_tx_time(d: Datom, tx_time: datetime) -> Datom:
         provenance=d.provenance,
         invalidated_by=d.invalidated_by,
     )
+
+
+def _rebind_audit_datom_under_lock(d: Datom, new_prev_hash: str | None) -> Datom:
+    """PG-W1 / ADR-17: rebind an audit-shaped ``Datom`` to the locked head.
+
+    The :class:`Datom` shape PostgresStore stores has a bare-string
+    ``a`` (``"audit/repl.op"``), an integer ``tx`` placeholder, and the
+    audit-id in ``provenance[':signature']``. The
+    :func:`rebind_audit_datom_prev_hash` helper consumes the wire-form
+    dict shape that :func:`audit_entry_to_datom` produces (leading-colon
+    ``:datom/a``, audit-hash ``:datom/tx``). This function bridges the
+    two shapes:
+
+    1. Reconstruct the wire-form dict from the Datom (mirrors
+       :func:`persistence.repl._audit._datom_to_wire_for_audit`).
+    2. Call the rebind helper.
+    3. Reshape the rebound wire dict back into a Datom — bare ``a``,
+       ``tx=0`` placeholder (the SERIALIZABLE allocator owns the real
+       tx-id, written via ``_with_tx`` after this function returns).
+
+    Fast-path: when ``provenance[':prev-hash']`` already equals
+    ``new_prev_hash``, the rebind helper returns the input dict
+    unchanged, and we return the input Datom untouched. This is the
+    single-writer / monotonic case where the in-memory pointer is
+    fresh.
+
+    Datoms that are NOT audit-shaped (or audit-shaped but missing
+    ``provenance[':signature']``) are returned unchanged — defensive
+    against hand-rolled audit datoms that bypass the canonical
+    :func:`audit_entry_to_datom` producer (the chain-head update path
+    already tolerates the missing-signature case).
+
+    Args:
+        d: The audit-shaped ``Datom`` to rebind.
+        new_prev_hash: The locked cross-process audit-chain head (or
+            ``None`` when the chain is empty).
+
+    Returns:
+        A new ``Datom`` with the chain rebound, or ``d`` itself when
+        the rebind is a no-op.
+    """
+    provenance = dict(d.provenance) if d.provenance else {}
+    sig = provenance.get(":signature")
+    if not isinstance(sig, str):
+        # Hand-rolled audit datom without the canonical signature; we
+        # cannot rebind without the wire-form contract.
+        return d
+    # Fast-path: no rebind needed.
+    if provenance.get(":prev-hash") == new_prev_hash:
+        return d
+
+    # Reconstruct the wire-form dict — mirrors
+    # ``persistence.repl._audit._datom_to_wire_for_audit``.
+    wire: dict = {
+        ":datom/e": d.e,
+        ":datom/a": ":" + d.a,
+        ":datom/v": d.v,
+        ":datom/tx": sig,
+        ":datom/tx-time": d.tx_time,
+        ":datom/valid-from": d.valid_from,
+        ":datom/valid-to": d.valid_to,
+        ":datom/op": ":" + d.op,
+        ":datom/provenance": provenance,
+        ":datom/invalidated-by": d.invalidated_by,
+    }
+
+    rebound_wire = rebind_audit_datom_prev_hash(wire, new_prev_hash)
+
+    # Reshape back into a Datom — bare-string ``a``/``op``, tx=0
+    # placeholder (the SERIALIZABLE allocator stamps the real tx via
+    # ``_with_tx`` immediately after this function returns).
+    return Datom(
+        e=rebound_wire[":datom/e"],
+        a=rebound_wire[":datom/a"].lstrip(":"),
+        v=rebound_wire[":datom/v"],
+        tx=0,
+        tx_time=rebound_wire[":datom/tx-time"],
+        valid_from=rebound_wire[":datom/valid-from"],
+        valid_to=rebound_wire[":datom/valid-to"],
+        op=rebound_wire[":datom/op"].lstrip(":"),
+        provenance=rebound_wire[":datom/provenance"],
+        invalidated_by=rebound_wire[":datom/invalidated-by"],
+    )
+
 
 if TYPE_CHECKING:  # pragma: no cover — import only for static type checkers
     import psycopg
@@ -365,6 +450,18 @@ class PostgresStore:
            per ADR-3 / § 6 of the design doc — so two writers commit in
            a definite order and ``parent_provenance_hash`` always
            points to the immediately-prior committed audit datom.
+        3a. **PG-W1 / ADR-17 audit-chain rebind:** for each audit
+            datom in the batch, rebind ``provenance[':prev-hash']``
+            (and the dependent ``:signature`` / ``:datom/tx`` /
+            ``:datom/e``) to the head hash actually observed under
+            ``audit_chain_lock FOR UPDATE``. The Python-side
+            ``AuditEntry`` was constructed with whatever the in-process
+            ``_audit_chain_state`` pointer held; under multi-process
+            contention that pointer is necessarily stale by the time
+            we hold the row lock. The rebind is a fast-path no-op when
+            the in-memory pointer already matches the locked head
+            (single-writer steady state). Closes ARIS R2 Dim 4
+            (cross-process audit-chain Merkle continuity).
         4. ``INSERT INTO datom_log ...`` for every datom in the batch,
            sharing the allocated tx-id.
         5. **PG3:** for audit-shaped batches, ``UPDATE audit_chain_lock
@@ -504,6 +601,58 @@ class PostgresStore:
                                     head_row[1] if head_row[1] else None
                                 )
 
+                            # 3a. PG-W1 / ADR-17 — rebind audit datoms'
+                            # ``:prev-hash`` to the actually-locked
+                            # cross-process head. The Python-side
+                            # AuditEntry was constructed with whatever
+                            # in-process ``_audit_chain_state`` pointer
+                            # the caller's process held; under multi-
+                            # process contention that pointer is
+                            # necessarily stale by the time this txn
+                            # acquires ``audit_chain_lock FOR UPDATE``.
+                            # Without rebinding, two writers can both
+                            # commit audit datoms whose ``prev_hash``
+                            # points at the same stale predecessor —
+                            # ``verify_chain`` then fails on the second
+                            # one's chain check (R2 Dim 4 finding).
+                            #
+                            # Within-batch chain: the FIRST audit datom
+                            # binds to ``audit_head_hash`` (the locked
+                            # tip); each SUBSEQUENT audit datom binds
+                            # to the prior rebound datom's recomputed
+                            # ``:signature`` so the within-batch chain
+                            # stays consistent.
+                            #
+                            # Fast-path: when the in-memory pointer
+                            # already matches the locked head (single-
+                            # writer / monotonic case), the helper
+                            # returns the input datom unchanged — O(1)
+                            # prev_hash compare per audit datom in
+                            # steady state.
+                            if has_audit:
+                                rebound_materialised = []
+                                running_head: str | None = audit_head_hash
+                                for d in materialised:
+                                    if _is_audit_datom(d):
+                                        d_rebound = _rebind_audit_datom_under_lock(
+                                            d, running_head,
+                                        )
+                                        # Advance running_head to the
+                                        # (possibly recomputed) signature
+                                        # of the just-rebound datom so
+                                        # the next audit datom in the
+                                        # batch chains off it.
+                                        new_sig = (
+                                            d_rebound.provenance.get(":signature")
+                                            if d_rebound.provenance else None
+                                        )
+                                        if isinstance(new_sig, str):
+                                            running_head = new_sig
+                                        rebound_materialised.append(d_rebound)
+                                    else:
+                                        rebound_materialised.append(d)
+                                materialised = rebound_materialised
+
                             # 4. Stamp + INSERT the batch.
                             stamped = [_with_tx(d, new_tx) for d in materialised]
                             cur.executemany(
@@ -578,12 +727,14 @@ class PostgresStore:
                                     (max_seq, last_hash),
                                 )
                                 # ``audit_head_hash`` (the OLD head
-                                # before this transaction) is read
-                                # primarily to acquire the row lock
-                                # at step 3; downstream consumers who
-                                # want the previous head can re-read
-                                # the lock row at any time.
-                                _ = audit_head_hash
+                                # before this transaction) was read
+                                # both to acquire the row lock at
+                                # step 3 AND used at step 3a to
+                                # rebind the first audit datom's
+                                # ``:prev-hash`` (PG-W1 / ADR-17).
+                                # Downstream consumers who want the
+                                # previous head can re-read the lock
+                                # row at any time.
                         # 6. COMMIT — releases all row locks.
                         conn.commit()
                         return new_tx

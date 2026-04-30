@@ -1,0 +1,12 @@
+{
+  "schema_dialect": "http://json-schema.org/draft-07/schema#",
+  "profile_version": "v0.8",
+  "tools": {
+    "persistence_remember": "5f77e5fb0e5928436223a5f8d0dfe418973ad30cf01ab88cf51ee1117dfe16ae",
+    "persistence_recall": "ef81a5c5ebe49fb09dd3755882563469f4ace67c58daf93f0dbe22c29dbb37c8",
+    "persistence_forget": "6dfa3a4631f3eecbc840161967b8c07d3aab7f92f438ded372c734022bc8efa3",
+    "persistence_audit_window": "889aa70652272993204cb4988fa416db9e6d2764ae2d2585bec51cde337f94db",
+    "persistence_replay_check": "3598f0429c32bd8955aa2a3608c9e3d512c3add53a65a6d304af0b528af1f2da",
+    "persistence_view_at": "ad145e2cadd02522f3561a01d1f4d7ceb093deaf63ccd806cea56e65b249f3dc"
+  }
+}

@@ -80,6 +80,7 @@ from typing import Iterable, Iterator, TYPE_CHECKING
 
 from persistence.fact.datom import Datom
 from persistence.store._codec import NativeDatomCodec, with_tx as _with_tx
+from persistence.store._migration_runner import apply_migrations_with_pool
 
 if TYPE_CHECKING:  # pragma: no cover — import only for static type checkers
     import psycopg
@@ -87,48 +88,26 @@ if TYPE_CHECKING:  # pragma: no cover — import only for static type checkers
 
 
 # ---------------------------------------------------------------------------
-# Schema DDL — applied idempotently on first connect.
+# Schema DDL — applied via the PG6 migration runner on first connect.
 # ---------------------------------------------------------------------------
 #
-# Mirrors ``src/persistence/fact/migrations/0001_datom_log.sql`` column-for-
-# column with mechanical type promotions (INTEGER → BIGINT, ISO-8601 TEXT →
-# TIMESTAMPTZ, AUTOINCREMENT → BIGSERIAL). ``v`` and ``provenance`` stay TEXT
-# (canonical JSON) per ADR-5 W1-revised so the cross-backend ``_encode`` /
-# ``_decode`` codec is byte-identical.
+# PG1 (`d911270`) shipped a single inline ``_SCHEMA_DDL`` string here. PG6
+# (Phase 1 stream #169) split it into a real migration file at
+# :file:`migrations/postgres/0001_datom_log.sql` and replaced the
+# ``_create_schema()`` body with a call into
+# :func:`persistence.store._migration_runner.apply_migrations_with_pool`.
+# The on-wire DDL is byte-identical (same ``CREATE TABLE IF NOT EXISTS``
+# + same indexes + same ``tx_allocator`` row + same ``UNIQUE (tx, e, a)``
+# constraint) so existing databases keep working without any data
+# migration; the only change is that future PG3/PG4 migrations
+# (``0002_audit_chain_lock.sql`` etc.) live next to ``0001_datom_log.sql``
+# instead of being smuggled into the inline string.
 #
-# A future PG6 migration runner may split this into per-file SQL with a
-# proper history table; PG1 is the one-shot "create on first connect" form.
-_SCHEMA_DDL = """
-CREATE TABLE IF NOT EXISTS datom_log (
-    seq             BIGSERIAL    PRIMARY KEY,
-    e               TEXT         NOT NULL,
-    a               TEXT         NOT NULL,
-    v               TEXT         NOT NULL,
-    tx              BIGINT       NOT NULL,
-    tx_time         TIMESTAMPTZ  NOT NULL,
-    valid_from      TIMESTAMPTZ  NOT NULL,
-    valid_to        TIMESTAMPTZ,
-    op              TEXT         NOT NULL CHECK (op IN ('assert', 'retract')),
-    provenance      TEXT         NOT NULL,
-    invalidated_by  BIGINT,
-    UNIQUE (tx, e, a)
-);
-
-CREATE INDEX IF NOT EXISTS idx_datom_eavt ON datom_log (e, a, valid_from, tx);
-CREATE INDEX IF NOT EXISTS idx_datom_aevt ON datom_log (a, e, valid_from, tx);
-CREATE INDEX IF NOT EXISTS idx_datom_avet ON datom_log (a, v, e, tx);
-CREATE INDEX IF NOT EXISTS idx_datom_vaet ON datom_log (v, a, e, tx);
-CREATE INDEX IF NOT EXISTS idx_datom_vte  ON datom_log (valid_from, valid_to, e);
-CREATE INDEX IF NOT EXISTS idx_datom_log_txtime ON datom_log (tx_time, tx);
-
-CREATE TABLE IF NOT EXISTS tx_allocator (
-    id          INTEGER PRIMARY KEY CHECK (id = 1),
-    next_tx     BIGINT  NOT NULL DEFAULT 1
-);
-
-INSERT INTO tx_allocator (id, next_tx) VALUES (1, 1)
-ON CONFLICT (id) DO NOTHING;
-"""
+# The runner records every applied migration in a ``_migrations`` history
+# table (``id INTEGER PK / name TEXT UNIQUE / applied_at TIMESTAMPTZ``)
+# inside the same transaction as the migration body, so a re-init that
+# scans an unchanged on-disk migrations directory is a no-op. See
+# ``persistence.store._migration_runner`` for the runner contract.
 
 
 # ---------------------------------------------------------------------------
@@ -265,15 +244,21 @@ class PostgresStore:
         self._create_schema()
 
     def _create_schema(self) -> None:
-        """Apply the PG1 schema DDL idempotently."""
-        with self._pool.connection() as conn:
-            # The DDL is wrapped in its own auto-commit boundary so a
-            # later ROLLBACK on the outer caller's behalf does not undo
-            # the schema. psycopg 3 commits on context-exit by default,
-            # which is what we want here.
-            with conn.cursor() as cur:
-                cur.execute(_SCHEMA_DDL)
-            conn.commit()
+        """Apply pending migrations via the PG6 forward-only runner.
+
+        Delegates to
+        :func:`persistence.store._migration_runner.apply_migrations_with_pool`
+        which scans :file:`migrations/postgres/*.sql` lexicographically,
+        applies any file not already in the ``_migrations`` history
+        table (each migration body + its history-row INSERT inside one
+        transaction), and is a no-op when everything is already up to
+        date.
+
+        The list of just-applied migration names is intentionally
+        discarded — operators who care about migration apply ordering
+        consult the ``_migrations`` table directly.
+        """
+        apply_migrations_with_pool(self._pool, flavour="postgres")
 
     # ----- transaction context manager (additive Protocol method) ---------
 

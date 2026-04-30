@@ -48,6 +48,13 @@ include = ["persistence*"]
 [tool.setuptools.package-data]
 "persistence" = ["py.typed"]
 "persistence.fact" = ["migrations/*.sql"]
+# PG6 (Phase 1 stream #169): the Postgres backend's migrations live
+# under ``persistence.store.migrations.<flavour>`` and are loaded by
+# ``persistence.store._migration_runner`` from disk on
+# ``PostgresStore.__init__``. Listing them here ensures the wheel
+# includes the SQL files (setuptools does not pick up non-Python
+# resources by default).
+"persistence.store" = ["migrations/postgres/*.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

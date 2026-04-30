@@ -22,7 +22,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Callable, Iterable, Iterator, Literal, Optional
 
 from persistence.fact.datom import Datom
 from persistence.fact.store import TX_PLACEHOLDER, InMemoryStore, Store
@@ -60,6 +60,65 @@ class RetroactiveCorrectionError(ValueError):
     emitting a companion retract with ``valid_to < valid_from`` corrupts
     the bitemporal rectangle; callers must opt in explicitly.
     """
+
+
+class FoldError(RuntimeError):
+    """Raised by :meth:`DB.fold` when an item-level callable raises and
+    ``on_error`` was set to ``"abort"`` or ``"checkpoint"``.
+
+    The exception carries the partial state recovered from the last
+    successful checkpoint plus the original cause as ``__cause__`` so
+    callers can either swallow + inspect the partial state or re-raise
+    with full traceback context.
+
+    Attributes:
+        acc:                  accumulator value as of the last
+                              successful checkpoint, or the seed if no
+                              checkpoint was reached. The same value
+                              for both ``on_error="abort"`` and
+                              ``on_error="checkpoint"`` — the
+                              difference between the two is the
+                              caller-side intent signalled by the
+                              flag, not the recovered state. Under
+                              ``checkpoint_every=0`` (per-item) the
+                              checkpoint advances on every successful
+                              ``fn``, so this is the accumulator after
+                              the last successful item; under
+                              ``checkpoint_every=N`` it is the
+                              accumulator after the last *flushed*
+                              batch (the in-progress buffer is
+                              discarded).
+        committed_count:      number of datoms committed up to the
+                              last clean checkpoint. The failing
+                              item's facts are not counted (they were
+                              never flushed).
+        last_committed_acc:   alias for :attr:`acc` — kept under a
+                              longer name for explicit readability in
+                              caller error handlers.
+        item_index:           the 0-based index of the item that
+                              triggered the failure (i.e.
+                              ``items[item_index]`` is the item ``fn``
+                              raised on).
+
+    PG6 (Phase 1 stream #169) ships this as ``@experimental`` surface
+    alongside :meth:`DB.fold`; the exception class is part of the
+    documented experimental contract but its precise shape may evolve
+    in v0.9.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        acc: Any = None,
+        committed_count: int = 0,
+        item_index: int,
+    ) -> None:
+        super().__init__(message)
+        self.acc = acc
+        self.committed_count = committed_count
+        self.last_committed_acc = acc
+        self.item_index = item_index
 
 
 def _hash_fact(fact: dict) -> str:
@@ -522,6 +581,261 @@ class DB:
             )
         return db
 
+    # ---- Fold: speculation / rollback / checkpointing primitive --------
+    def fold(
+        self,
+        seed: Any,
+        items: Iterable[Any],
+        fn: "Callable[[Any, Any, DB], tuple[Any, list[dict]]]",
+        *,
+        on_error: Literal["abort", "skip", "checkpoint"] = "abort",
+        checkpoint_every: int = 0,
+        provenance: Optional[dict] = None,
+    ) -> tuple[Any, int]:
+        """Fold ``items`` through ``fn``, accumulating facts transactionally.
+
+        Closes Phase 1 stream #145 (R3-M1 — the fold() executor primitive
+        from the v1.0 roadmap). The shape mirrors a classic ``reduce``
+        / ``foldl`` but with three substrate-aware twists:
+
+        1. ``fn`` is invoked as ``fn(acc, item, db)`` and must return a
+           ``(new_acc, facts)`` tuple where ``facts`` is a list of fact
+           dicts in the same shape :meth:`transact` accepts (``e``, ``a``,
+           ``v``, ``valid_from`` etc.). An empty list is acceptable and
+           commits no datoms — the accumulator still advances.
+        2. Facts are committed in batches via :meth:`transact_batch`.
+           The batch boundary depends on ``checkpoint_every``:
+
+           - ``checkpoint_every == 0`` (default): every item's facts are
+             committed in their own per-item :meth:`transact_batch` call
+             AND the accumulator after that item is the new "last
+             checkpoint" (so callers get fine-grained recovery without
+             paying for buffering).
+           - ``checkpoint_every > 0``: facts are buffered across N items
+             and flushed once N items have been processed (cheaper for
+             high-fanout folds). Recovery granularity is N items.
+        3. ``on_error`` controls behaviour when ``fn`` raises:
+
+           - ``"abort"`` — re-raise immediately wrapped in
+             :class:`FoldError`; the in-progress (buffered, uncommitted)
+             facts are discarded; previously-checkpointed facts remain.
+             ``acc`` on the FoldError is the last *checkpointed*
+             accumulator (so callers can resume from a known-good
+             state).
+           - ``"skip"`` — log nothing, swallow the exception, do NOT
+             advance the accumulator, do NOT commit any in-flight facts
+             from that item, and continue with the next item. Recovers
+             from transient per-item failures without aborting the
+             whole fold.
+           - ``"checkpoint"`` — commits up to the last successful
+             checkpoint and re-raises with the partial state attached
+             on :class:`FoldError`. The semantic difference from
+             ``"abort"`` is subtle: ``"abort"`` and ``"checkpoint"``
+             both raise on first failure; ``"checkpoint"`` makes the
+             intent explicit and emits the partial-state contract as
+             a deliberate API gesture rather than an accidental
+             consequence of per-item batching.
+
+        Args:
+            seed: initial accumulator value passed as ``fn``'s first
+                argument on iteration 0.
+            items: iterable of items to fold over. Materialised once at
+                the top of the call (so a generator is fine).
+            fn: ``(acc, item, db) -> (new_acc, facts)`` reducer.
+            on_error: failure-handling discipline; see above.
+            checkpoint_every: batch size for the buffered flush mode;
+                default ``0`` means "checkpoint after every item".
+                Negative values raise :class:`ValueError`.
+            provenance: optional dict merged into the per-fact
+                provenance (alongside the auto-stamped
+                ``prompt_hash``). The ``"source": "fold"`` tag is
+                added if the caller did not set ``"source"`` so audit
+                consumers can identify fold-emitted datoms.
+
+        Returns:
+            ``(final_acc, total_datoms_committed)``. ``final_acc`` is
+            the accumulator after the last successful iteration
+            (which under ``"skip"`` may be the same as one before a
+            skipped failure). ``total_datoms_committed`` counts the
+            actual datoms inserted (companion retracts produced by
+            cardinality-one auto-retraction count too — they are
+            emitted as part of the same transaction batch). For
+            ``on_error="abort"`` / ``"checkpoint"`` callers see the
+            counts up to the last checkpoint via
+            :class:`FoldError.committed_count` instead.
+
+        Raises:
+            FoldError: when ``fn`` raises and ``on_error`` is
+                ``"abort"`` or ``"checkpoint"``. The original
+                exception is attached as ``__cause__``.
+            ValueError: on invalid ``on_error`` / ``checkpoint_every``.
+
+        Stability:
+            ``@experimental`` per Adapter SDK ADR-5 + R3-M1. The
+            shape may evolve in v0.9 once the coding-agent MVP
+            (Phase 2) tells us which sub-shape is load-bearing.
+            Adapter authors who depend on this method should NOT
+            pin against ``@stable("v0.8")`` semantics; the curated
+            ``Substrate.txn.fold`` re-export (PG6) is also
+            ``@experimental``.
+
+        Example::
+
+            def step(acc, item, db):
+                # accumulator is "running sum"; emit one fact per item
+                fact = {"e": f"item-{item.id}", "a": "value",
+                        "v": item.value,
+                        "valid_from": now}
+                return acc + item.value, [fact]
+
+            total, n = db.fold(seed=0, items=stream, fn=step,
+                               on_error="checkpoint",
+                               checkpoint_every=10)
+
+        Notes:
+            The current implementation routes through
+            :meth:`transact_batch` per checkpoint flush. PG3+ may
+            promote this to a single ``transact_serializable`` call
+            on backends where it is available so the WHOLE fold
+            becomes one cross-process atomic write — that's a
+            backwards-compatible change because ``fold`` already
+            commits transactionally per checkpoint, and a future
+            single-call promotion only tightens the atomicity
+            guarantee.
+        """
+        if on_error not in ("abort", "skip", "checkpoint"):
+            raise ValueError(
+                f"DB.fold: on_error must be one of "
+                f"'abort'/'skip'/'checkpoint', got {on_error!r}"
+            )
+        if not isinstance(checkpoint_every, int) or checkpoint_every < 0:
+            raise ValueError(
+                f"DB.fold: checkpoint_every must be a non-negative int, "
+                f"got {checkpoint_every!r}"
+            )
+
+        # Default provenance carries a ``"source": "fold"`` tag so
+        # audit consumers can identify fold-emitted datoms — but only
+        # when the caller hasn't already set their own ``source``.
+        prov_for_batch: Optional[dict]
+        if provenance is None:
+            prov_for_batch = {"source": "fold"}
+        else:
+            prov_for_batch = dict(provenance)
+            prov_for_batch.setdefault("source", "fold")
+
+        materialised_items = list(items)
+        # ``acc`` is the *live* accumulator (advances on every successful
+        # ``fn``); ``checkpoint_acc`` is the last accumulator we committed
+        # facts for. They diverge when checkpoint_every > 1 and we are
+        # mid-buffer.
+        acc: Any = seed
+        checkpoint_acc: Any = seed
+        committed_total = 0
+        # Pending buffer for checkpoint_every > 0 mode.
+        pending_facts: list[dict] = []
+        pending_count_since_flush = 0
+
+        def _flush() -> None:
+            """Commit pending facts; advance the checkpoint accumulator."""
+            nonlocal pending_facts, pending_count_since_flush, checkpoint_acc
+            nonlocal committed_total
+            if not pending_facts:
+                pending_count_since_flush = 0
+                return
+            # ``transact_batch`` handles the auto-retraction lookups in
+            # one pass over the log — important for high-fanout folds
+            # where per-item ``transact`` would re-walk the snapshot N
+            # times. Companion retracts produced by cardinality-one
+            # auto-retraction are emitted as part of the same
+            # transaction; we count them in ``committed_total`` by
+            # diffing the store's tx-id allocation. The simpler
+            # contract — count of input facts — undercounts for
+            # cardinality-one workloads. We count emitted datoms
+            # directly so the return value matches operator
+            # expectations.
+            facts_to_flush = pending_facts
+            pending_facts = []
+            pending_count_since_flush = 0
+            pre_log_len = sum(1 for _ in self.store.all_datoms())
+            # Update self in-place (DB is functional, so re-bind the
+            # store via the result). The new DB shares the same store,
+            # so ``self.store`` reflects the appended datoms either
+            # way — but we re-bind ``self`` semantically by rebinding
+            # the closure's view (we read self.store after).
+            self.transact_batch(facts_to_flush, prov_for_batch)
+            post_log_len = sum(1 for _ in self.store.all_datoms())
+            committed_total += max(0, post_log_len - pre_log_len)
+            checkpoint_acc = acc
+
+        def _raise_fold_error(
+            msg: str,
+            cause: BaseException,
+            item_idx: int,
+        ) -> None:
+            """Construct + raise a :class:`FoldError` with provenance."""
+            err = FoldError(
+                msg,
+                acc=checkpoint_acc,
+                committed_count=committed_total,
+                item_index=item_idx,
+            )
+            raise err from cause
+
+        for idx, item in enumerate(materialised_items):
+            try:
+                new_acc, facts = fn(acc, item, self)
+            except BaseException as exc:  # noqa: BLE001 — caller policy decides
+                if on_error == "skip":
+                    # Discard any pending facts from THIS item only —
+                    # under skip we still keep the previous
+                    # checkpoint_acc and continue; the buffered facts
+                    # from earlier items are kept for the next flush.
+                    continue
+                # abort or checkpoint: flush nothing further; raise
+                # with whatever has been committed so far.
+                _raise_fold_error(
+                    f"DB.fold: fn raised on item index {idx}: "
+                    f"{type(exc).__name__}: {exc}",
+                    cause=exc,
+                    item_idx=idx,
+                )
+
+            # Validate fn's return shape early so a buggy ``fn`` does
+            # not silently drop facts.
+            if not isinstance(facts, list):
+                # Wrap into a clean fold-failure with the index, so
+                # the caller sees the same FoldError shape regardless
+                # of WHY fn misbehaved.
+                _raise_fold_error(
+                    f"DB.fold: fn must return (acc, list[dict]); item "
+                    f"index {idx} returned {type(facts).__name__} for "
+                    f"the second tuple element",
+                    cause=TypeError(
+                        f"expected list[dict], got {type(facts).__name__}"
+                    ),
+                    item_idx=idx,
+                )
+
+            acc = new_acc
+            if facts:
+                pending_facts.extend(facts)
+            pending_count_since_flush += 1
+
+            # Flush condition: per-item (checkpoint_every == 0) or
+            # buffered (after every N items).
+            if checkpoint_every == 0:
+                _flush()
+            elif pending_count_since_flush >= checkpoint_every:
+                _flush()
+
+        # Final flush for buffered mode (or any tail that never hit
+        # the threshold).
+        if pending_facts:
+            _flush()
+
+        return acc, committed_total
+
 
 # ---------------------------------------------------------------------------
 # DBView — immutable snapshot with entity projection.
@@ -620,7 +934,13 @@ def _find_prior_assert(
     return None
 
 
-__all__ = ["CausalDAG", "DB", "DBView", "RetroactiveCorrectionError"]
+__all__ = [
+    "CausalDAG",
+    "DB",
+    "DBView",
+    "FoldError",
+    "RetroactiveCorrectionError",
+]
 
 
 # ---------------------------------------------------------------------------

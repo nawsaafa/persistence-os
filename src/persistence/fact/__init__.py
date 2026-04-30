@@ -17,7 +17,13 @@ Public surface:
 """
 
 from persistence.fact.datom import Datom, Op, Provenance, provenance_from_dict
-from persistence.fact.db import CausalDAG, DB, DBView
+from persistence.fact.db import (
+    CausalDAG,
+    DB,
+    DBView,
+    FoldError,
+    RetroactiveCorrectionError,
+)
 from persistence.fact.projection import (
     DictProjection,
     ProjectionAdapter,
@@ -33,10 +39,12 @@ __all__ = [
     "DBView",
     "Datom",
     "DictProjection",
+    "FoldError",
     "InMemoryStore",
     "Op",
     "ProjectionAdapter",
     "Provenance",
+    "RetroactiveCorrectionError",
     "provenance_from_dict",
     "SQLiteStore",
     "Store",

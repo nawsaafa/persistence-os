@@ -41,9 +41,10 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Iterator, Protocol
+from typing import Any, ContextManager, Iterable, Iterator, Protocol, runtime_checkable
 
 from persistence.fact.datom import Datom
 from persistence.store._codec import (
@@ -72,12 +73,33 @@ def load_migrations() -> list[tuple[str, str]]:
     )
 
 
+@runtime_checkable
 class Store(Protocol):
     """Minimum contract every backend must satisfy.
 
     Backends are intentionally dumb. All bitemporal logic (auto-retraction,
     as-of, branch) lives in :class:`~persistence.fact.db.DB` over an iterable
     of datoms; the store's only job is durable append + ordered retrieval.
+
+    PG3 extension (ADR-15 W2)
+    -------------------------
+
+    The Protocol gains TWO additive methods in v0.8 — :meth:`_txn` (store-
+    level transaction context-manager) and :meth:`transact_serializable`
+    (atomic primitive for cross-process correctness). Both have default
+    implementations on InMemoryStore + SQLiteStore that preserve their
+    existing semantics: ``_txn()`` defaults to a ``nullcontext()`` (no
+    real transaction — the existing per-method critical sections under
+    ``_lock`` already provide single-process atomicity); ``transact_serializable``
+    defaults to a wrapper around :meth:`allocate_and_append` (or, when
+    ``tx_time`` is provided, a manual append at the requested tx_time).
+    PostgresStore overrides both with the SERIALIZABLE-transaction +
+    ``tx_allocator``-row-lock + ``audit_chain_lock``-row-lock shape.
+
+    Adapters bound to the original 6 methods (``append`` /
+    ``allocate_and_append`` / ``all_datoms`` / ``since`` / ``mark_invalidated``
+    / ``next_tx``) continue to work unchanged. New code that wants the
+    multi-process atomicity guarantee opts into ``transact_serializable``.
     """
 
     def append(self, datoms: Iterable[Datom]) -> None:
@@ -136,6 +158,73 @@ class Store(Protocol):
         so two Stores backed by different files / databases do not collide,
         and a Store restored from an existing log resumes at ``max(tx)+1``
         instead of overwriting row 1 (ARIS R3 F10).
+        """
+        ...
+
+    # ------- Additive Protocol methods (PG3 / ADR-15 W2) ------------------
+
+    def _txn(self) -> ContextManager[Any]:
+        """Open a store-level transaction; yield a backend-native handle.
+
+        Per ADR-15 W2 this is the store-level transaction context-manager.
+        On clean exit the transaction COMMITs; on exception ROLLBACK +
+        re-raise. The yielded handle's exact type is backend-specific:
+
+        - ``InMemoryStore`` — yields ``None`` (no real transaction; the
+          existing per-method ``_lock`` critical sections give single-
+          process atomicity).
+        - ``SQLiteStore`` — yields ``None`` (the existing per-method
+          ``BEGIN IMMEDIATE`` critical sections give single-process
+          atomicity; ``_txn()`` is a no-op pass-through so the higher-
+          level transact_serializable shape still works).
+        - ``PostgresStore`` — yields the active :class:`psycopg.Cursor`
+          on a SERIALIZABLE-mode connection.
+
+        Default impl on InMemoryStore + SQLiteStore returns
+        :func:`contextlib.nullcontext` so existing in-process callers
+        see no behaviour change.
+        """
+        ...
+
+    def transact_serializable(
+        self,
+        datoms: Iterable[Datom],
+        *,
+        tx_time: datetime | None = None,
+    ) -> int:
+        """Atomically allocate a tx-id and insert ``datoms`` under serialisable isolation.
+
+        Per ADR-15 W2 + ADR-13 this is the atomic primitive for cross-
+        process correctness. The contract:
+
+        1. Open a store-level transaction (see :meth:`_txn`).
+        2. Allocate a monotonic tx-id (under ``tx_allocator`` row lock on
+           PostgresStore; under ``_lock`` mutex on InMemory / SQLite).
+        3. If any datom in ``datoms`` is audit-shaped (``a`` starts with
+           ``"audit/"``), additionally serialise on the audit-chain head
+           (``audit_chain_lock`` row on PostgresStore; ``_lock`` mutex on
+           InMemory / SQLite).
+        4. Stamp every datom with the allocated tx-id; if ``tx_time`` is
+           supplied, override each datom's ``tx_time`` with it (this is
+           how ADR-13 preserves the audit handler's ``recorded_at``
+           through the migration).
+        5. INSERT the batch.
+        6. COMMIT — releases the row locks.
+
+        Args:
+            datoms: iterable of :class:`Datom`. The ``tx`` field on each
+                input datom is ignored; the allocator picks the real
+                value. Empty iterable is a no-op and burns no tx-id.
+            tx_time: when supplied, every datom is stamped with this
+                ``tx_time`` (overrides the datom's own value). Used by
+                :func:`persistence.repl._audit.persist_repl_audit` to
+                preserve the audit handler's ``recorded_at`` instant per
+                ADR-13. When ``None`` (default), each datom's existing
+                ``tx_time`` is preserved unchanged.
+
+        Returns:
+            The freshly-allocated tx-id (int) shared by all inserted
+            datoms. ``0`` if ``datoms`` is empty.
         """
         ...
 
@@ -206,6 +295,43 @@ class InMemoryStore:
             if not self._log:
                 return 1
             return max(d.tx for d in self._log) + 1
+
+    # ------- Additive Protocol methods (PG3 / ADR-15 W2) ------------------
+
+    @contextmanager
+    def _txn(self):
+        """Default transaction context — InMemoryStore has no ACID layer.
+
+        Single-process atomicity is provided by the existing per-method
+        ``_lock`` critical sections (``append`` / ``allocate_and_append``
+        / ``mark_invalidated`` all hold the lock). ``_txn()`` is therefore
+        a pass-through that yields ``None``; tests that bind to the
+        Protocol method get a clean no-op shape.
+        """
+        with nullcontext():
+            yield None
+
+    def transact_serializable(
+        self,
+        datoms: Iterable[Datom],
+        *,
+        tx_time: datetime | None = None,
+    ) -> int:
+        """Default impl: route through :meth:`allocate_and_append` under ``_lock``.
+
+        Per ADR-15 W2 the InMemoryStore default impl preserves existing
+        single-process semantics — the in-process ``_lock`` mutex is the
+        existing serialisation gate. When ``tx_time`` is provided, every
+        datom's ``tx_time`` is overridden with it before insertion (this
+        is how ADR-13 preserves the audit handler's ``recorded_at``).
+        """
+        materialised = list(datoms)
+        if not materialised:
+            return 0
+        if tx_time is not None:
+            materialised = [_replace_tx_time(d, tx_time) for d in materialised]
+        out = self.allocate_and_append(materialised)
+        return int(out[0].tx)
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +475,49 @@ class SQLiteStore:
         # Result is either a Row (when row_factory=Row) or a plain tuple.
         return int(row[0] if row is not None else 1)
 
+    # ------- Additive Protocol methods (PG3 / ADR-15 W2) ------------------
+
+    @contextmanager
+    def _txn(self):
+        """Default transaction context — SQLiteStore relies on per-method BEGIN IMMEDIATE.
+
+        Each existing method (``append`` / ``allocate_and_append`` /
+        ``mark_invalidated``) opens its own ``BEGIN IMMEDIATE`` writer-
+        lock transaction and commits before returning. ``_txn()`` is a
+        pass-through that yields ``None`` so the higher-level
+        :meth:`transact_serializable` shape works without nesting two
+        transactions (``BEGIN IMMEDIATE`` inside another ``BEGIN`` would
+        raise on SQLite). Multi-step atomicity in single-process SQLite
+        deployments is covered by the existing ``_lock`` mutex; the
+        ``BEGIN IMMEDIATE`` boundary lives one level down on the actual
+        write call.
+        """
+        with nullcontext():
+            yield None
+
+    def transact_serializable(
+        self,
+        datoms: Iterable[Datom],
+        *,
+        tx_time: datetime | None = None,
+    ) -> int:
+        """Default impl: route through :meth:`allocate_and_append` under ``_lock``.
+
+        Per ADR-15 W2 the SQLiteStore default impl preserves existing
+        single-process semantics — the in-process ``_lock`` mutex plus
+        ``BEGIN IMMEDIATE`` writer-lock is the existing serialisation
+        gate. When ``tx_time`` is provided, every datom's ``tx_time`` is
+        overridden with it before insertion (ADR-13 preservation of the
+        audit handler's ``recorded_at`` instant).
+        """
+        materialised = list(datoms)
+        if not materialised:
+            return 0
+        if tx_time is not None:
+            materialised = [_replace_tx_time(d, tx_time) for d in materialised]
+        out = self.allocate_and_append(materialised)
+        return int(out[0].tx)
+
     # ---- Connection management ------------------------------------------
     def close(self) -> None:
         with self._lock:
@@ -413,6 +582,33 @@ def _with_tx(d: Datom, tx: int) -> Datom:
     else untouched.
     """
     return _shared_with_tx(d, tx)
+
+
+def _replace_tx_time(d: Datom, tx_time: datetime) -> Datom:
+    """Return a copy of ``d`` with ``tx_time`` replaced — frozen-Datom safe.
+
+    Used by :meth:`Store.transact_serializable` to honour the optional
+    ``tx_time`` argument. Per ADR-13 the audit-chain migration must
+    preserve the audit handler's ``recorded_at`` instant: the audit
+    handler stamps the entry's ``recorded_at`` at the moment the audit
+    fires, NOT at the moment the datom commits. Without this override,
+    ``transact_serializable`` would route through ``allocate_and_append``
+    which preserves whatever ``tx_time`` lives on the input datom — but
+    this helper makes the override explicit at the Protocol level so
+    callers don't have to construct a new Datom themselves.
+    """
+    return Datom(
+        e=d.e,
+        a=d.a,
+        v=d.v,
+        tx=d.tx,
+        tx_time=tx_time,
+        valid_from=d.valid_from,
+        valid_to=d.valid_to,
+        op=d.op,
+        provenance=d.provenance,
+        invalidated_by=d.invalidated_by,
+    )
 
 
 __all__ = ["InMemoryStore", "SQLiteStore", "Store", "load_migrations"]

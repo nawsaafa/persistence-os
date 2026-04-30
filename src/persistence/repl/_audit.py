@@ -126,25 +126,38 @@ def emit_repl_op_audit(
 
 
 # ---------------------------------------------------------------------------
-# persist_repl_audit (W2.C — fact store is the durable source of truth)
+# persist_repl_audit (W2.C + PG3 ADR-13 — routes through transact_serializable)
 # ---------------------------------------------------------------------------
 def persist_repl_audit(db: Any, entry: AuditEntry) -> None:
     """Persist one ``:repl/op`` AuditEntry as one ``audit/repl.op`` datom.
 
-    Per ADR-4 + W2.C: ``audit_entry_to_datom`` returns the wire-form
-    dict ``{":datom/e": ..., ":datom/a": ":audit/repl.op", ...}``; we
-    reshape into a :class:`Datom` (bare-string ``a``, ``int`` ``tx``)
-    and append directly via ``db.store.append``. We do NOT route through
-    ``db.transact`` because that would re-stamp ``tx_time`` from the
-    DB clock and lose the audit handler's own ``recorded_at`` instant
-    — exactly the same reason the Stream A G2 gate's seeder uses
-    ``store.append`` (see ``tests/plan/test_promotion_g1_g2.py:329-342``).
+    Per ADR-4 + W2.C + PG3 ADR-13: ``audit_entry_to_datom`` returns the
+    wire-form dict ``{":datom/e": ..., ":datom/a": ":audit/repl.op",
+    ...}``; we reshape into a :class:`Datom` (bare-string ``a``, ``int``
+    ``tx``) and route through ``db.store.transact_serializable`` so the
+    audit datom inherits the multi-process SSI guarantees the
+    PostgresStore backbone offers — and, crucially, takes the
+    ``audit_chain_lock`` row lock that orders the Merkle chain across
+    concurrent writers.
 
-    The fresh-tx-id assignment uses the maximum-existing-tx + 1 pattern
-    InMemoryStore's ``allocate_and_append`` would have used, but routed
-    through plain ``append`` so the audit instant is preserved. For
-    backends without a max-tx primitive we fall back to walking the log
-    once.
+    **Why ``transact_serializable`` and not ``db.transact``.** ``db.transact``
+    re-stamps ``tx_time`` from the DB clock and would lose the audit
+    handler's own ``recorded_at`` instant — exactly the constraint that
+    drove the original ``store.append`` route in pre-PG3 code. ADR-13
+    closes this by extending ``transact_serializable`` with an explicit
+    ``tx_time=`` parameter; we pass the audit datom's
+    ``:datom/tx-time`` (which is ``recorded_at`` in datetime form),
+    preserving byte-identity for replay across the migration.
+
+    **Why ``transact_serializable`` and not ``store.append``.** Pre-PG3
+    code allocated tx via ``_allocate_next_tx`` (full ``db.log()`` scan
+    + ``max+1``) and routed through ``store.append``. Under multi-
+    process this races: two writers both compute ``max_tx+1=N``, both
+    INSERT, and the chain head pointer in ``audit_chain_lock`` plus the
+    in-Python audit chain state diverge. The PG3 migration routes
+    through ``transact_serializable`` so the row-lock allocator + the
+    audit-chain-lock primitive both fire — single atomic step, multi-
+    process safe.
     """
     wire = audit_entry_to_datom(entry)
     # Re-shape wire-dict → Datom slots:
@@ -152,47 +165,32 @@ def persist_repl_audit(db: Any, entry: AuditEntry) -> None:
     # - ``:datom/tx`` carries the audit entry's content hash (sha256
     #   string), but ``Datom.tx`` is ``int``. The hash is preserved in
     #   ``provenance[":signature"]`` (see ``audit_entry_to_datom``
-    #   docstring), so the inverse can splice it back. We allocate a
-    #   fresh ``int`` tx id here.
+    #   docstring), so the inverse can splice it back. ``tx`` here is
+    #   set to a placeholder ``0`` because ``transact_serializable``'s
+    #   contract is "tx field on input datoms is ignored — the
+    #   allocator picks the real value" (see Store Protocol docstring
+    #   for the additive method).
     # - ``:datom/op`` carries the leading ``":"``; ``Datom.op`` is bare.
-    next_tx = _allocate_next_tx(db)
+    recorded_at = wire[":datom/tx-time"]
     datom = Datom(
         e=wire[":datom/e"],
         a=wire[":datom/a"].lstrip(":"),
         v=wire[":datom/v"],
-        tx=next_tx,
-        tx_time=wire[":datom/tx-time"],
+        tx=0,  # ignored — transact_serializable picks the real tx-id
+        tx_time=recorded_at,  # preserved as-is; passed via tx_time= kwarg too
         valid_from=wire[":datom/valid-from"],
         valid_to=wire[":datom/valid-to"],
         op="assert",
         provenance=wire[":datom/provenance"],
     )
-    db.store.append([datom])
-
-
-def _allocate_next_tx(db: Any) -> int:
-    """Allocate the next ``int`` tx id by scanning ``db.log()`` once.
-
-    Uses ``max(d.tx for d in db.log()) + 1``; defaults to ``1`` for
-    an empty store. This is the same allocation discipline
-    ``InMemoryStore.allocate_and_append`` uses internally
-    (``store.py:155``). We don't call that helper because it stamps
-    a fresh tx id over the entire batch under one lock — we want the
-    audit handler's own ``recorded_at`` preserved on ``tx_time``, so
-    we route through plain ``append``.
-    """
-    max_tx = 0
-    try:
-        for d in db.log():
-            if d.tx > max_tx:
-                max_tx = d.tx
-    except AttributeError:
-        # Defensive: a store backend without ``log()`` falls back to
-        # ``store.all_datoms()``.
-        for d in db.store.all_datoms():
-            if d.tx > max_tx:
-                max_tx = d.tx
-    return max_tx + 1
+    # Route through transact_serializable per ADR-13. The explicit
+    # ``tx_time=recorded_at`` argument is load-bearing: it tells the
+    # store-level primitive to override the datom's tx_time with the
+    # audit handler's recorded instant, preserving replay byte-identity
+    # for existing audit entries that bypass the DB clock. On
+    # PostgresStore this also takes the ``audit_chain_lock`` row lock
+    # because the datom's ``a`` starts with ``audit/``.
+    db.store.transact_serializable([datom], tx_time=recorded_at)
 
 
 # ---------------------------------------------------------------------------

@@ -454,11 +454,19 @@ class TestPersistence:
         assert result["entries"][0]["id"] == e1.id
 
     def test_persistence_failure_does_not_corrupt_ring(self, session_with_caps):
-        # Mock a db whose ``store.append`` raises. The ring entry
-        # must still be intact post-emit; persist_repl_audit's
+        # Mock a db whose ``store.transact_serializable`` raises (PG3
+        # ADR-13 routed persist_repl_audit through this method to
+        # inherit the multi-process audit-chain serialisation; the
+        # broken-store test now mocks the actual call site). The ring
+        # entry must still be intact post-emit; persist_repl_audit's
         # exception is caught at the WSServer layer (best-effort
         # persistence — ring is the hot cache).
         class _BrokenStore:
+            def transact_serializable(self, *args, **kwargs):
+                raise RuntimeError("simulated I/O failure")
+
+            # ``append`` kept for any legacy caller; not exercised in
+            # this test post-PG3 but harmless to retain.
             def append(self, *args, **kwargs):
                 raise RuntimeError("simulated I/O failure")
 

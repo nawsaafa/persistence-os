@@ -480,19 +480,22 @@ def test_property_delete_step_removes_anchor_only(plan: Node) -> None:
         # target. Skip this draw.
         return
     assert edited is not None
-    edited_ids = _all_node_ids(edited)
-    # Property: the count of `anchor.id` occurrences in `edited` is
-    # strictly less than in the original plan. Hypothesis can construct
-    # plans where deletion produces a NEW node content-identical to the
-    # deleted anchor (e.g. parent with only-child of same attrs/tag —
-    # removing the child yields a `:par {...} children=()` whose id
-    # equals the deleted leaf's id). Strict inequality is the right
-    # invariant; "anchor.id not in edited_ids" is too strong.
-    original_count = _all_node_ids(plan).count(anchor.id)
-    new_count = edited_ids.count(anchor.id)
-    assert new_count < original_count, (
-        f"delete_step did not reduce count of anchor.id occurrences: "
-        f"{original_count} -> {new_count}"
+    # Property: the deleted anchor's position is gone — i.e. the total
+    # node count in the edited tree decreased by exactly the size of
+    # the deleted subtree (anchor's nodes-count). Counting by position
+    # (NOT by content-id) avoids the edge case where deletion can
+    # produce a new node content-identical to the deleted anchor (e.g.
+    # parent ':seq' with only-child ':seq ()' — removing the child
+    # yields ':seq ()' whose content hashes to the same id as the
+    # deleted leaf). Position-count is the load-bearing invariant for
+    # 'a step was actually removed'.
+    anchor_subtree_size = len(_all_nodes(anchor))
+    original_total = len(_all_nodes(plan))
+    new_total = len(_all_nodes(edited))
+    assert new_total == original_total - anchor_subtree_size, (
+        f"delete_step did not reduce node-position count by exactly "
+        f"the deleted subtree's size: {original_total} - "
+        f"{anchor_subtree_size} != {new_total}"
     )
 
 

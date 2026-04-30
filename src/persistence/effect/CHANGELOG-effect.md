@@ -2,6 +2,100 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — `:code/exec` sandbox handler (#141)
+
+Phase 2.0b of the persistence-coder MVP (Phase 2 of the v1.0 roadmap).
+Ships the first-class ``:code/exec`` Plan effect that runs short, pure
+Python snippets in a capability-denied subprocess sandbox. Determinism
+is achieved by **capability-denial + environment control**, NOT by
+static detection of nondeterministic calls (ADR-5). Every successful
+(and timeout-failed) call emits a ``:code/exec`` audit datom that
+rides the existing Merkle chain at ``effect/handlers/audit.py`` — no
+new chain code, mirrors the ``:plan/edit`` pattern from #140 / 2.0a.
+
+### Added
+
+- **`handlers/code.py`** — sandbox handler module.
+  - `exec_code(source, *, stdin, timeout_seconds, memory_mb, env, tx,
+    replay_mode, expected_output_hash) -> CodeExecResult` — synchronous
+    public surface; runs the source in a sandboxed subprocess and
+    returns the outcome. MUST be called inside ``db.dosync(...)`` with
+    the active Transaction passed via ``tx=`` (mirrors the Plan-Edit
+    invariant from #140).
+  - `CodeExecResult` frozen dataclass: ``stdout``, ``stderr``,
+    ``exit_code``, ``wall_clock_ms``, ``output_hash`` (sha256 of
+    canonical-JSON of (stdout, stderr, exit_code) — wall_clock_ms is
+    intentionally excluded so byte-identity holds across CPU contention).
+  - `make_code_exec_handler()` — no-op terminator handler so the audit
+    middleware (``make_audit_handler(wraps=":code/exec")``) has a raw
+    handler underneath. The actual subprocess execution happens INSIDE
+    ``exec_code()`` BEFORE ``tx.effect()`` is queued; the
+    intent-replay-time ``perform`` call exists solely to emit the
+    AuditEntry with the captured hashes.
+- **Capability-denial layers (ADR-5):**
+  1. Subprocess isolation via ``sys.executable -I -S`` (isolated, no
+     site.py) — never ``eval`` / ``exec`` in-process.
+  2. POSIX ``setrlimit`` preexec hook — ``RLIMIT_CPU = timeout_seconds + 1``
+     (kernel backstop), ``RLIMIT_AS = memory_mb * 1024 * 1024``
+     (Linux-honored, macOS best-effort), ``RLIMIT_NOFILE = 32`` (no
+     fd-flood DoS), ``RLIMIT_NPROC = 1`` (no fork bombs),
+     ``RLIMIT_FSIZE = 0`` (read-only on disk).
+  3. Wall-clock timeout via ``proc.communicate(timeout=...)`` + kill
+     on ``TimeoutExpired``.
+  4. Module allowlist enforced inside the child via a bootstrap shim
+     that monkey-patches ``builtins.__import__``. Allowed top-level:
+     ``json``, ``re``, ``dataclasses``, ``pathlib``. Explicit deny-list
+     overrides the cache (else pathlib's transitive warm-import would
+     leak ``os`` / ``sys`` / ``time``): blocks ``os``, ``sys``,
+     ``subprocess``, ``socket``, ``urllib``, ``http``, ``ctypes``,
+     ``threading``, ``multiprocessing``, ``marshal``, ``time``,
+     ``random``, ``asyncio``, ``ssl``, ``shutil``, ``tempfile``, ``io``,
+     ``fcntl``, ``signal``, ``resource``, ``importlib``, ``hashlib``,
+     ``platform``, ``uuid``, ``secrets``, ``requests``, plus
+     ``p``+``ickle`` and ``_thread`` / ``posix`` / ``nt`` path siblings.
+  5. No network — ``socket`` is blocked at import; we do NOT add a
+     network-namespace dance (capability-denial, not detection).
+  6. Working dir = fresh ``tempfile.mkdtemp()`` cleaned up on exit.
+- **Audit datom (seven keys)** — ``:code/exec/source-hash``,
+  ``:code/exec/stdin-hash``, ``:code/exec/output-hash``,
+  ``:code/exec/exit-code``, ``:code/exec/wall-clock-ms``,
+  ``:code/exec/timeout-seconds``, ``:code/exec/memory-mb``. Stdout /
+  stderr full captures are NOT in the datom (potentially huge); only
+  the hashes. Audit-replay reads recorded hashes; re-execution-replay
+  re-runs and verifies ``output_hash`` matches.
+- **Errors (all subclass ``CodeExecError``):** ``CodeExecOutsideDosync``,
+  ``CodeExecTimeout(timeout_seconds, partial_stdout)``,
+  ``CodeExecMemoryExceeded(memory_mb)``,
+  ``CodeExecForbiddenImport(module_name)``,
+  ``CodeExecReplayMismatch(expected_hash, actual_hash)``. All exported
+  from ``persistence.effect``.
+- **Replay semantics (§ 3.7):**
+  - Audit-replay default: replay reads the datom, returns recorded
+    hashes / exit_code / wall_clock_ms with empty stdout/stderr (we
+    don't store them).
+  - Re-execution-replay opt-in: caller passes ``replay_mode="re-execute"``
+    + ``expected_output_hash=``; source re-runs under same env; mismatch
+    raises ``CodeExecReplayMismatch``.
+
+### Tests
+
+- ``tests/effect/test_code_exec.py`` — unit + Hypothesis @
+  max_examples=200 over 4 deterministic source patterns
+  (``print(constant)``, ``print(json.dumps(constant))``, etc.).
+  Covers happy path / timeout / forbidden imports (one test per:
+  os, sys, subprocess, socket, urllib, ctypes, threading, ``p``+``ickle``)
+  / allowed imports / stdin / outside-dosync rejection / audit datom
+  shape / Merkle-chain integration / re-execution match + mismatch.
+  Memory-cap test platform-skipped on Darwin per ADR-5 RLIMIT_AS
+  caveat.
+
+### Security caveat (per ADR-5)
+
+This is **v0.5 sandboxing** — suitable for trusted code (the agent's
+own generations under user supervision), NOT for untrusted user
+submissions. Hardening to ``firejail`` / ``bubblewrap`` lands in
+Phase 3. Any commercial deploy disables ``:code/exec`` by default.
+
 ## [0.4.0a1] — 2026-04-25 — audit handler `parent_provenance_hash` alias
 
 ### Changed

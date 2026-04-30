@@ -815,9 +815,11 @@ def rebind_audit_datom_prev_hash(
         self-conforms at the wire boundary.
 
     Raises:
-        ValueError: if ``datom`` is not an audit-shaped datom (i.e.,
-            cannot be round-tripped through :func:`datom_to_audit_entry`)
-            or the recomputed datom fails self-conform.
+        AssertionError: if ``datom`` is not an audit-shaped datom (its
+            ``:datom/a`` does not start with ``:audit/``) — surfaced by
+            :func:`datom_to_audit_entry`'s ``assert`` guard at decode time.
+        ValueError: if the recomputed datom fails self-conform at
+            :func:`audit_entry_to_datom`'s wire boundary.
     """
     # Fast-path: no-op when prev_hash already matches. Reads from the
     # provenance map directly to avoid the decode round-trip.

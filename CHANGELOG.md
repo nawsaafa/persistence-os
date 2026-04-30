@@ -3,6 +3,187 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.8.0a1 — 2026-04-30 (Phase 1 closure: Adapter SDK + multi-process Postgres SERIALIZABLE)
+
+Phase 1 of the persistence-coder product roadmap. Cumulative train of two
+parallel design tracks landed on `feat/v0.8.0a1-int` across **SDK1–SDK3**
+(adapter SDK foundation + first-party MCP server) and **PG1–PG6 + PG-W1**
+(multi-process Postgres SERIALIZABLE backbone with cross-process audit-chain
+Merkle continuity). ARIS R2 PASS at mean **8.81 / min 8.0** after the PG-W1
+fix-pass (R2 round-1 was 8.59 / 7.2; round-2 lifted Dim-4 audit-chain
+Merkle continuity 7.2 → 9.0). Suite **1880 passed / 32 skipped / 7 xfailed
+in 27.66s** without `PERSISTENCE_PG_DSN` (+320 over v0.7.0a1; +15 PG-W1
+rebind unit tests; +1 PG-DSN-gated G3d cross-process verify_chain test).
+
+### Added — Adapter SDK (SDK1–SDK3)
+
+- **`persistence.sdk` package** (`src/persistence/sdk/`). URI-dispatched
+  adapter foundation (#160). Public surface: `Substrate` (the curated
+  facade), `mount(uri, **opts) → Substrate`, `@experimental` /
+  `@stable(since=...)` stability decorators, `_audit` telemetry, `_uri`
+  resolver. URI scheme-based dispatch routes to the underlying store
+  driver (in-memory, SQLite, Postgres) without leaking psycopg / aiosqlite
+  imports into the curated surface.
+- **Substrate body — 6 curated subsurfaces + escape hatch** (#161):
+  `txn` (transactional facts), `audit` (chain emission + window read),
+  `replay` (counterfactual cursor), `plan` (EDN AST), `repl` (capability-
+  gated live REPL handle), `mcp` (first-party MCP server handle), plus
+  `unsafe` (typed escape to underlying `db.store` for advanced use).
+  Schema Profile **v0.8** introduces gate G13 (curated-surface stability:
+  every public symbol on `Substrate` has a stability annotation).
+- **First-party MCP server** (`persistence.sdk.mcp`, #163, 127 tests).
+  Six tools (`persistence_remember`, `persistence_recall`,
+  `persistence_forget`, `persistence_audit_window`,
+  `persistence_replay_check`, `persistence_view_at`) + audit-tail
+  resource. Coverage matrix: G2 (audit-chain integrity) / G8a–d
+  (replay-from-datoms-alone byte identity per tool) / G9a–b
+  (capability-token gating) / G11 (forget tombstone semantics) /
+  G12a–c+e (view-at temporal isolation) / G13a–d (curated-surface
+  stability invariants).
+
+### Added — Postgres SERIALIZABLE backbone (PG1–PG6 + PG-W1)
+
+- **`PostgresStore` SERIALIZABLE** (#162, `src/persistence/store/postgres.py`).
+  psycopg 3.x + `psycopg_pool.ConnectionPool`. SERIALIZABLE isolation
+  on every transaction with row-locked `tx_allocator` primitive
+  (ADR-4 W1-revised) for monotonic tx-id assignment without
+  `MAX(tx)+1` race. URI dispatch:
+  `postgres://user:pass@host:port/db` mounts a `Substrate` on top of
+  `PostgresStore` via the SDK. `unique_violation` retry on the
+  `UNIQUE(tx, e, a)` tripwire is the hard primitive (no soft check).
+- **`DatomCodec` ABC** (#165, `src/persistence/store/_codec.py`, 317 lines).
+  `TextDatomCodec` (SQLite + InMemoryStore, ISO-string tx-time) and
+  `NativeDatomCodec` (Postgres, native `TIMESTAMPTZ`). Cross-store
+  byte-identity property (`tests/store/test_replay_byte_identity_cross_store.py`,
+  633 lines, Hypothesis `@given` at `max_examples=200` parametrised
+  over all 3 stores).
+- **`audit_chain_lock` table + audit-aware `transact_serializable`**
+  (#166). Single-row table (`id INTEGER PK CHECK(id=1), last_seq, last_hash`)
+  ordering audit-chain Merkle linkage cross-process via
+  `SELECT FOR UPDATE`. Lock ordering inside `transact_serializable`:
+  `tx_allocator → audit_chain_lock → INSERT datom_log → UPDATE
+  audit_chain_lock`. Store Protocol gains `_txn()` +
+  `transact_serializable(facts, *, tx_time?)` additive declarations
+  with default impls on `InMemoryStore` + `SQLiteStore` (ADR-13).
+  `persist_repl_audit` rewritten +39/−45 to route through
+  `transact_serializable([datom], tx_time=recorded_at)` preserving
+  `recorded_at` as tx_time.
+- **G3 cross-process falsifiability proof** (#167,
+  `tests/store/_pg4_harness.py` 738 lines + `test_g3e_falsifiability.py`
+  425 lines). `multiprocessing.Barrier` writer harness with `spawn`
+  context bypasses `tx_allocator FOR UPDATE` row-serialisation by
+  pre-allocating tx-ids, forcing concurrent overlap past the
+  conflict-check point. Hypothesis property at `max_examples=50`:
+  SERIALIZABLE rejects ≥1 OR READ COMMITTED produces anomaly.
+  ADR-14 recasts G3 as G3a Merkle / G3b single-writer / G3c
+  cross-process / G3d audit-aware (cross-process verify_chain) /
+  G3e READ-COMMITTED falsifiability.
+- **Deployment matrix** (#168, `docs/operations/postgres-deployment.md`,
+  257 lines). pgbouncer transaction-mode posture, Aurora failover
+  considerations, RDS connection-pool config, statement_timeout
+  interaction with `unique_violation` retry. `_pool_config.py` (148
+  lines) ships recommended `ConnectionPool` kwargs as a helper.
+- **`DB.fold()` executor** (#145 / #169, `src/persistence/fact/db.py`,
+  `@experimental`). Speculation / rollback / checkpointing primitive:
+  `fold(seed, items, fn, *, on_error='abort', checkpoint_every=0,
+  provenance=None) → tuple[final_acc, total_committed]`. `FoldError`
+  surface. `Substrate.txn.fold` curated re-export.
+- **Forward-only migration runner** (#169, `_migration_runner.py`,
+  ~310 lines). Replaces inline `_SCHEMA_DDL`. `_migrations` history
+  table. Two shipped migrations: `0001_datom_log.sql` + `0002_audit_chain_lock.sql`.
+
+### Fixed — PG-W1 audit-chain prev_hash rebind under lock
+
+- **`rebind_audit_datom_prev_hash`** (`src/persistence/effect/handlers/audit.py`,
+  +15 unit tests). Decode → mutate `prev_hash` → recompute `:signature`
+  → re-encode helper. No-op when `prev_hash` already matches. Updates
+  `:datom/e` (when signature, not `run_id`), `:datom/tx`,
+  `provenance[':signature' / ':prev-hash' / 'parent_provenance_hash']`.
+- **`_rebind_audit_datom_under_lock`** wired into
+  `PostgresStore.transact_serializable` step 3a. Removes the
+  `_ = audit_head_hash` discard at line 586 (R2-R1 Dim-4 blocker).
+  The locked head is now load-bearing: first audit datom in a batch
+  rebinds to `audit_chain_lock.last_hash` under `SELECT FOR UPDATE`;
+  subsequent audit datoms thread serially binding to the prior
+  recomputed signature. The `last_hash` UPDATE uses the recomputed
+  signature, not the original Python-side one.
+- **G3d cross-process `verify_chain` test**
+  (`tests/store/test_audit_chain_invariants.py`,
+  `TestG3dCrossProcessAuditChainContinuity` + `_pg_w1_writer_main`).
+  PG-DSN-gated: 4 child processes emit audit entries with the same
+  stale `prev_hash` at construction; after the barrier, parent walks
+  the persisted log in `seq` order, decodes via `datom_to_audit_entry`,
+  and asserts `verify_chain(entries) is True` AND
+  `entries[i].prev_hash == entries[i-1].id`. This is the test that
+  would have failed pre-PG-W1.
+- **Doc drift fix.** `LISTEN/NOTIFY` trigger no longer claimed to
+  ship in v0.8.0a1 migrations: §1, §3, §9 of the design doc revised
+  to "Defer to v0.9 (not shipped in v0.8.0a1)".
+
+### Design
+
+- **`docs/plans/2026-04-30-v0.8.0-postgres-store-design.md`** (940+ lines,
+  17 ADRs):
+  - **ADR-1..16**: schema, indexes, type promotion, `MAX(tx)+1` race
+    primitive, codec consolidation (text vs native tx-time), Postgres
+    extensions survey (pgcrypto/pgvector/pg_trgm/Citus rejected with
+    reasons), pool config, audit-chain head ordering, `persist_repl_audit`
+    migration to `transact_serializable`, etc.
+  - **ADR-17 (PG-W1)** — codifies the audit-chain `prev_hash` rebind
+    contract: store-side rebind is the seam because the substrate API
+    is "construct `AuditEntry` → persist". Documents the **semantic
+    footgun**: rebind changes the audit entry id at persist-time, so
+    callers must NOT treat the pre-commit `AuditEntry.id` as stable
+    across persistence in cross-process audit-emitting code.
+- **`docs/plans/2026-04-30-v0.8.0-adapter-sdk-design.md`** (424 lines,
+  12 ADRs).
+- **ARIS R2 trajectory** (Postgres design + impl):
+  R1 6.73 → R2 8.42 → R3 8.02 → R4 8.28 → R5 8.36 →
+  R2-postimpl **8.59** (Dim-4 blocker surfaced) → R2-postPG-W1 **8.81**
+  (PASS, mean ≥ 8.5 + min ≥ 7.5). See
+  `review-stage/v0.8.0-postgres-store-r2/AUTO_REVIEW.md`.
+  SDK design ARIS R2 PASS at mean 8.66 / min 8.40 (separate track).
+
+### Compatibility
+
+- **Pre-release.** SDK and Postgres surfaces are new in v0.8.0a1.
+  `persistence.sdk` and `persistence.store.postgres` are the curated
+  entry points; substrate-only consumers do NOT need psycopg.
+- **Optional installs.** `pip install persistence[postgres]` pulls
+  `psycopg[binary,pool]>=3.1`; `pip install persistence[mcp]` pulls
+  the MCP transport extras. Existing in-memory + SQLite users see no
+  changes.
+- **License.** Substrate AGPL-3.0-or-later (unchanged). Open-core
+  posture preserved for future commercial track.
+
+### Phase-1 timeline
+
+- Tranches 1–3 shipped 2026-04-29 → 2026-04-30 morning (SDK1+SDK2+PG1,
+  SDK3+PG2, PG3+PG6 with sibling-merge resolution).
+- Tranche 4 shipped 2026-04-30 (PG4+PG5).
+- ARIS R2 post-impl rescore (codex `gpt-5.2` hard-mode high-reasoning,
+  R5 reviewer-memory carry-forward) ran on cumulative tip `309c0a9`:
+  FIX-FIRST at 8.59 / 7.2.
+- PG-W1 fix-pass (5 commits: helper + store wiring + multi-process
+  test + ADR-17 + merge) shipped same day; cumulative tip `0c909a6`.
+- ARIS R2 round-2 rescore on `0c909a6`: PASS at 8.81 / 8.0.
+- This release. **Phase 1 closes; Phase 2 (`persistence-coder` MVP)
+  unblocks.**
+
+### Known semantic footgun (deferred to v0.8.0a2)
+
+ADR-17 documents that `_rebind_audit_datom_under_lock` changes the
+audit entry id at persist-time. Substrate code paths that construct
+`AuditEntry` Python-side and pass it through `transact_serializable`
+will see the persisted entry's `:signature` differ from the in-memory
+`AuditEntry.id` whenever the locked head differs from the Python-side
+`prev_hash` at construction — i.e., under any concurrent multi-process
+audit emission. Callers MUST NOT treat the pre-commit `AuditEntry.id`
+as stable across persistence in cross-process audit code. A future
+v0.8.0a2 may either (a) re-thread the post-rebind id back to the
+caller via the `transact_serializable` return shape, or (b) redesign
+what "signature" means at the substrate boundary.
+
 ## v0.5.2 — 2026-04-29 (Module 5: Txn — Clojure-parity closure)
 
 Module-5 Clojure-parity sub-version that lives next to the v0.7.0a1

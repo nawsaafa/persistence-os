@@ -8,7 +8,8 @@ Modules:
     txn      — atomic multi-datom commit + snapshot isolation [v0.5.1 shipped]
     spec     — parse-don't-validate boundary contracts     [v0.1.0a1 shipped]
     repl     — capability-gated live REPL (WS + browser console) [v0.7.0a1 shipped]
-    sdk      — adapter SDK foundation (URI dispatch + stability decorators) [v0.8.0a1 SDK1, in progress]
+    sdk      — adapter SDK foundation (URI dispatch + stability decorators) [v0.8.0a1 shipped]
+    store    — multi-process Postgres SERIALIZABLE backbone (PG1–PG6 + PG-W1) [v0.8.0a1 shipped]
 """
 
-__version__ = "0.7.0a1"
+__version__ = "0.8.0a1"

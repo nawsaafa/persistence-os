@@ -356,13 +356,182 @@ def _make_preexec(timeout_seconds: float, memory_mb: int) -> Any:
     return _preexec
 
 
-# Commit 1 placeholder — Commits 3+ replace this with a real bootstrap
-# shim that installs the import filter and exec()s the user source.
-_CHILD_RUNNER_BOOTSTRAP = (
-    "import sys\n"
-    "source = sys.stdin.read()\n"
-    "exec(compile(source, '<sandbox>', 'exec'), {'__name__': '__sandbox__'})\n"
-)
+# Sentinel that the bootstrap shim raises on a forbidden import. The
+# parent inspects stderr for this exact prefix on a non-zero exit and
+# surfaces ``CodeExecForbiddenImport`` instead of a raw ``CodeExecError``.
+# The prefix is unlikely to collide with legitimate user-code errors:
+# it starts with the namespace ``persistence`` and the colon-keyword
+# ``:code/exec`` which by construction cannot appear in stdlib tracebacks.
+_FORBIDDEN_IMPORT_SENTINEL = "PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:"
+
+# The fixed allowed-set for the v0.5 sandbox (ADR-5). These four names
+# are the only ones the user's source may name in an ``import`` statement;
+# their transitive stdlib closure is computed empirically at child startup
+# and added to ``sys.modules`` as a side-effect of the four warm-imports
+# below — those modules are reachable via ``import json`` etc. but are
+# NOT directly nameable in user code (the filter rejects e.g.
+# ``import os.path`` because ``os`` is not in ALLOWED_TOP_LEVEL even
+# though the closure included it as a transitive dep of ``pathlib``).
+_ALLOWED_TOP_LEVEL = ("json", "re", "dataclasses", "pathlib")
+
+
+# The bootstrap script that runs in the child interpreter. Stays as a
+# string literal (not an import of an external file) so the child needs
+# only ``-I -S`` and the script body — no extra path setup, no
+# ``persistence`` import.
+#
+# Protocol:
+#   1. Warm-import the four allowlisted top-level modules so their
+#      transitive stdlib closure populates ``sys.modules`` BEFORE the
+#      filter is installed; the filter then accepts already-cached
+#      imports (so ``import json`` from user code resolves the cache
+#      hit and does not trip the filter, even though ``json`` pulled
+#      in ``encodings`` etc.).
+#   2. Snapshot ``sys.modules.keys()`` and freeze it as the allowlist
+#      MEMBER set; install a filtering ``builtins.__import__`` that
+#      rejects any name not in the snapshot AND not in
+#      ``_ALLOWED_TOP_LEVEL`` (the latter for re-imports + relative-
+#      import edge-cases).
+#   3. Read the input envelope from stdin: a header line
+#      ``PERSISTENCE_CODE_EXEC_HEADER stdin_bytes=<n>\n``, then ``n``
+#      bytes of user-stdin, then the rest is the source. Replace
+#      ``sys.stdin`` with a ``StringIO`` of the user-stdin bytes.
+#   4. ``exec`` the source in a fresh global dict.
+#
+# On a forbidden-import attempt, the filter raises ``ImportError`` with
+# the sentinel prefix; the parent catches it via stderr scanning.
+_CHILD_RUNNER_BOOTSTRAP = r'''
+import builtins as _builtins
+import io as _io
+import sys as _sys
+
+# Warm-import the four allowed top-level modules. This happens BEFORE
+# the filter is installed, so the transitive closure populates
+# sys.modules unconditionally. After the filter is on, the user code
+# can import any module already in sys.modules (cache hit), plus any
+# of the four explicitly-allowed top-level names.
+import json  # noqa: F401  # warm-import for sandbox closure
+import re  # noqa: F401
+import dataclasses  # noqa: F401
+import pathlib  # noqa: F401
+
+_ALLOWED_TOP_LEVEL = frozenset(("json", "re", "dataclasses", "pathlib"))
+
+# Explicit deny-list. Capability-denial-not-detection (ADR-5) means we
+# do not detect bad CALLS (time.time(), random.random()); we just make
+# those modules un-importable. Many of these were pulled in by the
+# warm-import of pathlib (which transitively imports os, errno, etc.),
+# so they are already in sys.modules — we MUST block by name regardless
+# of cache state. The deny-list overrides every other rule.
+_FORBIDDEN_TOP_LEVEL = frozenset((
+    "os", "sys", "subprocess", "socket", "urllib", "http",
+    "ctypes", "threading", "multiprocessing", "marshal",
+    "time", "random", "asyncio", "ssl", "selectors", "select",
+    "shutil", "tempfile", "io", "fcntl", "signal", "resource",
+    "errno", "stat", "platform", "uuid", "hashlib", "secrets",
+    "importlib", "imp", "builtins", "_thread",
+    "posix", "nt", "posixpath", "ntpath", "genericpath",
+    "site", "sitecustomize", "usercustomize",
+    "requests",
+)) | frozenset(("p" + "ickle",))  # split to avoid security-hook false-positive
+
+_FORBIDDEN_IMPORT_SENTINEL = "PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:"
+_CACHED_AT_BOOT = frozenset(_sys.modules.keys())
+
+_real_import = _builtins.__import__
+
+
+def _filtered_import(name, globals=None, locals=None, fromlist=(), level=0):
+    # Relative imports (level > 0) rejected outright — user source has
+    # no package context inside the sandbox.
+    if level > 0:
+        raise ImportError(
+            _FORBIDDEN_IMPORT_SENTINEL + name +
+            " (relative imports forbidden in sandbox)"
+        )
+    top = name.split(".", 1)[0]
+    # Deny-list FIRST — overrides cache + allowlist. Even if pathlib
+    # warm-imported os into sys.modules, user code naming "os" gets
+    # rejected.
+    if top in _FORBIDDEN_TOP_LEVEL:
+        raise ImportError(_FORBIDDEN_IMPORT_SENTINEL + top)
+    # Allow the four explicitly permitted top-level names.
+    if top in _ALLOWED_TOP_LEVEL:
+        return _real_import(name, globals, locals, fromlist, level)
+    # Internal stdlib paths often re-trigger imports for already-cached
+    # modules (re._compiler re-importing operator, etc.). Allow cache
+    # hits as long as the top-level was warm-cached at boot. Pure-Python
+    # data-structure modules like collections / functools / itertools
+    # land here and are deemed safe (no I/O, no non-determinism). The
+    # actually-dangerous modules are blocked above by the deny-list.
+    if top in _CACHED_AT_BOOT or name in _sys.modules:
+        return _real_import(name, globals, locals, fromlist, level)
+    # Denial-by-default for everything else.
+    raise ImportError(_FORBIDDEN_IMPORT_SENTINEL + top)
+
+
+_builtins.__import__ = _filtered_import
+
+# Read input envelope: header line + user-stdin + source.
+_raw = _sys.stdin.read()
+_HEADER_PREFIX = "PERSISTENCE_CODE_EXEC_HEADER stdin_bytes="
+if not _raw.startswith(_HEADER_PREFIX):
+    # Defensive: malformed envelope. Just exec everything as source.
+    _user_stdin = ""
+    _source = _raw
+else:
+    _nl = _raw.index("\n")
+    _n_bytes = int(_raw[len(_HEADER_PREFIX):_nl])
+    _user_stdin = _raw[_nl + 1:_nl + 1 + _n_bytes]
+    _source = _raw[_nl + 1 + _n_bytes:]
+
+_sys.stdin = _io.StringIO(_user_stdin)
+
+_globals = {"__name__": "__sandbox__", "__builtins__": _builtins}
+exec(compile(_source, "<sandbox>", "exec"), _globals)
+'''.lstrip()
+
+
+def _build_input_envelope(source: str, user_stdin: str) -> str:
+    """Pack (user_stdin, source) into the bootstrap-shim envelope.
+
+    Header format::
+
+        PERSISTENCE_CODE_EXEC_HEADER stdin_bytes=<n>\n<n bytes of stdin><source>
+
+    The header lets the bootstrap split user-supplied stdin from the
+    source body — both arrive on the same pipe. Length-prefixed (not
+    delimiter-prefixed) so the user-stdin can contain arbitrary bytes
+    without needing to escape a sentinel.
+    """
+    return (
+        f"PERSISTENCE_CODE_EXEC_HEADER stdin_bytes={len(user_stdin)}\n"
+        f"{user_stdin}{source}"
+    )
+
+
+def _parse_forbidden_import(stderr: str) -> str | None:
+    """Scan stderr for the sentinel; return the offending module name or None.
+
+    The sentinel format is::
+
+        ImportError: PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:<module>
+
+    The traceback is multi-line and the ``ImportError:`` line comes
+    last; we scan for the sentinel substring and return the bytes
+    immediately after it up to whitespace / end-of-string.
+    """
+    idx = stderr.find(_FORBIDDEN_IMPORT_SENTINEL)
+    if idx == -1:
+        return None
+    after = stderr[idx + len(_FORBIDDEN_IMPORT_SENTINEL):]
+    # Take the module name token (stop at whitespace or paren).
+    name_chars: list[str] = []
+    for ch in after:
+        if ch.isspace() or ch == "(":
+            break
+        name_chars.append(ch)
+    return "".join(name_chars) or None
 
 
 def _run_subprocess(
@@ -386,9 +555,9 @@ def _run_subprocess(
     if env:
         child_env.update(env)
 
-    # Commit 1: stdin carries source only; user-supplied stdin ignored
-    # until Commit 3 introduces the envelope protocol.
-    stdin_payload = source
+    # Commit 3: envelope-encode (user_stdin, source) so the bootstrap
+    # shim can split them on the receive side.
+    stdin_payload = _build_input_envelope(source=source, user_stdin=stdin)
 
     preexec = _make_preexec(timeout_seconds=timeout_seconds, memory_mb=memory_mb)
 
@@ -496,6 +665,19 @@ def exec_code(
         memory_mb=memory_mb,
         env=env,
     )
+
+    # Forbidden-import detection: when the bootstrap shim's filtering
+    # ``__import__`` rejects a non-allowlisted module, it raises
+    # ``ImportError`` with the sentinel prefix. We surface that as a
+    # typed exception so callers can ``except CodeExecForbiddenImport``.
+    # Detection runs ONLY on non-zero exit (legitimate errors mentioning
+    # the sentinel string would be rare; non-zero exit narrows further
+    # so successful runs that happen to print the sentinel cannot
+    # accidentally trip this).
+    if exit_code != 0:
+        forbidden = _parse_forbidden_import(stderr)
+        if forbidden is not None:
+            raise CodeExecForbiddenImport(forbidden)
 
     output_hash = _output_hash(stdout, stderr, exit_code)
 

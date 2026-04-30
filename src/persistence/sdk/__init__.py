@@ -35,6 +35,7 @@ ADR-1's escape-hatch boundary.
 """
 from __future__ import annotations
 
+from persistence.sdk import mcp  # SDK3: first-party MCP server sub-package
 from persistence.sdk._facade import Substrate
 from persistence.sdk._stability import deprecated, experimental, stable
 from persistence.sdk.uri import (
@@ -50,6 +51,7 @@ __all__ = [
     "UnknownStoreScheme",
     "deprecated",
     "experimental",
+    "mcp",
     "open_store",
     "register_backend",
     "stable",

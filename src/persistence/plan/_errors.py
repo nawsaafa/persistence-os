@@ -49,6 +49,46 @@ class EvaluatorContractError(ValueError):
     """
 
 
+class StepIdNotFound(KeyError):
+    """`edit_step` / `insert_step_*` / `delete_step` could not locate the
+    target ``step_id`` in the supplied plan.
+
+    ``step_id`` is the 32-hex content-address (``Node.id``) of the
+    target step. Raised when no node in the plan AST hashes to that
+    id under pre-order DFS walk. See
+    docs/plans/2026-04-30-phase-2.0a-plan-edit-impl.md decision 1 for
+    the duplicate-content caveat (first occurrence in walk order
+    wins).
+    """
+
+
+class PlanEditOutsideDosync(RuntimeError):
+    """Plan edit op called outside an active ``dosync`` body.
+
+    Mirrors the semantic of :class:`persistence.txn.EffectInIoBlock`:
+    Plan edits must run under transaction so the ``:plan/edit`` audit
+    datom rides the same Merkle chain as the rest of the trajectory.
+    Outside a dosync, the edit would be silent — that violates ADR-6
+    (no silent edits).
+
+    The accompanying ``tx`` argument also carries the dispatch surface
+    for the audit datom (``tx.effect(":plan/edit", ...)``); without it
+    there is no chain to link into.
+    """
+
+
+class PlanEditDownstreamExecuted(RuntimeError):
+    """Reserved exception for the `delete_step` downstream-execution
+    check. NOT raised by Phase 2.0a — execution state is not currently
+    threaded through the Transaction object (see substrate-backlog
+    follow-up referenced in `_edit.py::delete_step`).
+
+    Exposed in v0.8.5a1 so callers can pre-write `except` blocks that
+    will become live once the substrate work lands. Until then, every
+    `delete_step` inside a dosync is allowed.
+    """
+
+
 class GateFailure(RuntimeError):
     """A promotion gate (G1/G2/G3/G4) returned False; raised by `promote()`.
 

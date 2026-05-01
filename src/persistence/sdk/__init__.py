@@ -35,6 +35,12 @@ ADR-1's escape-hatch boundary.
 """
 from __future__ import annotations
 
+from persistence.fact import (
+    ForkBranchResult,
+    ForkChooseError,
+    ForkOutsideDosync,
+    ForkResult,
+)
 from persistence.sdk import mcp  # SDK3: first-party MCP server sub-package
 from persistence.sdk._facade import Substrate
 from persistence.sdk._fold_into import (
@@ -57,6 +63,10 @@ __all__ = [
     "FoldIntoChooseError",
     "FoldIntoOutsideDosync",
     "FoldIntoResult",
+    "ForkBranchResult",
+    "ForkChooseError",
+    "ForkOutsideDosync",
+    "ForkResult",
     "Substrate",
     "UnknownStoreScheme",
     "deprecated",

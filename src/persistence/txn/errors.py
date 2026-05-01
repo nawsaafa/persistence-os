@@ -97,8 +97,8 @@ class AtomInDosyncProhibited(TxnError):
 
 
 class AuditStackMissing(TxnError):
-    """Raised when intent-replay finds a non-empty intent log but no
-    active effect runtime.
+    """Raised when a dosync attempts to commit with a non-empty intent
+    log but no active effect runtime.
 
     Phase 2.0d W1 (R2 MAJOR M2): the substrate-default audit stack
     installed by :meth:`persistence.sdk.Substrate.open` covers every
@@ -110,6 +110,17 @@ class AuditStackMissing(TxnError):
     the v0.5.x "no-runtime → no-op" rule. That dropped silently audited
     work — the deterministic-replay invariant from design § 3.7 cannot
     hold. This error is the fail-fast guard.
+
+    Phase 2.0d W2 (R2.2 MAJOR M5): the W1 implementation raised this
+    error from inside ``_replay_effect_intents`` AFTER
+    ``db.transact_batch`` had already committed the body's facts —
+    that violated dosync atomicity (refs carried committed values
+    despite the exception, audit datoms silently lost). The W2 fix
+    hoists the check to a PRE-commit gate at the top of
+    ``_commit_attempt``, so the error fires BEFORE any facts are
+    written. True all-or-nothing semantics: on ``AuditStackMissing``
+    no facts (refs / commute reapply / staged fold_into facts /
+    commit datom) land in ``db.log()``.
 
     Adapter authors who legitimately need raw-DB-without-audit (sandbox
     tests, byte-identity drift fixtures) should pop a runtime with no

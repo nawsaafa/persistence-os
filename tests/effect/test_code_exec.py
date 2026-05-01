@@ -741,8 +741,16 @@ def _exec_under_capture(source: str, *, stdin: str = "") -> CodeExecResult:
 def test_open_is_denied() -> None:
     """``open()`` is removed from the curated ``__builtins__`` so a
     user-source ``open('/etc/passwd')`` raises ``NameError`` inside
-    the sandbox — host-filesystem reads are denied at the capability
-    layer (M1 primary fix).
+    the sandbox — closes the primary host-filesystem-read vector at
+    the capability layer (Phase 2.0d W1 M1 primary fix).
+
+    The narrative "FS reads are denied" is honest post-W2 only because
+    M6 also removed ``pathlib`` from the import allowlist
+    (``pathlib.Path.read_text/.read_bytes/.open`` reach C-level
+    ``_io.open`` directly, bypassing this builtins-level denial).
+    With both M1 and M6 in place, the user-source has no curated
+    surface to read host files. See
+    :func:`test_pathlib_import_is_denied` for the M6 cross-check.
     """
     r = _exec_under_capture("print(open('/etc/passwd').read())")
     assert r.exit_code != 0

@@ -21,22 +21,41 @@ See ``docs/plans/2026-04-30-phase-2-persistence-coder-design.md``
 
 ## Capability-denial layers (ADR-5)
 
-1. **Subprocess isolation** — fresh interpreter via ``sys.executable -I -S``,
-   never ``eval`` / ``exec`` in-process.
+1. **Subprocess isolation** — fresh interpreter via
+   ``sys.executable -s -P -S`` (Phase 2.0d W1: ``-I`` was replaced
+   because it suppressed all ``PYTHON*`` env vars including
+   ``PYTHONHASHSEED``, defeating the determinism pin; ``-s -P -S`` is
+   the same isolation minus ``-E`` so the substrate's
+   ``PYTHONHASHSEED=0`` and ``PYTHONDONTWRITEBYTECODE=1`` actually
+   take effect). Never ``eval`` / ``exec`` in-process.
 2. **POSIX ``setrlimit`` preexec hook** — RLIMIT_CPU / RLIMIT_AS /
    RLIMIT_NOFILE / RLIMIT_NPROC / RLIMIT_FSIZE caps on the child.
 3. **Wall-clock timeout** — ``proc.communicate(timeout=...)`` + kill
    on ``TimeoutExpired``.
 4. **Module allowlist** — bootstrap shim inside the child monkey-patches
-   ``builtins.__import__`` so only ``json`` / ``re`` / ``dataclasses`` /
-   ``pathlib`` (and their measured transitive stdlib closure) are
-   importable. Everything else raises :class:`CodeExecForbiddenImport`-
-   shaped ``ImportError`` from inside the child; the parent surfaces
-   it via a stderr marker line.
-5. **No network** — ``socket`` is blocked at import; we do NOT add a
+   ``builtins.__import__`` so only ``json`` / ``re`` / ``dataclasses``
+   (and their measured transitive stdlib closure) are importable.
+   Phase 2.0d W2 (M6) removed ``pathlib`` from the allowlist —
+   ``pathlib.Path.read_text/.read_bytes/.open`` reached the C-level
+   ``_io.open`` directly, bypassing the curated builtins denial; that
+   was a host-filesystem-read escape vector. Everything else raises
+   :class:`CodeExecForbiddenImport`-shaped ``ImportError`` from inside
+   the child; the parent surfaces it via a stderr marker line.
+5. **Curated user-source ``__builtins__``** — Phase 2.0d W1 (M1)
+   removed ``open`` / ``eval`` / ``ex``+``ec`` / ``compile`` /
+   ``input`` / ``breakpoint`` from the user-source globals;
+   ``__import__`` stays because the import statement compiles to an
+   ``IMPORT_NAME`` opcode that reads ``__builtins__["__import__"]``,
+   and the import filter (above) deny-checks the top-level name
+   regardless of statement-form vs direct-call entry.
+6. **No network** — ``socket`` is blocked at import; we do NOT add a
    netns dance (capability-denial, not detection).
-6. **Working dir** — fresh ``tempfile.mkdtemp()`` cleaned up on exit;
-   ``RLIMIT_FSIZE=0`` makes the child effectively read-only on disk.
+7. **Working dir + write denial** — fresh ``tempfile.mkdtemp()``
+   cleaned up on exit; ``RLIMIT_FSIZE=0`` makes any ``write()`` from
+   the child get ``SIGXFSZ`` (kernel-enforced write denial). Reads
+   are denied by capability — no ``open`` in the curated builtins,
+   no ``pathlib`` / ``os`` modules importable — not by RLIMIT_FSIZE
+   (which only caps writes).
 
 ## Audit datom shape (rides the existing Merkle chain via ``tx.effect``)
 
@@ -631,14 +650,29 @@ else:
 _sys.stdin = _io.StringIO(_user_stdin)
 
 # Phase 2.0d W1 (M1): build a curated ``__builtins__`` dict that omits
-# the denied names (open / eval / e''xec / compile / input / breakpoint /
-# __import__). Capability-denial-not-detection (ADR-5) — the names
+# the denied names (open / eval / e''xec / compile / input /
+# breakpoint). Capability-denial-not-detection (ADR-5) — the names
 # simply do not exist in the user's globals, so resolution fails at
 # the dict lookup before any function-call attempt. Resolving via
 # ``getattr(__builtins__, "open")`` also fails because the attr is
 # not on the dict. The denied set is fixed and small; the canonical
 # source is the parent's ``_DENIED_BUILTINS`` tuple, substituted
 # below at module load time alongside ``_ALLOWED_TOP_LEVEL``.
+#
+# Phase 2.0d W2 (m5 doc-drift fix): ``__import__`` is intentionally
+# NOT in the denied set. The Python ``import X`` statement compiles
+# to an ``IMPORT_NAME`` opcode that resolves
+# ``__builtins__["__import__"]``; removing it would break every
+# legitimate ``import json``-style statement in user code. Direct
+# user-call of ``__import__("os")`` is independently rejected because
+# the parent has wired ``_filtered_import`` (above) which deny-checks
+# the top-level name against ``_FORBIDDEN_TOP_LEVEL`` regardless of
+# statement-form vs direct-call entry. So denying ``__import__`` by
+# name in the curated builtins would be both unnecessary AND harmful;
+# we leave it on the dict and rely on the top-level filter for
+# import-time denial. See ``_DENIED_BUILTINS`` (above) for the
+# full rationale, and ``test_filtered_import_blocks_direct_call``
+# in ``tests/effect/test_code_exec.py`` for the regression guard.
 _DENIED_BUILTIN_NAMES = frozenset(__DENIED_BUILTINS_TUPLE__)
 _safe_builtins = {
     _name: _val for _name, _val in vars(_builtins).items()

@@ -191,6 +191,56 @@ class _TxnNamespace:
         """
         return self._substrate._db.fold(seed, items, fn, **kwargs)
 
+    @experimental(
+        reason=(
+            "Phase 2.0c #145: speculation/scoring/choose convenience "
+            "on top of DB.fold. Surface may evolve in v0.9 once Phase-2 "
+            "dogfooding identifies whether the 3-tuple `fn` shape "
+            "(acc, facts, score) and the FoldBranchScore record are the "
+            "load-bearing form. Adapter authors who depend on it should "
+            "not pin against @stable('v0.8') semantics."
+        )
+    )
+    def fold_into(self, seed, items, fn, choose, **kwargs):
+        """Run a fold and pick a winning branch in a single dosync.
+
+        ``s.txn.fold_into`` is a convenience method on top of
+        :meth:`persistence.fact.DB.fold` that runs the fold under an
+        agent-extended ``fn(acc, item, db) -> (new_acc, facts, score)``
+        signature, applies the user-supplied ``choose`` callback to
+        the per-branch scores, and emits a single ``:fold/chosen``
+        audit datom marking the winning branch. The audit datom rides
+        the existing Merkle chain at
+        ``persistence.effect.handlers.audit`` — same chain as
+        ``:plan/edit`` / ``:code/exec`` — so cross-trajectory audit
+        consistency is preserved.
+
+        Designed for the agent's MCTS-scoring path, where N candidate
+        branches are evaluated, scored, and one is chosen. The
+        non-chosen branches' fact emissions remain in the substrate as
+        "considered but not chosen" — this matches Persistence OS'
+        append-only ethos and allows replay to reconstruct the full
+        decision context (not just the winner).
+
+        See :func:`persistence.sdk._fold_into.fold_into` for the full
+        signature, error-handling discipline (``on_error``,
+        ``checkpoint_every``, ``provenance``), the dosync gate, and
+        the ``FoldIntoResult`` shape.
+
+        ``@experimental`` per Adapter SDK ADR-5 + Phase-2 ADR-7. The
+        ``s.txn.fold_into`` shape may evolve in v0.9 once Phase-2
+        dogfooding tells us whether the 3-tuple ``fn`` and the
+        ``FoldBranchScore`` record are the load-bearing surface.
+        Adapter authors should NOT pin against ``@stable("v0.8")``
+        semantics; they get promoted to ``@stable("v0.9")`` after
+        Phase 2 dogfood survives without API change.
+        """
+        from persistence.sdk._fold_into import fold_into as _fold_into
+
+        return _fold_into(
+            self._substrate._db, seed, items, fn, choose, **kwargs
+        )
+
 
 class _ReplNamespace:
     """Curated ``s.repl.*`` surface — REPL server FACTORY.

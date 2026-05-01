@@ -1,21 +1,50 @@
-"""``s.txn.fold_into`` unit tests — Phase 2.0c #145.
+"""``s.txn.fold_into`` unit tests — Phase 2.0c-extended #145ext.
 
 See ``docs/plans/2026-04-30-phase-2-persistence-coder-design.md`` § 4.3
-+ ADR-7, and ``src/persistence/sdk/_fold_into.py`` for the impl.
++ ADR-7, and ``src/persistence/sdk/_fold_into.py`` for the impl
+(rewired on top of ``DB.fork`` in Phase 2.0c-extended).
 
-Test plan (from Phase 2.0c task spec):
+**Phase 2.0c-extended supersedes the Path-A foldl-with-marker impl
+shipped at v0.8.0a1.** The substrate-true semantics are now:
 
-1. Happy path — argmax over 3 branches, FoldIntoResult shape
-2. choose returns out-of-range -> FoldIntoChooseError(ValueError)
-3. choose returns negative -> FoldIntoChooseError(ValueError)
-4. choose returns non-int -> FoldIntoChooseError(TypeError)
-5. Empty items -> ValueError
-6. Outside dosync -> FoldIntoOutsideDosync
-7. fn returns 2-tuple -> FoldIntoChooseError(TypeError)
-8. fn returns non-finite score (NaN) -> FoldIntoChooseError(ValueError)
-9. fn raises under on_error="abort" -> FoldError; choose never called
-10. fn raises under on_error="skip" -> choose sees only successful
-    branches; chosen_index is into the SUCCESSFUL list
+- Each branch starts from ``seed`` (NOT from the previous branch's
+  accumulator) — ``DB.fork`` runs branches in isolation, not as a
+  foldl.
+- **Only the chosen branch's facts are committed** to the substrate;
+  non-chosen branches' facts are rolled back (never reach
+  ``db.history()``).
+- Audit shape is the canonical 4-datom emission (``:fork/probe`` +
+  ``:fork/branch`` × N + ``:fork/score`` × N + ``:fork/chosen``);
+  the legacy ``:fold/chosen`` op is no longer emitted by
+  ``fold_into``.
+- ``fn`` raising under ``on_error="abort"`` re-raises the original
+  exception directly (no ``FoldError`` wrapper) — fold_into is no
+  longer routed through ``DB.fold``.
+
+Tests that assertted Path-A semantics (all-branches-committed,
+foldl-style accumulator carry-over, ``FoldError`` wrapping) are
+updated. Tests that asserted contract invariants (dosync gate, choose
+validation, fn-shape validation, byte-identity) keep their original
+shape and stay green.
+
+Test plan:
+
+1. Happy path — argmax over 3 branches, FoldIntoResult shape under
+   fork-isolation semantics (each branch starts from seed).
+2. **NEW** — only chosen branch's facts persist post-commit (rollback
+   verification at the substrate-fact layer).
+3. choose returns out-of-range -> FoldIntoChooseError(ValueError)
+4. choose returns negative -> FoldIntoChooseError(ValueError)
+5. choose returns non-int -> FoldIntoChooseError(TypeError)
+6. choose returns bool -> FoldIntoChooseError(TypeError)
+7. Empty items -> ValueError
+8. Outside dosync -> FoldIntoOutsideDosync
+9. fn returns 2-tuple -> FoldIntoChooseError(TypeError)
+10. fn returns non-finite score (NaN) -> FoldIntoChooseError(ValueError)
+11. fn raises under on_error="abort" -> original exception propagates
+    (NO FoldError wrapper); choose never called; no facts committed.
+12. fn raises under on_error="skip" -> choose sees only successful
+    branches; chosen_index is into the SUCCESSFUL list.
 """
 from __future__ import annotations
 
@@ -24,7 +53,6 @@ from math import nan
 
 import pytest
 
-from persistence.fact import FoldError
 from persistence.sdk import Substrate
 from persistence.sdk._fold_into import (
     FoldBranchScore,
@@ -64,7 +92,16 @@ def _argmax(branches: list[FoldBranchScore]) -> int:
 
 
 def test_fold_into_happy_path_argmax():
-    """3 branches with scores 1, 5, 3; argmax picks index 1 (score 5)."""
+    """3 branches with scores 1, 5, 3; argmax picks index 1 (score 5).
+
+    **Phase 2.0c-extended**: each branch starts from ``seed`` in
+    isolation (DB.fork-backed), so ``chosen_accumulator`` is
+    ``seed + chosen_item`` (NOT the foldl-accumulated sum across all
+    items up to and including the chosen one). Only the chosen
+    branch's facts persist; non-chosen branches' facts are rolled
+    back (verified separately by
+    ``test_fold_into_rolls_back_non_chosen_branch_facts``).
+    """
     with Substrate.open("memory") as s:
         with s.txn.dosync() as tx:
             result = s.txn.fold_into(
@@ -78,12 +115,75 @@ def test_fold_into_happy_path_argmax():
         assert result.chosen_index == 1
         assert result.chosen_score == 5.0
         assert result.all_scores == (1.0, 5.0, 3.0)
-        # chosen_accumulator is after items 1+5 = 6
-        assert result.chosen_accumulator == 6
-        # final_accumulator is after all items 1+5+3 = 9
-        assert result.final_accumulator == 9
-        # Every branch's facts were committed (3 datoms total).
-        assert result.total_datoms_committed == 3
+        # chosen_accumulator is seed + chosen_item = 0 + 5 = 5 (each
+        # branch is isolated under fork-rollback semantics).
+        assert result.chosen_accumulator == 5
+        # final_accumulator is the LAST branch's accumulator: seed + 3 = 3.
+        assert result.final_accumulator == 3
+        # **Rollback semantics**: only the chosen branch's facts are
+        # committed (1 datom), NOT all 3 branches' facts.
+        assert result.total_datoms_committed == 1
+
+
+def test_fold_into_rolls_back_non_chosen_branch_facts():
+    """Phase 2.0c-extended substrate-true rollback: only the chosen
+    branch's facts persist post-commit; non-chosen branches' facts
+    NEVER reach ``db.history()``.
+
+    This is the wedge-story test: rewind/branch/replay needs per-branch
+    rollback to be real, not just an audit-marker over a foldl.
+    """
+    with Substrate.open("memory") as s:
+        with s.txn.dosync() as tx:
+            result = s.txn.fold_into(
+                seed=0,
+                items=[10, 50, 30],  # branch values 10, 50, 30
+                fn=_scoring_fn,
+                choose=_argmax,  # picks branch 1 (value 50)
+                tx=tx,
+            )
+        assert result.chosen_index == 1
+        # Only branch-50's fact should be in the substrate.
+        committed = [
+            d for d in s.escape.fact.store.all_datoms()
+            if d.a == "fold/value"
+        ]
+        assert len(committed) == 1
+        assert committed[0].e == "branch-50"
+        assert committed[0].v == 50
+        # Branches 10 and 30 should NOT exist anywhere in the log.
+        all_eids = {d.e for d in s.escape.fact.store.all_datoms()}
+        assert "branch-10" not in all_eids
+        assert "branch-30" not in all_eids
+
+
+def test_fold_into_rollback_preserves_pre_fork_substrate_state():
+    """Facts written BEFORE the fork_into call survive — only the
+    non-chosen branches' tentative facts are rolled back.
+    """
+    with Substrate.open("memory") as s:
+        # Stage 1: commit a "control" fact outside any fork.
+        s._db.transact(
+            [{"e": "control", "a": "marker", "v": "stays"}],
+        )
+
+        # Stage 2: fold_into with rollback semantics.
+        with s.txn.dosync() as tx:
+            result = s.txn.fold_into(
+                seed=0,
+                items=[1, 5, 3],
+                fn=_scoring_fn,
+                choose=_argmax,
+                tx=tx,
+            )
+        assert result.chosen_index == 1
+        # Both the control fact AND the chosen branch's fact persist.
+        eids = {d.e for d in s.escape.fact.store.all_datoms()}
+        assert "control" in eids
+        assert "branch-5" in eids
+        # Non-chosen branches did NOT leak in.
+        assert "branch-1" not in eids
+        assert "branch-3" not in eids
 
 
 def test_fold_into_returns_frozen_dataclass():
@@ -347,9 +447,11 @@ def test_fold_into_score_int_coerced_to_float():
 # ---------------------------------------------------------------------------
 
 
-def test_fold_into_propagates_fold_error_under_abort():
-    """fn raises on item 1 with on_error='abort' -> FoldError; choose
-    never called; no :fold/chosen datom emitted."""
+def test_fold_into_propagates_original_exception_under_abort():
+    """fn raises on item 99 with on_error='abort' -> original exception
+    propagates directly (NO FoldError wrapper under Phase 2.0c-extended);
+    choose never called; no :fork/chosen datom emitted; no facts
+    committed (rollback)."""
     choose_calls = []
 
     def raising_fn(acc, item, db):
@@ -362,7 +464,10 @@ def test_fold_into_propagates_fold_error_under_abort():
         return 0
 
     with Substrate.open("memory") as s:
-        with pytest.raises(FoldError):
+        # Phase 2.0c-extended: DB.fork re-raises the user's fn exception
+        # directly under on_error='stop'/'abort'. No FoldError wrapper
+        # (that was Path-A's DB.fold-routed shape, now superseded).
+        with pytest.raises(RuntimeError, match="boom"):
             with s.txn.dosync() as tx:
                 s.txn.fold_into(
                     seed=0,

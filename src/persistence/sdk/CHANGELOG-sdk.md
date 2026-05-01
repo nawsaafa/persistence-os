@@ -211,3 +211,33 @@ of trajectories upgraded between v0.8.0a1 and v0.8.5a1.
   now bind to the curated `s.plan.*` surface; the escape-hatch path
   remains available unchanged for any sub-surface not yet curated.
 - Closes #147.
+
+### Added — Phase 2.0d (#148 closed-as-redundant — folded into 2.0c-prime contract closure)
+
+- Added 13 MCTS configuration + protocol re-exports to
+  `persistence.sdk` (`MCTSConfig`, `MCTSEdge`, `MCTSNode`,
+  `MCTSResult`, `MCTSPromotionResult`, `Action`, `AddStepAction`,
+  `SubstituteLeafAction`, `ComposeWithSkillAction`, `Evaluator`,
+  `Expander`, `LLMExpander`, `LLMJudgeEvaluator`).
+- **Decision**: After Phase 2.0c-prime exposed
+  `s.plan.mcts_search` / `mcts_promote` / `apply_action`, the only
+  remaining MCTS gap was config/protocol vocabulary still requiring
+  direct `persistence.plan` imports. A separate `s.mcts` namespace
+  was evaluated and rejected — same lifecycle as `s.plan`, so a
+  50-line re-export expansion under the 2.0c-prime SDK contract is
+  the right shape.
+- **Migration**: Adapter authors who imported
+  `from persistence.plan import MCTSConfig, AddStepAction,
+  LLMJudgeEvaluator, ...` may now import from `persistence.sdk`
+  directly. Both paths remain valid (the underlying module's surface
+  is unchanged); the `persistence.sdk` import becomes the
+  contract-pinned form once v0.8.5a1 is tagged.
+- The remaining un-re-exported plan-module names (`Dispatcher` /
+  `Handler` — dispatch-system types, non-MCTS; `MetricRef` /
+  `Coercion` / `SkillLibrary` — registry/factory types; plan-level
+  error classes) stay in `persistence.plan` because their canonical
+  home is the underlying module.
+- Substrate untouched. Audit chain untouched. No new primitives.
+  No `__version__` bump in this commit (lands with v0.8.5a1
+  sub-tag at Phase 2.0d Stage 4 after ARIS R2).
+- Closes #148 (as folded into the 2.0c-prime SDK contract).

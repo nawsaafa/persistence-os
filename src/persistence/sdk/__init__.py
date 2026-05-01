@@ -41,26 +41,50 @@ from persistence.fact import (
     ForkOutsideDosync,
     ForkResult,
 )
-# Phase 2.0c-prime #147 — SDK-level re-exports of persistence.plan
-# value-shape types adapter authors actually pass and receive. The
-# curated subset is intentional: ``Node`` / ``ExecutionResult`` /
-# ``OptimizedPlan`` / ``PromotionRecord`` / ``TrainingExample`` /
-# ``LeafResult`` / ``FailureInfo`` are the load-bearing return-and-
-# argument shapes for ``s.plan.*`` callers. The configuration /
-# protocol vocabulary (``MCTSConfig`` / ``Action`` subclasses /
-# ``Evaluator`` / ``Expander`` / ``Dispatcher`` / ``Handler`` /
-# ``MetricRef`` / ``Coercion`` / ``SkillLibrary`` / error classes)
-# stays in :mod:`persistence.plan` — adapter authors who need it
-# import directly. The split keeps the SDK contract surface narrow
-# (per ADR-1) without forcing every adapter to import the whole
-# plan module just to type-hint a return value.
+# Phase 2.0c-prime #147 + Phase 2.0d (#148 closed-as-redundant) —
+# SDK-level re-exports of persistence.plan value-shape types AND
+# MCTS configuration / protocol vocabulary. The 7 value-shape types
+# (``Node`` / ``ExecutionResult`` / ``OptimizedPlan`` /
+# ``PromotionRecord`` / ``TrainingExample`` / ``LeafResult`` /
+# ``FailureInfo``) are the load-bearing return-and-argument shapes
+# for ``s.plan.*`` callers, added under 2.0c-prime.
+#
+# Phase 2.0d folds in the MCTS configuration + protocol vocabulary
+# adapter authors need to drive ``s.plan.mcts_search`` /
+# ``s.plan.mcts_promote`` / ``s.plan.apply_action``: ``MCTSConfig``,
+# ``MCTSEdge``, ``MCTSNode``, ``MCTSResult``, ``MCTSPromotionResult``,
+# the ``Action`` ADT (``Action`` / ``AddStepAction`` /
+# ``SubstituteLeafAction`` / ``ComposeWithSkillAction``), and the
+# evaluator / expander surface (``Evaluator``, ``Expander``,
+# ``LLMExpander``, ``LLMJudgeEvaluator``).
+#
+# The remaining un-re-exported names — ``Dispatcher`` / ``Handler``
+# (dispatch-system types, non-MCTS), ``MetricRef`` / ``Coercion`` /
+# ``SkillLibrary`` (registry / factory types), and the plan-level
+# error classes — stay in :mod:`persistence.plan` because they are
+# either non-MCTS or registry/factory types whose canonical home is
+# the underlying module. The split keeps the SDK contract surface
+# narrow per ADR-1.
 from persistence.plan import (
+    Action,
+    AddStepAction,
+    ComposeWithSkillAction,
+    Evaluator,
     ExecutionResult,
+    Expander,
     FailureInfo,
     LeafResult,
+    LLMExpander,
+    LLMJudgeEvaluator,
+    MCTSConfig,
+    MCTSEdge,
+    MCTSNode,
+    MCTSPromotionResult,
+    MCTSResult,
     Node,
     OptimizedPlan,
     PromotionRecord,
+    SubstituteLeafAction,
     TrainingExample,
 )
 from persistence.sdk import mcp  # SDK3: first-party MCP server sub-package
@@ -80,8 +104,13 @@ from persistence.sdk.uri import (
 )
 
 __all__ = [
+    "Action",
+    "AddStepAction",
     "BackendNotInstalled",
+    "ComposeWithSkillAction",
+    "Evaluator",
     "ExecutionResult",
+    "Expander",
     "FailureInfo",
     "FoldBranchScore",
     "FoldIntoChooseError",
@@ -91,11 +120,19 @@ __all__ = [
     "ForkChooseError",
     "ForkOutsideDosync",
     "ForkResult",
+    "LLMExpander",
+    "LLMJudgeEvaluator",
     "LeafResult",
+    "MCTSConfig",
+    "MCTSEdge",
+    "MCTSNode",
+    "MCTSPromotionResult",
+    "MCTSResult",
     "Node",
     "OptimizedPlan",
     "PromotionRecord",
     "Substrate",
+    "SubstituteLeafAction",
     "TrainingExample",
     "UnknownStoreScheme",
     "deprecated",

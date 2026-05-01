@@ -308,3 +308,50 @@ def test_plan_re_exports_in_sdk_all():
         assert name in sdk_mod.__all__, (
             f"{name!r} is re-exported but not in persistence.sdk.__all__"
         )
+
+
+# ---------------------------------------------------------------------------
+# 10. Phase 2.0d — MCTS config/protocol re-exports (#148 closed-as-redundant)
+# ---------------------------------------------------------------------------
+
+
+MCTS_REEXPORTS = [
+    "MCTSConfig",
+    "MCTSEdge",
+    "MCTSNode",
+    "MCTSResult",
+    "MCTSPromotionResult",
+    "Action",
+    "AddStepAction",
+    "SubstituteLeafAction",
+    "ComposeWithSkillAction",
+    "Evaluator",
+    "Expander",
+    "LLMExpander",
+    "LLMJudgeEvaluator",
+]
+
+
+@pytest.mark.parametrize("name", MCTS_REEXPORTS)
+def test_mcts_type_reexport_is_importable_from_sdk(name: str) -> None:
+    """Phase 2.0d: MCTS config/protocol vocabulary re-exported via persistence.sdk.
+
+    Closed-as-redundant #148: instead of a separate ``s.mcts`` namespace, MCTS
+    types live alongside the 7 plan value-shape types added in 2.0c-prime.
+    """
+    import persistence.sdk as sdk
+
+    obj = getattr(sdk, name, None)
+    assert obj is not None, f"persistence.sdk.{name} should be importable"
+
+    # Identity check: re-export points at the same object as persistence.plan
+    import persistence.plan as plan
+    assert getattr(plan, name) is obj, (
+        f"persistence.sdk.{name} must be the same object as persistence.plan.{name}"
+    )
+
+
+def test_mcts_reexports_listed_in_all() -> None:
+    import persistence.sdk as sdk
+    for name in MCTS_REEXPORTS:
+        assert name in sdk.__all__, f"{name} missing from persistence.sdk.__all__"

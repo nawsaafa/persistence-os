@@ -709,3 +709,25 @@ After Phase 2.0c shipped (`s.txn.fold_into` Path-A foldl-with-marker at HEAD `4d
 **No new ADRs.** ADR-7 was edited in place to cover both primitives; the namespace-split decision (`:fold/*` vs `:fork/*`) is a refinement of the existing surface-naming ADR, not a new contract.
 
 **No scope shift on G1-G10 acceptance gates.** The MCTS scoring path (G7 REPL branch/fold/commit) still uses the agent-facing surface — now `s.txn.fold_into` (rewired) or directly `s.txn.fork` for explicit speculate-rollback callers. Property tests at `tests/store/test_fold_byte_identity.py` cover both primitives at @max_examples=200.
+
+---
+
+## 15. Forward-pointer roadmap — v0.9.x sandbox-redesign (post-2.0d)
+
+The Phase 2.0d W3 honest-rescope (2026-05-01, see ADR-5 amendment) demoted `:code/exec` v0.8.5a1 to a soft-isolation runtime guard / best-effort containment for trusted-author plan-step bodies, after the R2.3 codex review demonstrated that Python-level capability-denial cannot prevent host-FS reads when stdlib transitive closure is preserved (`dataclasses.sys.modules['builtins'].open(...)` escape). Hard isolation is queued as a separate engineering project tracked outside the v0.8.5a1 substrate-completion window.
+
+**Real OS-level `:code/exec` sandbox boundary (gVisor / nsjail / Docker / OCI runtime / WASM-Pyodide) — supersedes the v0.8.5a1 soft-isolation runtime guard. Tracking #TBD.**
+
+Constraints the v0.9.x track inherits unchanged:
+
+- The audit-datom contract (the 7 keys at § 3.7) carries forward unchanged. The v0.9.x boundary is an isolation-strength upgrade, not an audit-shape change.
+- Replay determinism (audit-replay default, opt-in re-execution-replay with hash verification) carries forward unchanged.
+- The xfail-strict regression test `test_known_escape_via_dataclasses_sys_modules_builtins_open` in `tests/effect/test_code_exec.py` IS the falsifiable acceptance signal. When it flips to PASS, the v0.9.x boundary is in place; `strict=True` forces removal of the xfail marker at that point.
+- The substrate-completion claim for v0.8.5a1 does NOT depend on hard sandbox isolation. The wedge story (rewind / branch / replay over agent trajectories) is load-bearing on audit-chain integrity + replay determinism, both of which are demonstrably correct (M5 fix at `transaction.py:703`, W2 audit-stack tests). v0.9.x sandbox-redesign closes the remaining adversarial-author confidentiality gap; it does not unblock substrate-completion.
+
+Cross-references that must stay in sync if the v0.9.x track lands:
+
+- ADR-5 (the W3 amendment block ends with the forward-pointer; remove the amendment when v0.9.x supersedes it, leave the historical record).
+- `src/persistence/effect/handlers/code.py` module docstring "Known limitations" section.
+- `src/persistence/effect/CHANGELOG-effect.md` Phase 2.0d W3 forward-pointer block.
+- `tests/effect/test_code_exec.py::test_known_escape_via_dataclasses_sys_modules_builtins_open` xfail marker.

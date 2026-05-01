@@ -227,6 +227,17 @@ class _TxnNamespace:
         ``checkpoint_every``, ``provenance``), the dosync gate, and
         the ``FoldIntoResult`` shape.
 
+        Usage::
+
+            with s.txn.dosync() as tx:
+                result = s.txn.fold_into(
+                    seed=initial,
+                    items=branch_candidates,
+                    fn=score_and_emit,
+                    choose=argmax,
+                    tx=tx,                  # required keyword-only
+                )
+
         ``@experimental`` per Adapter SDK ADR-5 + Phase-2 ADR-7. The
         ``s.txn.fold_into`` shape may evolve in v0.9 once Phase-2
         dogfooding tells us whether the 3-tuple ``fn`` and the

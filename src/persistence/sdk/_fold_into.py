@@ -87,6 +87,7 @@ from persistence.txn.intents import is_in_dosync
 
 if TYPE_CHECKING:
     from persistence.fact import DB
+    from persistence.txn.transaction import Transaction
 
 
 __all__ = [
@@ -222,6 +223,7 @@ def fold_into(
     fn: Callable[[Any, Any, "DB"], tuple[Any, list[dict], Any]],
     choose: Callable[[list[FoldBranchScore]], int],
     *,
+    tx: Optional["Transaction"] = None,
     on_error: Literal["abort", "skip", "checkpoint"] = "abort",
     checkpoint_every: int = 0,
     provenance: Optional[dict] = None,
@@ -231,8 +233,8 @@ def fold_into(
     Routes through :meth:`persistence.fact.DB.fold` for the actual
     transactional accumulation; collects per-branch scores into a
     side-list; applies the ``choose`` callback; emits the
-    ``:fold/chosen`` audit datom via the active ``Transaction``'s
-    intent log.
+    ``:fold/chosen`` audit datom via the supplied ``Transaction``'s
+    effect-intent log.
 
     Args:
         db: the substrate's underlying ``DB`` (from ``Substrate._db``).
@@ -244,6 +246,11 @@ def fold_into(
         choose: ``(branches: list[FoldBranchScore]) -> int`` policy
             that picks one branch's index. Pure / deterministic for
             byte-identity replay.
+        tx: the active :class:`persistence.txn.Transaction` (passed in
+            from the dosync body's ``with db.dosync() as tx:`` binding).
+            Required keyword-only — used to queue the ``:fold/chosen``
+            audit datom on the transaction's effect-intent log.
+            Mirrors :func:`persistence.plan.edit_step`'s ``tx`` param.
         on_error: forwarded to ``DB.fold`` per Decision 7.
         checkpoint_every: forwarded to ``DB.fold``.
         provenance: forwarded to ``DB.fold``.
@@ -254,7 +261,8 @@ def fold_into(
         total datom count from ``DB.fold``.
 
     Raises:
-        FoldIntoOutsideDosync: not in an active dosync body.
+        FoldIntoOutsideDosync: not in an active dosync body, or ``tx``
+            is None (the dosync gate trips up-front).
         ValueError: ``items`` is empty.
         FoldIntoChooseError: ``fn`` or ``choose`` violated its
             contract; original exception in ``__cause__``.
@@ -262,14 +270,18 @@ def fold_into(
             raises and ``on_error`` is ``"abort"`` /
             ``"checkpoint"``. ``choose`` was never called.
     """
-    # Decision 5: dosync gate up-front.
-    if not is_in_dosync():
+    # Decision 5: dosync gate up-front. Both the ContextVar guard AND
+    # the explicit `tx` argument must be present — the guard catches
+    # call-site-outside-dosync; the `tx is None` check catches "user
+    # forgot to thread tx through" so the audit datom never silently
+    # drops.
+    if not is_in_dosync() or tx is None:
         raise FoldIntoOutsideDosync(
-            "s.txn.fold_into must run inside a db.dosync(...) body. "
-            "fold_into emits a :fold/chosen audit datom that requires "
-            "an enclosing transaction to chain into; outside dosync the "
-            "datom would be silent and the deterministic-replay "
-            "invariant would break."
+            "s.txn.fold_into must run inside a db.dosync(...) body and "
+            "be passed the active Transaction via the tx= keyword. "
+            "Without an active txn the :fold/chosen audit datom would "
+            "be silent and the deterministic-replay invariant from "
+            "design § 3.7 would break."
         )
 
     # Decision 1 + Decision 7 prelim: items materialised once, validated
@@ -402,9 +414,13 @@ def fold_into(
     all_scores: tuple[float, ...] = tuple(b.score for b in branches)
 
     # Decision 3: emit the :fold/chosen audit datom via the active
-    # transaction's effect-intent queue. The :fold/chosen impl is
-    # filled in commit C3 — for now leave a hook + return the result.
+    # transaction's effect-intent queue. The _txn_commit (commit_id)
+    # is auto-injected at intent-replay time by
+    # persistence.txn.transaction._replay_effect_intents — same path
+    # as :plan/edit and :code/exec. No new chain code: :fold/chosen
+    # rides the existing Merkle chain at effect/handlers/audit.py.
     _emit_chosen_datom(
+        tx,
         chosen_index=chosen_index,
         chosen_score=chosen.score,
         all_scores=all_scores,
@@ -422,16 +438,27 @@ def fold_into(
 
 
 def _emit_chosen_datom(
+    tx: "Transaction",
     *,
     chosen_index: int,
     chosen_score: float,
     all_scores: tuple[float, ...],
     branch_count: int,
 ) -> None:
-    """Hook for the :fold/chosen audit-datom emission.
+    """Queue the :fold/chosen audit datom on the Transaction's
+    effect-intent log.
 
-    Lands in commit C3. For C2 this is a no-op so the impl, return
-    type, and choose-callback dispatch can be tested in isolation
-    before the audit step is wired up.
+    The actual emission to the effect runtime (and Merkle-chain hook
+    in ``effect/handlers/audit.py``) happens at commit time via
+    ``persistence.txn.transaction._replay_effect_intents``, which
+    injects the ``txn_commit`` (commit_id) alongside these kwargs.
+
+    Mirrors :func:`persistence.plan._edit._emit_edit_datom`.
     """
-    return None
+    tx.effect(
+        ":fold/chosen",
+        chosen_index=chosen_index,
+        chosen_score=chosen_score,
+        all_scores=all_scores,
+        branch_count=branch_count,
+    )

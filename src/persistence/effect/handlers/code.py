@@ -208,10 +208,11 @@ from persistence.effect.runtime import Handler
 
 # POSIX-only resource limits for the child (Linux + macOS Darwin).
 # On Windows, ``resource`` is unavailable; the handler falls back to
-# wall-clock timeout + import-allowlist only — capability-denial via
-# rlimit is a no-op there. The platform skip is honored at runtime so
-# the test suite doesn't crash on import; non-POSIX gets a documented
-# softer guarantee.
+# wall-clock timeout + import-allowlist only — the kernel-enforced
+# rlimit caps (RLIMIT_FSIZE write-denial, etc.) are a no-op there,
+# making the soft-isolation runtime guard even softer than on POSIX.
+# The platform skip is honored at runtime so the test suite doesn't
+# crash on import; non-POSIX gets a documented softer guarantee.
 try:
     import resource as _resource
 
@@ -456,14 +457,19 @@ def _make_preexec(timeout_seconds: float, memory_mb: int) -> Any:
     - ``RLIMIT_NPROC`` = ``1`` — no fork bombs (the child cannot spawn
       further processes).
     - ``RLIMIT_FSIZE`` = ``0`` — write-denied via the kernel (any
-      ``write()`` from the child gets ``SIGXFSZ``). Reads remain
-      possible on the filesystem visible to the child (the working-
-      dir is ``tempfile.mkdtemp``'d, and there is no network), so
-      "filesystem confidentiality" is NOT a property of this cap;
-      the M1 fix removes ``open()`` from the curated ``__builtins__``
-      under capability-denial (ADR-5) to close the host-file-read
-      vector. Phase 2.0d W1 (m4) corrects the pre-W1 docstring's
-      "effectively read-only on disk" overclaim.
+      ``write()`` from the child gets ``SIGXFSZ``). This cap is real
+      and kernel-enforced; it is unaffected by the Python-level
+      stdlib-transitivity escape documented in the module docstring.
+      The cap covers writes only — file reads on the filesystem
+      visible to the child are NOT denied by RLIMIT_FSIZE. The M1
+      fix removed ``open()`` from the curated ``__builtins__`` and
+      M6 removed ``pathlib`` from the import allow-list, which raise
+      the bar against accidental host-file reads from honest plan-
+      step bodies — but they do **not** prevent host-file reads by
+      a body that constructs the escape via stdlib transitivity (see
+      the W3 ADR-5 amendment + module docstring "Known limitations").
+      Filesystem confidentiality against an adversarial body
+      requires the v0.9.x OS-level boundary, NOT this cap.
 
     Returns ``None`` on non-POSIX platforms (``resource`` unavailable);
     the caller must check ``_HAS_RESOURCE`` and pass ``None`` for
@@ -544,17 +550,18 @@ _FORBIDDEN_IMPORT_SENTINEL = "PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:"
 # transitive dep of e.g. ``re._compiler``).
 #
 # Phase 2.0d W2 (M6 fix): ``pathlib`` was removed from the allowed set.
-# R2.2 codex review proved it left a host-filesystem-read escape vector:
-# under W1, ``import pathlib; pathlib.Path('/etc/passwd').read_text()``
-# succeeded inside the sandbox even with ``open()`` removed from the
-# curated builtins, because ``Path.read_text`` reaches the C-level
-# ``_io.open`` directly. Capability-denial-not-detection (ADR-5)
-# requires deny-by-default; removing pathlib from the allowlist is the
-# minimum-surface-area fix. Path-string manipulation in user-source
-# bodies can be done with raw ``str`` operations (no path operations
-# in the sandbox legitimately need filesystem access — if a body wants
-# to talk about paths, it is almost certainly trying to do FS I/O,
-# which the sandbox denies by design).
+# R2.2 codex review proved it left a host-filesystem-read path even
+# with ``open()`` removed from the curated builtins: under W1,
+# ``import pathlib; pathlib.Path('/etc/passwd').read_text()`` succeeded
+# because ``Path.read_text`` reaches the C-level ``_io.open`` directly.
+# Removing pathlib from the allowlist closes that specific path; it is
+# a minimum-surface-area soft-isolation hardening (ADR-5 W3 honest-
+# rescope), NOT a confidentiality guarantee — Phase 2.0d W3 demonstrated
+# an equivalent escape via ``dataclasses.sys.modules['builtins'].open``
+# that this layer cannot block. Path-string manipulation in user-source
+# bodies can still be done with raw ``str`` operations; honest plan-
+# step bodies that want path I/O should use a v0.9.x OS-bounded sandbox
+# instead.
 #
 # This constant is the **canonical source of truth** for the allowed-set:
 # the bootstrap shim's frozenset literal is computed from it at module
@@ -569,18 +576,29 @@ _ALLOWED_TOP_LEVEL: tuple[str, ...] = ("json", "re", "dataclasses")
 
 
 # Phase 2.0d W1 (M1): denied builtins removed from the user-source
-# ``__builtins__`` mapping in the child shim. Capability-denial-not-
-# detection (ADR-5): the names simply do not exist in the user's
-# globals, so resolution fails at the dict lookup. The set is small
-# and fixed; it is the parent-side canonical source for the
-# substitution that lands in the child template at module load time
-# (alongside ``_ALLOWED_TOP_LEVEL``). Mutating this tuple is a
-# breaking change to the audit datom contract — the recorded
+# ``__builtins__`` mapping in the child shim. Soft-isolation runtime
+# guard (ADR-5 W3 amendment): the names simply do not exist in the
+# user's globals, so a body that calls them directly fails at the
+# dict lookup with ``NameError``. This is a useful default — it
+# raises the bar against accidental misuse and surfaces capability-
+# violation in honest plan-step bodies — but it is NOT a
+# confidentiality guarantee: a body that constructs the escape via
+# stdlib transitivity (e.g.
+# ``dataclasses.sys.modules['builtins'].open``) reaches the same
+# functions through a different reference and the dict-level removal
+# does not stop it. Real confidentiality requires the v0.9.x OS-level
+# boundary, not this layer.
+#
+# The set is small and fixed; it is the parent-side canonical source
+# for the substitution that lands in the child template at module
+# load time (alongside ``_ALLOWED_TOP_LEVEL``). Mutating this tuple
+# is a breaking change to the audit datom contract — the recorded
 # ``:code/exec/source-hash`` is replay-stable only as long as the
 # denied set is fixed for a given semver-pinned release.
 #
-# Deny rationale per name:
-# - ``open``      — host-filesystem read (M1 primary fix)
+# Deny rationale per name (soft-isolation; bypassable via stdlib
+# transitivity but useful for honest bodies):
+# - ``open``      — direct host-filesystem read by name (M1)
 # - ``eval``      — arbitrary expression evaluation (escape vector)
 # - ``ex`` + ``ec`` (split here to dodge the JS-codebase security-hook
 #                    false-positive on the literal string) — arbitrary
@@ -662,19 +680,29 @@ import sys as _sys
 # Phase 2.0d W2 (M6): pathlib is no longer warm-imported because
 # pathlib.Path.read_text/.read_bytes/.open reach C-level _io.open
 # directly, bypassing the curated __builtins__ open() denial. Removing
-# pathlib from the allowlist is the capability-denial fix (ADR-5).
+# pathlib from the allowlist is a soft-isolation hardening that closes
+# that specific path; an equivalent escape via dataclasses.sys.modules
+# remains (W3 ADR-5 amendment). The v0.9.x OS-level boundary supersedes
+# this layer for confidentiality.
 import json  # noqa: F401  # warm-import for sandbox closure
 import re  # noqa: F401
 import dataclasses  # noqa: F401
 
 _ALLOWED_TOP_LEVEL = frozenset(__ALLOWED_TUPLE__)
 
-# Explicit deny-list. Capability-denial-not-detection (ADR-5) means we
-# do not detect bad CALLS (time.time(), random.random()); we just make
-# those modules un-importable. Many of these were pulled in by the
-# warm-import of pathlib (which transitively imports os, errno, etc.),
-# so they are already in sys.modules — we MUST block by name regardless
-# of cache state. The deny-list overrides every other rule.
+# Explicit deny-list. Soft-isolation runtime guard (ADR-5 W3): we do
+# not detect bad CALLS (time.time(), random.random()); we just make
+# those modules un-importable at the import statement. Many of these
+# were pulled in by the warm-import of the allowed top-level set
+# (which transitively imports os, errno, etc.), so they are already
+# in sys.modules — we MUST block by name regardless of cache state
+# so a deny-listed top-level name cannot be reached via direct
+# ``import`` even when the cache hit is technically available. The
+# deny-list overrides every other rule. Note: this filter blocks the
+# import statement only; reaching already-loaded forbidden modules
+# via an allowed module's __dict__ (e.g. dataclasses.sys.modules['os'])
+# is NOT prevented at this layer — that is the W3 known limitation
+# documented in the module docstring.
 _FORBIDDEN_TOP_LEVEL = frozenset((
     "os", "sys", "subprocess", "socket", "urllib", "http",
     "ctypes", "threading", "multiprocessing", "marshal",
@@ -741,13 +769,18 @@ _sys.stdin = _io.StringIO(_user_stdin)
 
 # Phase 2.0d W1 (M1): build a curated ``__builtins__`` dict that omits
 # the denied names (open / eval / e''xec / compile / input /
-# breakpoint). Capability-denial-not-detection (ADR-5) — the names
-# simply do not exist in the user's globals, so resolution fails at
-# the dict lookup before any function-call attempt. Resolving via
-# ``getattr(__builtins__, "open")`` also fails because the attr is
-# not on the dict. The denied set is fixed and small; the canonical
-# source is the parent's ``_DENIED_BUILTINS`` tuple, substituted
-# below at module load time alongside ``_ALLOWED_TOP_LEVEL``.
+# breakpoint). Soft-isolation runtime guard (ADR-5 W3 amendment) —
+# the names simply do not exist in the user's globals, so a body that
+# calls them directly fails at the dict lookup with NameError, and
+# resolving via ``getattr(__builtins__, "open")`` also fails because
+# the attr is not on the dict. This is a useful default for honest
+# plan-step bodies but is NOT a confidentiality guarantee: a body
+# that walks an allowed module's __dict__ to reach
+# sys.modules['builtins'].open lands on the unscrubbed full builtins
+# of the bootstrap side, defeating this layer. The denied set is
+# fixed and small; the canonical source is the parent's
+# ``_DENIED_BUILTINS`` tuple, substituted below at module load time
+# alongside ``_ALLOWED_TOP_LEVEL``.
 #
 # Phase 2.0d W2 (m5 doc-drift fix): ``__import__`` is intentionally
 # NOT in the denied set. The Python ``import X`` statement compiles
@@ -868,11 +901,11 @@ def _run_subprocess(
     # prevents the child from polluting the working dir with .pyc
     # files (the dir is mkdtemp'd anyway, but the env var keeps the
     # closure of "the child's filesystem footprint" smaller). Per
-    # ADR-5 capability-denial-default the env values land BEFORE any
-    # caller-supplied ``env`` overlay so a caller intentionally
-    # passing ``PYTHONHASHSEED=...`` can override (e.g. a fuzz test
-    # that wants to vary seeds); but in the default replay-safety
-    # path the W1 pin holds.
+    # ADR-5 (W3 soft-isolation runtime guard) the env values land
+    # BEFORE any caller-supplied ``env`` overlay so a caller
+    # intentionally passing ``PYTHONHASHSEED=...`` can override
+    # (e.g. a fuzz test that wants to vary seeds); but in the
+    # default replay-safety path the W1 pin holds.
     child_env: dict[str, str] = {
         "PYTHONHASHSEED": "0",
         "PYTHONDONTWRITEBYTECODE": "1",

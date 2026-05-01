@@ -193,39 +193,66 @@ class _TxnNamespace:
 
     @experimental(
         reason=(
-            "Phase 2.0c #145: speculation/scoring/choose convenience "
-            "on top of DB.fold. Surface may evolve in v0.9 once Phase-2 "
-            "dogfooding identifies whether the 3-tuple `fn` shape "
-            "(acc, facts, score) and the FoldBranchScore record are the "
-            "load-bearing form. Adapter authors who depend on it should "
-            "not pin against @stable('v0.8') semantics."
+            "Phase 2.0c-extended #145ext: speculate-rollback-pick "
+            "convenience rewired on top of DB.fork. Substrate-true "
+            "rollback (only chosen branch's facts persist) + canonical "
+            "4-datom audit shape (:fork/*). Phase 2.0d W1 (M3) staged "
+            "the chosen facts on tx.staged_facts so they ride the outer "
+            "dosync atomic commit. Surface may evolve in v0.9 once "
+            "Phase-2 dogfooding identifies whether the 3-tuple `fn` "
+            "shape (acc, facts, score) and the FoldBranchScore record "
+            "are the load-bearing form. Adapter authors who depend on "
+            "it should not pin against @stable('v0.8') semantics."
         )
     )
     def fold_into(self, seed, items, fn, choose, **kwargs):
-        """Run a fold and pick a winning branch in a single dosync.
+        """Run a speculate-rollback-pick over N candidate branches in
+        a single dosync, committing only the chosen branch's facts.
 
-        ``s.txn.fold_into`` is a convenience method on top of
-        :meth:`persistence.fact.DB.fold` that runs the fold under an
-        agent-extended ``fn(acc, item, db) -> (new_acc, facts, score)``
-        signature, applies the user-supplied ``choose`` callback to
-        the per-branch scores, and emits a single ``:fold/chosen``
-        audit datom marking the winning branch. The audit datom rides
-        the existing Merkle chain at
-        ``persistence.effect.handlers.audit`` — same chain as
-        ``:plan/edit`` / ``:code/exec`` — so cross-trajectory audit
-        consistency is preserved.
+        Phase 2.0c-extended (#145ext) rewired ``s.txn.fold_into`` on
+        top of :meth:`persistence.fact.DB.fork` for substrate-true
+        rollback semantics. Per-branch isolation is structural
+        (``fn`` operates on opaque Python state, not on the
+        substrate); only the chosen branch's facts reach
+        ``db.history()`` post-commit. Non-chosen branches' tentative
+        datoms NEVER appear in the substrate — they are discarded
+        Python objects.
 
-        Designed for the agent's MCTS-scoring path, where N candidate
-        branches are evaluated, scored, and one is chosen. The
-        non-chosen branches' fact emissions remain in the substrate as
-        "considered but not chosen" — this matches Persistence OS'
-        append-only ethos and allows replay to reconstruct the full
-        decision context (not just the winner).
+        **Audit shape (Phase 2.0c-extended).** Each call emits the
+        canonical 4-datom emission via ``tx.effect()`` riding the
+        existing Merkle chain at ``persistence.effect.handlers.audit``
+        (same chain as ``:plan/edit`` / ``:code/exec`` /
+        ``:fork/*``):
+
+        - ``:fork/probe``  — one
+          ``{seed_hash, items_hash, fn_hash, choose_hash, branch_count}``
+        - ``:fork/branch`` × N —
+          ``{branch_index, branch_id, item_hash, branch_state_hash}``
+        - ``:fork/score``  × N —
+          ``{branch_index, score_value, score_hash}``
+        - ``:fork/chosen`` — one
+          ``{chosen_index, chosen_branch_id, chosen_state_hash}``
+
+        The legacy ``:fold/chosen`` audit op (Path-A foldl-with-marker
+        shape) is NO LONGER emitted by ``fold_into`` post-2.0c-ext —
+        callers who depend on the chosen-marker shape should bind to
+        the bare ``DB.fold`` instead.
+
+        **Atomicity (Phase 2.0d W1 / M3).** The chosen branch's facts
+        are staged on ``tx.staged_facts`` via ``tx.add_facts`` and
+        ride the outer ``dosync``'s atomic ``transact_batch`` call,
+        so an outer body raise after ``fold_into`` returns rolls them
+        back along with the rest of the transaction. Pre-W1 the
+        chosen facts were committed mid-dosync via a direct
+        ``db.transact_batch`` call, which broke the rollback
+        contract.
 
         See :func:`persistence.sdk._fold_into.fold_into` for the full
         signature, error-handling discipline (``on_error``,
         ``checkpoint_every``, ``provenance``), the dosync gate, and
-        the ``FoldIntoResult`` shape.
+        the ``FoldIntoResult`` shape. The 3-tuple ``fn`` shape
+        ``(new_acc, facts, score)`` is the load-bearing surface; the
+        chosen branch's ``facts`` list is what gets staged.
 
         Usage::
 

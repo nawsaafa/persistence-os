@@ -141,8 +141,18 @@ class ForkChooseError(RuntimeError):
 class ForkBranchResult:
     """One branch's outcome after ``fn(branch_state, item)`` ran.
 
-    Frozen so the ``choose`` callback cannot mutate the result list
-    and the audit datom can quote values back deterministically.
+    The dataclass itself is frozen so the ``choose`` callback cannot
+    mutate per-branch fields. The list of ``ForkBranchResult`` passed
+    to ``choose`` IS a mutable Python list, however — Phase 2.0d W1
+    (m1) corrects the pre-W1 doc claim that "the result list" was
+    immutable. **Callers MUST NOT mutate the list passed to
+    ``choose`` (no ``.append`` / ``.sort`` / slice assignment / etc.);
+    mutation produces undefined behaviour** under audit-byte-identity
+    replay because the post-``choose`` list is iterated for the
+    ``:fork/chosen`` validation pass. The substrate does not enforce
+    the no-mutation contract at runtime (per the W1 brief: weakening
+    the doc claim is cheaper than the hash-before/hash-after
+    enforcement variant).
 
     Attributes:
         branch_index:  0-based position in the input ``items``.

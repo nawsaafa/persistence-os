@@ -22,7 +22,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Sequence
+from typing import Any, Callable, Iterable, Iterator, Literal, NoReturn, Optional, Sequence
 
 from persistence.fact.datom import Datom
 from persistence.fact.store import TX_PLACEHOLDER, InMemoryStore, Store
@@ -772,8 +772,18 @@ class DB:
             msg: str,
             cause: BaseException,
             item_idx: int,
-        ) -> None:
-            """Construct + raise a :class:`FoldError` with provenance."""
+        ) -> NoReturn:
+            """Construct + raise a :class:`FoldError` with provenance.
+
+            Phase 2.0d W1 (m3): annotated ``-> NoReturn`` so Pyright's
+            control-flow analysis treats post-call paths as
+            unreachable. Pre-W1 the helper was annotated ``-> None``,
+            and Pyright flagged ``facts`` / ``new_acc`` as
+            "possibly unbound" at lines 806-821 (a false-positive
+            under the implicit "_raise_fold_error always raises"
+            invariant). The W1 annotation closes those 5 noisy
+            warnings without changing runtime semantics.
+            """
             err = FoldError(
                 msg,
                 acc=checkpoint_acc,

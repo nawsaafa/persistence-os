@@ -1,5 +1,89 @@
 # persistence.sdk CHANGELOG
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W1 fix-pass
+
+Phase 2.0d W1 (R2 ARIS hard-mode fix-pass) closes 4 MAJORs + 4 MINORs
+surfaced by the codex review at HEAD `4e118e9`. See
+`review-stage/aris-r2-v0.8.5a1-raw.txt` for the full review.
+
+### Added
+
+- **`Substrate.open(uri, *, audit=True)`** — installs the canonical
+  audit handler stack by default at substrate-construction time, so
+  `:plan/edit` / `:fork/*` / `:code/exec` / `:fold/chosen` audit
+  intents queued in a `dosync` reach the Merkle chain at
+  `persistence.effect.handlers.audit` without callers needing to
+  wrap usage in `with with_runtime(...)`. Pass `audit=False` only
+  for sandbox tests where Merkle-chain enforcement is undesirable;
+  in that regime, do not queue audit-emitting intents (you will get
+  `persistence.txn.AuditStackMissing` at commit per the W1 fail-fast
+  guard). (R2 MAJOR M2.)
+- **`persistence.effect.canonical_audit_stack(entries)`** — public
+  factory returning a `Runtime` with the canonical audit handler
+  stack covering every audit-emitting op shipped through Phase 2.0a /
+  2.0b / 2.0c / 2.0c-ext; backed by `persistence.effect._audit_stack`.
+  `persistence.effect.CANONICAL_AUDIT_OPS` is the canonical op tuple.
+  (R2 MAJOR M2.)
+- **`persistence.txn.AuditStackMissing`** — raised by
+  `_replay_effect_intents` when the intent log is non-empty but no
+  effect runtime is active. Defense-in-depth guard for adapters that
+  bypass the `Substrate.open` default install. (R2 MAJOR M2.)
+- **`Transaction.staged_facts`** + **`tx.add_facts(facts)`** — opaque
+  fact-dict staging on the transaction so surfaces like
+  `s.txn.fold_into` can commit chosen-branch facts atomically with
+  the outer dosync (rolled back on outer raise). Pre-W1
+  `db.transact_batch` mid-dosync committed immediately. (R2 MAJOR M3.)
+
+### Fixed
+
+- **R2 M1 — `:code/exec` sandbox host-file-read + nondeterminism.**
+  Curated `__builtins__` removes `open` / `eval` / `ex`+`ec` /
+  `compile` / `input` / `breakpoint` from the user-source globals
+  (capability-denial-not-detection per ADR-5).
+  `PYTHONHASHSEED=0` and `PYTHONDONTWRITEBYTECODE=1` pinned in
+  `child_env`; child argv switched from `-I` (which suppressed
+  `PYTHON*` env vars) to `-s -P -S` so the seed pin actually takes
+  effect. `__import__` stays callable so the import statement still
+  works; the import filter rejects deny-listed top-level names
+  whether reached via statement or direct call.
+- **R2 M3 — `s.txn.fold_into` rolled-back chosen-facts atomicity.**
+  Chosen-branch facts now stage onto `tx.staged_facts` via
+  `tx.add_facts`; commit-time `_commit_attempt` folds them into the
+  single atomic `transact_batch` call alongside `write_set` +
+  commute reapply + commit datom. Outer-raise rolls them back along
+  with the rest of the txn. The `:fork/*` audit datoms already rode
+  the outer commit via `tx.effect` (Phase 2.0a precedent).
+- **R2 M4 — stale `s.txn.fold_into` + `s.audit.*` docstrings.**
+  `_TxnNamespace.fold_into` rewritten to reflect Phase 2.0c-ext
+  rewire on `DB.fork` + canonical 4-datom audit shape; the pre-W1
+  `:fold/chosen` mention was wrong. `_AuditNamespace` rewritten to
+  reflect the Phase 2.0d W1 default-install regime; verify_chain
+  now reads the AuditEntry-only canonical mirror.
+- **R2 m1 — `_fork.py` `choose` callback contract.** Pre-W1 doc
+  claimed the result list was immutable (false: list is mutable).
+  Weakened the doc to "callers MUST NOT mutate; mutation produces
+  undefined behaviour" per the W1 brief (cheaper than the
+  hash-before/hash-after enforcement variant).
+- **R2 m2 — `s.audit.verify_chain()` exploded on dict-shaped
+  entries.** Pre-W1, `s.escape.*` first-access entries (plain dicts)
+  in `_audit_entries` would crash `verify_chain` with
+  `AttributeError` on `[-1].id`. Fixed by routing `verify_chain`
+  through the `_canonical_audit_entries` mirror (AuditEntry-only) by
+  default; falls back to filter-and-pass under `audit=False`.
+- **R2 m3 — `db.py:_raise_fold_error` annotated `-> NoReturn`.**
+  Closes 5 pre-existing Pyright "possibly unbound" warnings on
+  `facts` / `new_acc` at lines 806-821 without changing runtime.
+- **R2 m4 — RLIMIT_FSIZE preexec docstring overclaim.** Rewrote the
+  comment: writes are denied (SIGXFSZ on overrun); reads remain
+  possible. The M1 `open()` removal closes the host-file-read
+  vector at the capability layer, not RLIMIT_FSIZE.
+
+### Changed
+
+- `_TxnNamespace.fold_into` `@experimental` reason string updated
+  to reflect the post-W1 staging behaviour and Phase 2.0c-ext
+  rewire on `DB.fork`.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — `s.txn.fork` + `s.txn.fold_into` rewire (#145 + #145ext) + `s.plan` curated namespace (#147)
 
 Phase 2.0c + Phase 2.0c-extended of the persistence-coder MVP (Phase 2

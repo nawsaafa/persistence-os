@@ -2,6 +2,54 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W1 fix-pass
+
+Phase 2.0d W1 (R2 ARIS hard-mode fix-pass) closes the effect-side
+findings from the codex review at HEAD `4e118e9`. See
+`review-stage/aris-r2-v0.8.5a1-raw.txt` for the full review.
+
+### Added
+
+- **`canonical_audit_stack(entries)`** — public factory in
+  `persistence.effect._audit_stack` returning a `Runtime` whose
+  handler chain (innermost-first: raw terminator → clock → audit
+  middleware) covers every audit-emitting op shipped through
+  Phase 2.0a / 2.0b / 2.0c / 2.0c-ext. `CANONICAL_AUDIT_OPS` exposes
+  the canonical op tuple. Used by `persistence.sdk.Substrate.open`
+  to install the audit stack by default. (R2 MAJOR M2.)
+
+### Fixed
+
+- **R2 M1 — `:code/exec` sandbox host-file-read + nondeterminism.**
+  - User-source `__builtins__` curated: `open` / `eval` / `ex`+`ec` /
+    `compile` / `input` / `breakpoint` removed (capability-denial-not-
+    detection per ADR-5). The `_DENIED_BUILTINS` parent constant is
+    the canonical source; substituted into the child shim at module
+    load time alongside `_ALLOWED_TOP_LEVEL`.
+  - `__import__` stays callable so the import statement still works;
+    the existing import filter rejects deny-listed top-level names
+    whether reached via statement or direct call.
+  - Child argv switched from `-I` (which suppressed all `PYTHON*`
+    env vars) to `-s -P -S` so the substrate-supplied
+    `PYTHONHASHSEED=0` and `PYTHONDONTWRITEBYTECODE=1` actually
+    take effect.
+  - `child_env` overlay pinned at the substrate level; caller-
+    supplied `env=` still overrides for fuzz tests.
+- **R2 m4 — RLIMIT_FSIZE preexec docstring overclaim.** Rewrote the
+  comment: writes are denied (kernel SIGXFSZ on overrun); reads
+  remain possible on the filesystem visible to the child. The M1
+  `open()` removal closes the host-file-read vector at the
+  capability layer.
+
+### Behaviour change
+
+- `:code/exec` user-source `input()` now raises `NameError` (was:
+  read substrate-injected stdin). The `stdin=` parameter to
+  `exec_code()` is still accepted on the public surface (the
+  bootstrap shim still envelope-encodes it), but user code has no
+  curated path to read it under the M1 capability set. A future
+  revision (#149+) may add a curated `read_stdin()` builtin.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — `:code/exec` sandbox handler (#141)
 
 Phase 2.0b of the persistence-coder MVP (Phase 2 of the v1.0 roadmap).

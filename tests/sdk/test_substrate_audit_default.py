@@ -217,6 +217,42 @@ def test_substrate_close_releases_audit_runtime() -> None:
         s2.close()
 
 
+def test_audit_verify_chain_under_mixed_entries_does_not_explode() -> None:
+    """Phase 2.0d W1 (m2 finding): pre-W1, ``s.audit.verify_chain()``
+    would raise ``AttributeError`` on the dict-shaped
+    ``:sdk/escape-hatch-access`` entries that ``s.escape.*`` appends
+    (because the audit-handler's ``[-1].id`` access does not exist on
+    a plain dict). The W1 wiring routes ``verify_chain`` through the
+    AuditEntry-only canonical mirror, so a substrate with both
+    AuditEntry chain + escape-hatch dict entries verifies cleanly.
+    """
+    from persistence.plan import Node, edit_step
+
+    s = Substrate.open("memory")
+    try:
+        # Append an escape-hatch dict entry first.
+        _ = s.escape.fact
+        # Then commit a real :plan/edit AuditEntry.
+        inner = Node(tag=":llm-call", attrs={"prompt": "v0"}, children=())
+        plan = Node(tag=":seq", attrs={}, children=(inner,))
+        new_op = Node(tag=":llm-call", attrs={"prompt": "v1"}, children=())
+        with s.txn.dosync() as tx:
+            edit_step(plan, inner.id, new_op, tx=tx)
+
+        # The union list has both a dict + an AuditEntry.
+        all_entries = s.audit.entries()
+        assert len(all_entries) == 2
+        kinds = {type(e).__name__ for e in all_entries}
+        assert "dict" in kinds
+        assert "AuditEntry" in kinds
+
+        # verify_chain does NOT explode — it reads the AuditEntry-only
+        # canonical mirror.
+        assert s.audit.verify_chain() is True
+    finally:
+        s.close()
+
+
 def test_substrate_context_manager_audit_default() -> None:
     """``with Substrate.open("memory") as s:`` works — the audit
     stack is installed for the duration of the ``with`` block, then

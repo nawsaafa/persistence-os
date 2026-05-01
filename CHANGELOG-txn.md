@@ -1,5 +1,37 @@
 # persistence.txn — module changelog
 
+## v0.5.3 (unreleased — lands at Phase 2.0d sub-tag v0.8.5a1) — Phase 2.0d W1 fix-pass
+
+Phase 2.0d W1 (R2 ARIS hard-mode fix-pass) — closes the txn-side
+findings from the codex review at HEAD `4e118e9`. See
+`review-stage/aris-r2-v0.8.5a1-raw.txt`.
+
+### Added
+
+- **`Transaction.staged_facts`** + **`tx.add_facts(facts)`** — opaque
+  fact-dict staging on the transaction. Surfaces like
+  `s.txn.fold_into` queue facts here so they ride the outer
+  `dosync`'s atomic `transact_batch` call (alongside `write_set` +
+  commute reapply + commit datom). Outer raise rolls them back.
+  Closes the M3 atomicity break where pre-W1 `db.transact_batch`
+  mid-dosync committed immediately. (R2 MAJOR M3.)
+- **`AuditStackMissing`** — new `TxnError` subclass raised by
+  `_replay_effect_intents` when intent log is non-empty but no
+  effect runtime is active. Defense-in-depth guard for adapters
+  that bypass `Substrate.open`'s default audit-stack install.
+  (R2 MAJOR M2.)
+
+### Fixed
+
+- **R2 M2 — silent intent-log drop.** Pre-W1
+  `_replay_effect_intents` returned early when no runtime was
+  active, dropping queued audit-emitting intents (`:plan/edit` /
+  `:fork/*` / `:code/exec` / `:fold/chosen`) silently. Now raises
+  `AuditStackMissing` with a remediation message pointing at
+  `Substrate.open` (default install) and `canonical_audit_stack`.
+  The empty-intent-log + no-runtime path stays a no-op for the
+  "raw fact-only dosync" case.
+
 ## v0.5.2 — 2026-04-29
 
 Clojure-parity closure. The deferred-from-v0.5.0a1-§10 surface

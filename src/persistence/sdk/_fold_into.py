@@ -255,10 +255,24 @@ def fold_into(
             checkpoint — it speculates over an isolated branch per
             item). Documented as deprecated; raises ``ValueError``
             if non-zero so callers don't get silent semantic drift.
-        provenance: forwarded to ``transact_batch`` when the chosen
-            branch's facts are committed. Defaults to a
-            ``{"source": "fold_into"}`` tag on the chosen branch's
-            commit.
+        provenance: **Reserved for forward-compatibility.** Currently
+            NOT applied to chosen-branch facts: per-fact provenance
+            cannot be expressed at the ``DB.transact_batch`` layer
+            (it accepts one provenance dict per call, and the outer
+            ``dosync`` commit path already supplies
+            ``_build_commit_provenance(tx, commit_id)`` for the whole
+            batch — see Phase 2.0d W2 m6 in CHANGELOG-sdk for the
+            dead-code-removal rationale). ``DB.fork`` itself
+            documents ``provenance`` as unused (see ``_fork.py:436``
+            "not used by DB.fork itself"). The argument is kept on
+            the public signature to preserve API forward-compat for
+            2.0c-extended callers; landing per-fact provenance at
+            this layer requires a substrate-level extension queued
+            for v0.9.x. Replay-debug consumers identify
+            fold_into-origin chosen-branch facts via the
+            ``:fork/chosen`` audit datom's ``txn_commit`` field,
+            which rides the existing Merkle chain at
+            ``effect/handlers/audit.py``.
 
     Returns:
         :class:`FoldIntoResult` with the chosen branch's index +

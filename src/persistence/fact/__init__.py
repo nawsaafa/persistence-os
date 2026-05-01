@@ -14,8 +14,18 @@ Public surface:
 - :func:`load_migrations` — list of ``(name, sql)`` DDL blobs
 - :class:`Provenance`  — typed schema for ``Datom.provenance``
 - :func:`provenance_from_dict` — coerce a free-form dict to :class:`Provenance`
+- :class:`ForkResult` / :class:`ForkBranchResult` — Phase 2.0c-extended
+  ``DB.fork`` substrate primitive return types (#145ext)
+- :class:`ForkOutsideDosync` / :class:`ForkChooseError` — ``DB.fork``
+  contract-violation exceptions
 """
 
+from persistence.fact._fork import (
+    ForkBranchResult,
+    ForkChooseError,
+    ForkOutsideDosync,
+    ForkResult,
+)
 from persistence.fact.datom import Datom, Op, Provenance, provenance_from_dict
 from persistence.fact.db import (
     CausalDAG,
@@ -40,6 +50,10 @@ __all__ = [
     "Datom",
     "DictProjection",
     "FoldError",
+    "ForkBranchResult",
+    "ForkChooseError",
+    "ForkOutsideDosync",
+    "ForkResult",
     "InMemoryStore",
     "Op",
     "ProjectionAdapter",

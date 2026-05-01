@@ -252,6 +252,60 @@ class _TxnNamespace:
             self._substrate._db, seed, items, fn, choose, **kwargs
         )
 
+    @experimental(
+        reason=(
+            "Phase 2.0c-extended #145ext: substrate-true speculate / "
+            "score / pick / rollback primitive. Sibling of s.txn.fold "
+            "and s.txn.fold_into; lower-level than fold_into (operates "
+            "on opaque Python state, NOT on substrate facts). Surface "
+            "may evolve in v0.9 once Phase-2 dogfooding identifies "
+            "whether the bare-fork API or the fold_into-on-top-of-fork "
+            "wrapper is the load-bearing form."
+        )
+    )
+    def fork(self, items, fn, choose, **kwargs):
+        """Speculate over N candidate branches and pick a winner.
+
+        Curated re-export of :meth:`persistence.fact.DB.fork`. Where
+        :meth:`fold` is a transactional foldl/reduce that commits every
+        item's facts as it iterates, ``fork`` runs ``fn`` against N
+        **isolated** child branches and queues the canonical 4-datom
+        audit shape (``:fork/probe`` + ``:fork/branch`` × N +
+        ``:fork/score`` × N + ``:fork/chosen``) under the enclosing
+        dosync. Non-chosen branches' tentative state is discarded —
+        rollback is structural, since ``fn`` operates on opaque Python
+        state, not on the substrate.
+
+        The bare ``s.txn.fork`` API is for callers who want explicit
+        speculate-rollback-pick semantics over Python state without
+        the fact-level convenience layer. Adapter authors who want to
+        emit substrate facts per branch should layer their own
+        commit-on-winner step on top — ``s.txn.fold_into`` is the
+        canonical example of that pattern.
+
+        See :meth:`persistence.fact.DB.fork` for the full signature,
+        error-handling discipline (``on_error``), the dosync gate
+        (``ForkOutsideDosync``), and the ``ForkResult`` /
+        ``ForkBranchResult`` return shapes.
+
+        Usage::
+
+            with s.txn.dosync() as tx:
+                result = s.txn.fork(
+                    items=branch_candidates,
+                    fn=lambda state, item: build_state(state, item),
+                    choose=lambda branches: argmax(branches),
+                    seed=initial_state,
+                    tx=tx,
+                )
+                # result.chosen_state is the winner's terminal state.
+
+        ``@experimental`` per Adapter SDK ADR-5 + Phase 2.0c-extended
+        ADR-7. Promotes to ``@stable("v0.9")`` after Phase 2 dogfood
+        survives without API change.
+        """
+        return self._substrate._db.fork(items, fn, choose, **kwargs)
+
 
 class _ReplNamespace:
     """Curated ``s.repl.*`` surface — REPL server FACTORY.

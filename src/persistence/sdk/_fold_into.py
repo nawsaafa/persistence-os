@@ -1,9 +1,13 @@
 """Fold-into SDK surface — `s.txn.fold_into` convenience (#145, Phase 2.0c).
 
-See ``docs/plans/2026-04-30-phase-2-persistence-coder-design.md`` § 4.3 +
-ADR-7 for the design ground truth, and
-``docs/plans/2026-05-01-phase-2.0c-fold-sdk-surface-impl.md`` for the
-impl-level decisions.
+Phase 2.0c-extended (#145ext, folds in carryover #201): rewired on top
+of :meth:`persistence.fact.DB.fork` to deliver the substrate-true
+speculate-rollback-pick semantics from design doc § 3.7 + § 4.3.
+
+See ``docs/plans/2026-04-30-phase-2-persistence-coder-design.md`` § 4.3
++ ADR-7 for the design ground truth, and
+``docs/plans/2026-05-01-phase-2.0c-ext-fork-primitive-impl.md`` for the
+Phase 2.0c-extended impl-level decisions.
 
 ## Public surface
 
@@ -15,66 +19,58 @@ impl-level decisions.
 - :class:`FoldIntoChooseError`    — raised when `choose` callback or `fn`
                                     contract is violated
 
-## Architecture
+## Architecture (post-2.0c-extended)
 
-`fold_into` is a **convenience method** that runs `DB.fold` (which already
-commits facts as it iterates) under the agent-extended `(acc, item, db)
--> (new_acc, facts, score)` reducer signature, then calls a user-supplied
-`choose` callback over the per-branch scores and emits a single
-`:fold/chosen` audit datom marking the winning branch.
+`fold_into` is now a **thin adapter on top of** :meth:`DB.fork`:
 
-Per Decision 1 in the impl plan: `DB.fold` keeps its 2-tuple `fn` contract.
-`fold_into` wraps the 3-tuple `fn` into a 2-tuple wrapper while collecting
-`(item, score, new_acc)` triples for `choose`.
+1. Build a wrapper ``fn`` that calls the user's 3-tuple
+   ``(acc, item, db) -> (new_acc, facts, score)`` reducer, captures
+   ``facts`` and ``score`` in per-branch closure state, and returns
+   ``new_acc`` as the branch's terminal state.
+2. Build a wrapper ``choose`` that lifts each :class:`ForkBranchResult`
+   into a :class:`FoldBranchScore` (with the captured per-branch
+   score + accumulator), invokes the user's choose, and returns the
+   index.
+3. ``DB.fork`` queues the canonical 4-datom audit shape
+   (``:fork/probe`` + ``:fork/branch`` × N + ``:fork/score`` × N +
+   ``:fork/chosen``) under the enclosing dosync, with rollback
+   semantics: non-chosen branches' state is just discarded Python
+   objects. Their facts are NOT committed.
+4. **Only the chosen branch's facts** are committed via
+   :meth:`DB.transact_batch` AFTER ``DB.fork`` returns. This is the
+   substrate-true rollback shape from § 3.7 — non-chosen branches
+   never reach ``db.history()`` post-commit.
 
-Per Decision 5 in the impl plan: `fold_into` REQUIRES the caller to be
-inside a `db.dosync(...)` body — outside dosync, `tx.effect()` has no
-transaction to attach the `:fold/chosen` audit datom to, and the
-deterministic-replay invariant breaks. The dosync gate is enforced
-upfront via :func:`persistence.txn.intents.is_in_dosync`.
+The Path-A foldl-with-`:fold/chosen`-marker impl shipped in v0.8.0a1
+is **superseded within Phase 2.0c**. The legacy `:fold/chosen` audit
+op is no longer emitted by `fold_into` — the `:fork/*` 4-datom shape
+is the canonical contract. `DB.fold` (the foldl/reduce primitive)
+keeps the 2-tuple `fn` shape and is unchanged.
 
-## Audit invariant
+## on_error semantics (Phase 2.0c-extended)
 
-Every successful ``fold_into`` call emits a ``:fold/chosen`` effect
-intent via ``tx.effect()`` with kwargs::
+- ``"abort"`` (default): if any branch's ``fn`` raises, the
+  underlying ``DB.fork`` re-raises immediately; ``choose`` is never
+  called; no chosen branch's facts are committed; no audit datoms
+  flushed.
+- ``"skip"``: maps to ``DB.fork``'s ``on_error="continue"`` —
+  failed branches are recorded with ``score=None``,
+  ``branch_state=seed``. The wrapper drops them from the score list
+  passed to the user's ``choose`` (so callers retain the v0.7 +
+  v0.8.0a1 semantic where ``choose`` only sees successful branches).
+- ``"checkpoint"``: same as ``"abort"`` from `fold_into`'s
+  perspective.
 
-    {
-      "chosen_index": <0-based index in the score list passed to `choose`>,
-      "chosen_score": <float; the winning branch's score>,
-      "all_scores": <tuple[float, ...]; per-branch scores>,
-      "branch_count": <int; len(score list passed to `choose`)>,
-    }
+Contract violations (wrong return arity, non-numeric or non-finite
+score) raise :class:`FoldIntoChooseError` regardless of ``on_error``
+— programming bugs are not transient per-item failures.
 
-The ``_txn_commit`` (commit_id) is supplied automatically by
-``persistence.txn.transaction._replay_effect_intents`` at commit time;
-the audit handler at ``effect/handlers/audit.py`` chains the
-``:fold/chosen`` request datom into the same Merkle chain as
-``:plan/edit`` / ``:code/exec`` / etc.
-
-## on_error semantics (Decision 7)
-
-- ``"abort"`` (default): if any branch's ``fn`` raises, ``DB.fold``
-  raises ``FoldError``; ``choose`` is never called; no ``:fold/chosen``
-  datom is emitted.
-- ``"skip"``: skipped branches are dropped from the score list passed
-  to ``choose``. The ``chosen_index`` recorded in the audit datom is
-  the index into the **successful-branches list**, not the original
-  ``items`` list. ``branch_count`` reflects the successful count.
-  Note: branches that violate the ``fn`` contract (wrong return arity,
-  non-numeric or non-finite score) are NEVER silently skipped — they
-  raise :class:`FoldIntoChooseError` regardless of ``on_error``,
-  because contract violations are programming bugs, not transient
-  per-item failures.
-- ``"checkpoint"``: same as ``"abort"`` from `fold_into`'s perspective
-  (fold raises, choose not called).
-
-## Score coercion (Decision 6)
+## Score coercion
 
 Scores from ``fn`` are coerced to ``float`` for both the audit datom
-and the ``FoldIntoResult.all_scores`` field, even when ``fn`` returned
-``int`` or ``bool``. This keeps the audit-datom JSON canonicalization
-stable across replays (``json.dumps(1)`` vs ``json.dumps(1.0)`` differ
-at byte level — ``1`` vs ``1.0``).
+and the ``FoldIntoResult.all_scores`` field, even when ``fn``
+returned ``int`` or ``bool``. Keeps the audit-datom JSON
+canonicalization stable across replays.
 """
 from __future__ import annotations
 
@@ -82,7 +78,11 @@ from dataclasses import dataclass
 from math import isfinite
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Literal, Optional
 
-from persistence.fact import FoldError
+from persistence.fact._fork import (
+    ForkBranchResult,
+    ForkChooseError,
+    ForkOutsideDosync,
+)
 from persistence.txn.intents import is_in_dosync
 
 if TYPE_CHECKING:
@@ -107,15 +107,15 @@ __all__ = [
 class FoldIntoOutsideDosync(RuntimeError):
     """`fold_into` was called outside an active ``db.dosync`` body.
 
-    Mirrors :class:`persistence.plan._errors.PlanEditOutsideDosync`:
-    `fold_into` emits a ``:fold/chosen`` audit datom that MUST ride the
-    same Merkle chain as the rest of the trajectory, which requires an
-    enclosing transaction.
+    Mirrors :class:`persistence.plan._errors.PlanEditOutsideDosync` and
+    :class:`persistence.fact._fork.ForkOutsideDosync`. The ``:fork/*``
+    audit datoms MUST ride the same Merkle chain as the rest of the
+    trajectory, which requires an enclosing transaction.
 
-    Outside dosync, the audit datom would be silent (no ``txn_commit``
-    to chain into) — that violates the deterministic-replay invariant
-    from § 3.7 of the Phase-2 design doc. The gate trips upfront before
-    any branch is scored, so no work is wasted.
+    Outside dosync, the audit datoms would be silent (no
+    ``txn_commit`` to chain into) — that violates the deterministic-
+    replay invariant from § 3.7 of the Phase-2 design doc. The gate
+    trips upfront before any branch is run, so no work is wasted.
     """
 
 
@@ -125,21 +125,11 @@ class FoldIntoChooseError(RuntimeError):
 
     Wraps the underlying ``TypeError`` / ``ValueError`` / arbitrary
     exception via ``__cause__`` so callers can ``except FoldIntoChooseError``
-    once and inspect the cause for the specific violation:
+    once and inspect the cause for the specific violation.
 
-    - ``TypeError``: ``choose`` returned a non-int; ``fn`` returned a
-      tuple of the wrong arity or shape; ``fn`` returned a non-numeric
-      score.
-    - ``ValueError``: ``choose`` returned an int outside
-      ``[0, branch_count)``; ``fn`` returned a non-finite score
-      (NaN / +Inf / -Inf).
-    - Anything else: ``choose`` itself raised arbitrarily; the original
-      is the ``__cause__``.
-
-    The constraint is single-classed (rather than two siblings for fn-
-    error vs choose-error) because both manifest as "the agent's
-    speculation contract is broken" — callers want one ``except`` block,
-    not two.
+    Single-classed (rather than two siblings for fn-error vs
+    choose-error) because both manifest as "the agent's speculation
+    contract is broken" — callers want one ``except`` block, not two.
     """
 
 
@@ -156,8 +146,7 @@ class FoldBranchScore:
     Frozen so the ``choose`` callback cannot mutate the score list and
     the audit datom can quote the score back deterministically.
 
-    The ``score`` field is always ``float`` — see Decision 6 in the
-    impl plan for the coercion rationale.
+    The ``score`` field is always ``float``.
     """
 
     item: Any
@@ -169,11 +158,16 @@ class FoldBranchScore:
 class FoldIntoResult:
     """Return value of :func:`fold_into`.
 
-    Per Decision 4 in the impl plan, the result captures both the
-    ``chosen_*`` fields (what ``choose`` picked) and the ``final_*``
-    fields (what `DB.fold` returned at the end of the iteration). For
-    an argmax-style ``choose`` over an arbitrary score sequence, the
-    two will diverge whenever the chosen branch is not the last one.
+    The result captures both the ``chosen_*`` fields (what ``choose``
+    picked) and the ``final_*`` fields (what the last branch's
+    accumulator was). For an argmax-style ``choose`` over an arbitrary
+    score sequence, the two will diverge whenever the chosen branch is
+    not the last one.
+
+    Phase 2.0c-extended: ``total_datoms_committed`` now reflects ONLY
+    the chosen branch's facts (rollback semantics — non-chosen
+    branches' facts never reach the substrate). Path-A's all-branches-
+    committed semantic is superseded.
     """
 
     chosen_index: int
@@ -192,11 +186,10 @@ class FoldIntoResult:
 def _coerce_score(raw: Any) -> float:
     """Coerce a raw ``fn``-returned score to ``float`` with shape checks.
 
-    Per Decision 6: int / float / bool inputs are accepted; everything
-    else (str, complex, None, dataclass, etc.) raises ``TypeError``.
-    Non-finite floats (NaN / +Inf / -Inf) raise ``ValueError``.
-
-    The caller wraps these in ``FoldIntoChooseError``.
+    int / float / bool inputs are accepted; everything else (str,
+    complex, None, dataclass, etc.) raises ``TypeError``. Non-finite
+    floats (NaN / +Inf / -Inf) raise ``ValueError``. The caller wraps
+    these in ``FoldIntoChooseError``.
     """
     if isinstance(raw, bool):
         # bool is a subclass of int, so this guard runs first.
@@ -228,64 +221,86 @@ def fold_into(
     checkpoint_every: int = 0,
     provenance: Optional[dict] = None,
 ) -> FoldIntoResult:
-    """`s.txn.fold_into` impl. See module docstring for the full contract.
+    """`s.txn.fold_into` impl — Phase 2.0c-extended.
 
-    Routes through :meth:`persistence.fact.DB.fold` for the actual
-    transactional accumulation; collects per-branch scores into a
-    side-list; applies the ``choose`` callback; emits the
-    ``:fold/chosen`` audit datom via the supplied ``Transaction``'s
-    effect-intent log.
+    Routes through :meth:`persistence.fact.DB.fork` for the substrate-
+    true speculate-rollback-pick primitive, then commits ONLY the
+    chosen branch's facts via :meth:`DB.transact_batch`. Audit shape
+    is the canonical 4-datom emission (``:fork/probe`` +
+    ``:fork/branch`` × N + ``:fork/score`` × N + ``:fork/chosen``) —
+    no separate ``:fold/chosen`` datom (that op is reserved for
+    ``DB.fold`` users who want the foldl-with-marker pattern).
 
     Args:
         db: the substrate's underlying ``DB`` (from ``Substrate._db``).
-        seed: initial accumulator passed to ``fn`` on iteration 0.
+        seed: initial accumulator passed to ``fn`` on every branch.
         items: branch candidates; materialised once at the top.
         fn: ``(acc, item, db) -> (new_acc, facts, score)`` reducer.
-            ``facts`` is the same shape ``DB.fold`` accepts (a list
-            of fact dicts); ``score`` is coerced to ``float``.
+            ``facts`` is the same shape ``DB.transact_batch`` accepts
+            (a list of fact dicts); ``score`` is coerced to ``float``.
         choose: ``(branches: list[FoldBranchScore]) -> int`` policy
             that picks one branch's index. Pure / deterministic for
             byte-identity replay.
         tx: the active :class:`persistence.txn.Transaction` (passed in
-            from the dosync body's ``with db.dosync() as tx:`` binding).
-            Required keyword-only — used to queue the ``:fold/chosen``
-            audit datom on the transaction's effect-intent log.
-            Mirrors :func:`persistence.plan.edit_step`'s ``tx`` param.
-        on_error: forwarded to ``DB.fold`` per Decision 7.
-        checkpoint_every: forwarded to ``DB.fold``.
-        provenance: forwarded to ``DB.fold``.
+            from the dosync body's ``with db.dosync() as tx:``
+            binding). Required keyword-only — used by ``DB.fork`` to
+            queue the 4 audit datoms on the transaction's effect-
+            intent log.
+        on_error: ``"abort"`` (default; any branch failure aborts
+            the fork), ``"skip"`` (failed branches dropped from the
+            score list shown to ``choose``), or ``"checkpoint"``
+            (alias for ``"abort"`` from this surface's perspective).
+        checkpoint_every: kept for v0.8.0a1 API compatibility; no
+            longer functional under the rewire (DB.fork does not
+            checkpoint — it speculates over an isolated branch per
+            item). Documented as deprecated; raises ``ValueError``
+            if non-zero so callers don't get silent semantic drift.
+        provenance: forwarded to ``transact_batch`` when the chosen
+            branch's facts are committed. Defaults to a
+            ``{"source": "fold_into"}`` tag on the chosen branch's
+            commit.
 
     Returns:
         :class:`FoldIntoResult` with the chosen branch's index +
         score + accumulator state, the full score tuple, and the
-        total datom count from ``DB.fold``.
+        chosen branch's datom commit count.
 
     Raises:
-        FoldIntoOutsideDosync: not in an active dosync body, or ``tx``
-            is None (the dosync gate trips up-front).
-        ValueError: ``items`` is empty.
+        FoldIntoOutsideDosync: not in an active dosync body, or
+            ``tx`` is None (the dosync gate trips up-front).
+        ValueError: ``items`` is empty; ``checkpoint_every`` non-zero
+            (no longer supported); ``on_error`` invalid.
         FoldIntoChooseError: ``fn`` or ``choose`` violated its
             contract; original exception in ``__cause__``.
-        FoldError: forwarded from ``DB.fold`` when a branch's ``fn``
-            raises and ``on_error`` is ``"abort"`` /
-            ``"checkpoint"``. ``choose`` was never called.
+        Exception (any): forwarded from ``fn`` when ``on_error="abort"``
+            and a branch raises. ``choose`` was never called.
     """
-    # Decision 5: dosync gate up-front. Both the ContextVar guard AND
-    # the explicit `tx` argument must be present — the guard catches
-    # call-site-outside-dosync; the `tx is None` check catches "user
-    # forgot to thread tx through" so the audit datom never silently
-    # drops.
+    # Dosync gate up-front. Both the ContextVar guard AND the explicit
+    # `tx` argument must be present.
     if not is_in_dosync() or tx is None:
         raise FoldIntoOutsideDosync(
             "s.txn.fold_into must run inside a db.dosync(...) body and "
             "be passed the active Transaction via the tx= keyword. "
-            "Without an active txn the :fold/chosen audit datom would "
-            "be silent and the deterministic-replay invariant from "
+            "Without an active txn the :fork/* audit datoms would be "
+            "silent and the deterministic-replay invariant from "
             "design § 3.7 would break."
         )
 
-    # Decision 1 + Decision 7 prelim: items materialised once, validated
-    # non-empty before any work is done.
+    if on_error not in ("abort", "skip", "checkpoint"):
+        raise ValueError(
+            f"fold_into: on_error must be one of 'abort'/'skip'/"
+            f"'checkpoint', got {on_error!r}"
+        )
+
+    if checkpoint_every:
+        raise ValueError(
+            f"fold_into: checkpoint_every is no longer supported under "
+            f"the Phase 2.0c-extended rewire — DB.fork speculates over "
+            f"an isolated branch per item rather than buffering "
+            f"checkpoints. Pass checkpoint_every=0 (default). "
+            f"Got {checkpoint_every!r}."
+        )
+
     materialised_items = list(items)
     if not materialised_items:
         raise ValueError(
@@ -293,27 +308,35 @@ def fold_into(
             "branches to choose between"
         )
 
-    # Side-state captured by the wrapper closure. `branches` collects
-    # successful (item, score, new_acc) triples; `wrapper_violation`
-    # captures the first contract violation we saw (so we can re-raise
-    # FoldIntoChooseError after fold completes — even under "skip" mode
-    # where DB.fold would otherwise silently drop the failing item).
-    branches: list[FoldBranchScore] = []
+    # Side-state captured by the wrappers. Indexed by branch_index so
+    # the reorder-from-fork-back-to-fold-shape is unambiguous.
+    per_branch_facts: dict[int, list[dict]] = {}
+    per_branch_score: dict[int, float] = {}
+    per_branch_acc: dict[int, Any] = {}
     wrapper_violation: list[BaseException] = []
 
-    def wrapper_fn(
-        acc: Any, item: Any, inner_db: "DB"
-    ) -> tuple[Any, list[dict]]:
-        """Adapter from 3-tuple `fn` to 2-tuple shape `DB.fold` expects.
+    # Pre-compute the branch indices so the wrapper_fn knows which idx
+    # it's currently producing (DB.fork iterates `items` in order, but
+    # doesn't surface idx into fn). We track via a counter on the
+    # closure side.
+    next_idx_holder = [0]
 
-        Validates the return shape; on contract violation, records the
-        cause in ``wrapper_violation`` and re-raises so ``DB.fold``
-        either propagates (under "abort") or drops (under "skip"). In
-        both cases the post-fold check sees ``wrapper_violation`` and
-        surfaces ``FoldIntoChooseError`` to the caller.
+    def wrapper_fn(_branch_state: Any, item: Any) -> Any:
+        """Adapter from fold_into's 3-tuple `fn` to DB.fork's 2-arg shape.
+
+        ``_branch_state`` is always the seed — DB.fork passes seed as
+        the initial state per branch. We re-invoke the user's
+        3-tuple fn with the seed-as-accumulator and capture facts +
+        score + new_acc in per-branch dicts keyed by branch index.
+
+        Returns the user's ``new_acc`` as the branch's terminal state
+        (which becomes ``ForkBranchResult.branch_state``).
         """
-        result = fn(acc, item, inner_db)
-        # Shape check: must be a 3-tuple.
+        idx = next_idx_holder[0]
+        next_idx_holder[0] += 1
+
+        result = fn(seed, item, db)
+        # Shape check.
         if not isinstance(result, tuple) or len(result) != 3:
             err = TypeError(
                 f"fold_into: fn must return a 3-tuple "
@@ -328,137 +351,211 @@ def fold_into(
             wrapper_violation.append(err)
             raise err
         new_acc, facts, raw_score = result
-        # Score validation + coercion (Decision 6).
+        if not isinstance(facts, list):
+            err = TypeError(
+                f"fold_into: fn must return (acc, list[dict], score); "
+                f"facts element is {type(facts).__name__}"
+            )
+            wrapper_violation.append(err)
+            raise err
         try:
             score = _coerce_score(raw_score)
         except (TypeError, ValueError) as score_exc:
             wrapper_violation.append(score_exc)
             raise
-        branches.append(
-            FoldBranchScore(
-                item=item,
-                score=score,
-                accumulator_after=new_acc,
-            )
-        )
-        return new_acc, facts
 
-    # Run the underlying fold. If a wrapper violation surfaces under
-    # "abort", DB.fold wraps it in FoldError(__cause__=violation); we
-    # unwrap below. Under "skip", DB.fold silently drops the branch but
-    # we still see the violation in `wrapper_violation`.
+        per_branch_facts[idx] = facts
+        per_branch_score[idx] = score
+        per_branch_acc[idx] = new_acc
+        return new_acc
+
+    # Map fold_into's on_error onto DB.fork's on_error.
+    fork_on_error: Literal["stop", "continue"] = (
+        "continue" if on_error == "skip" else "stop"
+    )
+
+    # Capture state for `choose` translation. Under "skip", the user's
+    # choose only sees successful branches (their indices in the
+    # successful list, NOT in the original items list). The chosen_index
+    # FoldIntoResult.chosen_index reflects that successful-list index.
+    # We track which fork-branch-indices were successful so we can map
+    # the user's chosen idx -> fork's branch-index when needed.
+    successful_fork_indices: list[int] = []
+
+    # Sentinel class for the "all branches failed under skip" case so
+    # fold_into can re-raise as ValueError (matching v0.8.0a1 contract)
+    # rather than as FoldIntoChooseError.
+    class _AllSkippedSentinel(Exception):
+        pass
+
+    # Sentinel for transporting the user's original choose-callback
+    # exception (e.g. ZeroDivisionError) cleanly through fork_impl's
+    # ForkChooseError wrapper.
+    class _UserChooseRaised(Exception):
+        def __init__(self, original: BaseException) -> None:
+            super().__init__(str(original))
+            self.original = original
+
+    def choose_wrapper(fork_branches: list[ForkBranchResult]) -> int:
+        """Adapter from DB.fork's branches list to user's choose.
+
+        Builds a list of FoldBranchScore from the captured per-branch
+        state (only successful branches under "skip"); calls user's
+        choose; returns the WINNING fork branch_index (DB.fork wants
+        an index into its own all_branches list, not the successful
+        list).
+
+        Raises vanilla TypeError / ValueError so ``fork_impl`` wraps
+        them into ``ForkChooseError`` consistently; ``fold_into``
+        catches ``ForkChooseError`` and unwraps the cause back into
+        ``FoldIntoChooseError``. User-callback exceptions are
+        transported via ``_UserChooseRaised`` so the original is
+        preserved as ``__cause__``.
+        """
+        successful_fork_indices.clear()
+        score_list: list[FoldBranchScore] = []
+        for fb in fork_branches:
+            # Failed branches (under "continue") have error populated.
+            if fb.error is not None:
+                continue
+            successful_fork_indices.append(fb.branch_index)
+            score_list.append(
+                FoldBranchScore(
+                    item=fb.item,
+                    score=per_branch_score[fb.branch_index],
+                    accumulator_after=per_branch_acc[fb.branch_index],
+                )
+            )
+
+        if not score_list:
+            raise _AllSkippedSentinel(
+                "fold_into: every branch was skipped under "
+                "on_error='skip'; no successful branch to choose"
+            )
+
+        try:
+            user_chosen = choose(score_list)
+        except BaseException as ce:
+            # Transport original; fold_into unwraps via .original.
+            raise _UserChooseRaised(ce) from ce
+
+        # Validate user's choose return — raise vanilla TypeError /
+        # ValueError. fork_impl will wrap into ForkChooseError; the
+        # caller (fold_into) inspects the wrapped __cause__.
+        if isinstance(user_chosen, bool) or not isinstance(user_chosen, int):
+            raise TypeError(
+                f"choose callback must return int; got "
+                f"{type(user_chosen).__name__}"
+            )
+        if user_chosen < 0 or user_chosen >= len(score_list):
+            raise ValueError(
+                f"choose callback returned index {user_chosen} which "
+                f"is out of range for {len(score_list)} branches "
+                f"(valid: 0..{len(score_list) - 1})"
+            )
+
+        # Map user_chosen (index into successful list) -> DB.fork's
+        # all_branches index.
+        return successful_fork_indices[user_chosen]
+
+    # Run DB.fork. fold_into-wrapper-violation cases bubble up as the
+    # underlying TypeError/ValueError; we rewrap as
+    # FoldIntoChooseError. fork-internal failures (under "abort") raise
+    # the user's fn exception directly.
     try:
-        final_acc, total_datoms = db.fold(
-            seed,
-            materialised_items,
-            wrapper_fn,
-            on_error=on_error,
-            checkpoint_every=checkpoint_every,
+        fork_result = db.fork(
+            items=materialised_items,
+            fn=wrapper_fn,
+            choose=choose_wrapper,
+            seed=seed,
+            tx=tx,
+            on_error=fork_on_error,
             provenance=provenance,
         )
-    except FoldError as fe:
-        # Contract violations bypass on_error: the user's contract is
-        # broken regardless of failure-handling discipline.
+    except ForkOutsideDosync:
+        # Re-classify under fold_into's exception type for backward-
+        # compat — callers expect FoldIntoOutsideDosync.
+        raise FoldIntoOutsideDosync(
+            "s.txn.fold_into must run inside a db.dosync(...) body and "
+            "be passed the active Transaction via the tx= keyword."
+        )
+    except ForkChooseError as fce:
+        # ``fork_impl`` wraps the exception raised inside ``choose_wrapper``
+        # as ``ForkChooseError(... from cause)``. Unwrap and re-classify:
+        # - _AllSkippedSentinel -> ValueError (matches v0.8.0a1 contract
+        #   for "every branch was skipped").
+        # - _UserChooseRaised -> FoldIntoChooseError with the original
+        #   user exception as __cause__.
+        # - vanilla TypeError / ValueError from choose-validation ->
+        #   FoldIntoChooseError with the cause preserved.
+        # - wrapper-fn contract violation (recorded in
+        #   wrapper_violation) -> FoldIntoChooseError.
+        cause = fce.__cause__
+        if isinstance(cause, _AllSkippedSentinel):
+            raise ValueError(str(cause)) from None
+        if isinstance(cause, _UserChooseRaised):
+            raise FoldIntoChooseError(
+                f"choose callback raised "
+                f"{type(cause.original).__name__}: {cause.original}"
+            ) from cause.original
         if wrapper_violation:
             raise FoldIntoChooseError(
                 str(wrapper_violation[0])
             ) from wrapper_violation[0]
-        # Genuine fold error from user fn — propagate as-is so the
-        # caller can `except FoldError`.
+        if isinstance(cause, (TypeError, ValueError)):
+            raise FoldIntoChooseError(str(cause)) from cause
+        # Fallback — preserve the cause we have.
+        raise FoldIntoChooseError(str(fce)) from cause
+    except BaseException:
+        # Wrapper-fn contract violation (wrong arity / non-numeric
+        # score) -> wrap in FoldIntoChooseError.
+        if wrapper_violation:
+            raise FoldIntoChooseError(
+                str(wrapper_violation[0])
+            ) from wrapper_violation[0]
+        # User fn legitimately raised under "abort" -> propagate as-is.
         raise
 
-    # Even when DB.fold completed (e.g. under on_error="skip"), a
-    # contract violation in the wrapper means we should not proceed to
-    # `choose` — the agent's score list would be silently incomplete.
-    if wrapper_violation:
-        raise FoldIntoChooseError(
-            str(wrapper_violation[0])
-        ) from wrapper_violation[0]
+    # ---- Commit chosen branch's facts inside the outer dosync. ---------
+    chosen_fork_idx = fork_result.chosen_index
+    chosen_facts = per_branch_facts.get(chosen_fork_idx, [])
 
-    # If on_error="skip" dropped every branch, there is nothing to
-    # choose between. Treat as ValueError (mirrors the empty-items
-    # gate), since the score list `choose` would see is empty.
-    if not branches:
-        raise ValueError(
-            "fold_into: every branch was skipped under on_error='skip'; "
-            "no successful branch to choose"
-        )
+    # Default provenance carries a ``"source": "fold_into"`` tag so
+    # audit consumers can identify chosen-branch-emitted datoms.
+    prov_for_batch: Optional[dict]
+    if provenance is None:
+        prov_for_batch = {"source": "fold_into"}
+    else:
+        prov_for_batch = dict(provenance)
+        prov_for_batch.setdefault("source", "fold_into")
 
-    # Decision 2: invoke `choose` with the score list. Wrap any
-    # exception from `choose` itself in FoldIntoChooseError.
-    try:
-        chosen_index = choose(branches)
-    except BaseException as ce:
-        raise FoldIntoChooseError(
-            f"choose callback raised {type(ce).__name__}: {ce}"
-        ) from ce
+    pre_log_len = sum(1 for _ in db.store.all_datoms())
+    if chosen_facts:
+        db.transact_batch(chosen_facts, prov_for_batch)
+    post_log_len = sum(1 for _ in db.store.all_datoms())
+    committed_count = max(0, post_log_len - pre_log_len)
 
-    # Validate `choose` return shape.
-    if isinstance(chosen_index, bool) or not isinstance(chosen_index, int):
-        # bool is an int subclass — exclude it explicitly so True/False
-        # do not silently route to index 1/0.
-        err: BaseException = TypeError(
-            f"choose callback must return int; got "
-            f"{type(chosen_index).__name__}"
-        )
-        raise FoldIntoChooseError(str(err)) from err
-    if chosen_index < 0 or chosen_index >= len(branches):
-        err = ValueError(
-            f"choose callback returned index {chosen_index} which is "
-            f"out of range for {len(branches)} branches "
-            f"(valid: 0..{len(branches) - 1})"
-        )
-        raise FoldIntoChooseError(str(err)) from err
-
-    chosen = branches[chosen_index]
-    all_scores: tuple[float, ...] = tuple(b.score for b in branches)
-
-    # Decision 3: emit the :fold/chosen audit datom via the active
-    # transaction's effect-intent queue. The _txn_commit (commit_id)
-    # is auto-injected at intent-replay time by
-    # persistence.txn.transaction._replay_effect_intents — same path
-    # as :plan/edit and :code/exec. No new chain code: :fold/chosen
-    # rides the existing Merkle chain at effect/handlers/audit.py.
-    _emit_chosen_datom(
-        tx,
-        chosen_index=chosen_index,
-        chosen_score=chosen.score,
-        all_scores=all_scores,
-        branch_count=len(branches),
+    # Assemble FoldIntoResult.
+    successful_indices = sorted(per_branch_score.keys())
+    all_scores: tuple[float, ...] = tuple(
+        per_branch_score[i] for i in successful_indices
     )
+    # The successful-list index that the user's choose returned. We
+    # need to map fork_result.chosen_index back to its position in the
+    # successful_indices list.
+    user_chosen_idx = successful_indices.index(chosen_fork_idx)
+    chosen_score = per_branch_score[chosen_fork_idx]
+    chosen_accumulator = per_branch_acc[chosen_fork_idx]
+    # final_accumulator = the last *successful* branch's accumulator
+    # (matches v0.8.0a1 semantics where DB.fold returned its last-
+    # iterated acc; under skip, that's the last successful one).
+    final_accumulator = per_branch_acc[successful_indices[-1]]
 
     return FoldIntoResult(
-        chosen_index=chosen_index,
-        chosen_score=chosen.score,
-        all_scores=all_scores,
-        chosen_accumulator=chosen.accumulator_after,
-        final_accumulator=final_acc,
-        total_datoms_committed=total_datoms,
-    )
-
-
-def _emit_chosen_datom(
-    tx: "Transaction",
-    *,
-    chosen_index: int,
-    chosen_score: float,
-    all_scores: tuple[float, ...],
-    branch_count: int,
-) -> None:
-    """Queue the :fold/chosen audit datom on the Transaction's
-    effect-intent log.
-
-    The actual emission to the effect runtime (and Merkle-chain hook
-    in ``effect/handlers/audit.py``) happens at commit time via
-    ``persistence.txn.transaction._replay_effect_intents``, which
-    injects the ``txn_commit`` (commit_id) alongside these kwargs.
-
-    Mirrors :func:`persistence.plan._edit._emit_edit_datom`.
-    """
-    tx.effect(
-        ":fold/chosen",
-        chosen_index=chosen_index,
+        chosen_index=user_chosen_idx,
         chosen_score=chosen_score,
         all_scores=all_scores,
-        branch_count=branch_count,
+        chosen_accumulator=chosen_accumulator,
+        final_accumulator=final_accumulator,
+        total_datoms_committed=committed_count,
     )

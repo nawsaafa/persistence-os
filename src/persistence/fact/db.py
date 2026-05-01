@@ -22,7 +22,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Sequence
 
 from persistence.fact.datom import Datom
 from persistence.fact.store import TX_PLACEHOLDER, InMemoryStore, Store
@@ -835,6 +835,80 @@ class DB:
             _flush()
 
         return acc, committed_total
+
+    # ---- Fork: speculate / score / pick / rollback primitive ---------
+    def fork(
+        self,
+        items: "Sequence[Any]",
+        fn: "Callable[[Any, Any], Any]",
+        choose: "Callable[[list[Any]], int]",
+        *,
+        seed: Any = None,
+        tx: Any = None,
+        on_error: Literal["stop", "continue"] = "stop",
+        provenance: Optional[dict] = None,
+    ) -> Any:
+        """Speculate over N candidate branches, score them, pick a winner.
+
+        Phase 2.0c-extended (#145ext, folds in carryover #201). The
+        sibling primitive to :meth:`fold` — where ``fold`` is a
+        transactional foldl/reduce that commits every item's facts as
+        it iterates, ``fork`` runs ``fn`` against N **isolated** child
+        branches and queues the canonical 4-datom audit shape
+        (``:fork/probe`` + ``:fork/branch`` x N + ``:fork/score`` x N
+        + ``:fork/chosen``) under the enclosing dosync. Non-chosen
+        branches' tentative state is discarded (rollback is trivial —
+        ``fn`` operates on opaque Python state, not on the substrate,
+        so nothing was ever written).
+
+        See :mod:`persistence.fact._fork` for the contract, error
+        types (:class:`ForkOutsideDosync`, :class:`ForkChooseError`),
+        and the result types (:class:`ForkBranchResult`,
+        :class:`ForkResult`).
+
+        Args:
+            items: branch candidates; one item produces one branch.
+                Must be non-empty.
+            fn: ``(branch_state, item) -> branch_state`` reducer.
+                Called once per branch with ``seed`` as the initial
+                state.
+            choose: ``(branches) -> int`` picks the winning index.
+            seed: initial branch state. Defaults to ``None``.
+            tx: the active :class:`persistence.txn.Transaction`
+                (from the enclosing dosync body). Required keyword-
+                only.
+            on_error: ``"stop"`` (default) or ``"continue"``.
+            provenance: forwarded for adapter compatibility; not
+                used at the fork-primitive layer (no facts committed
+                here).
+
+        Returns:
+            :class:`persistence.fact._fork.ForkResult`.
+
+        Raises:
+            ForkOutsideDosync: not in an active dosync body or
+                ``tx`` is None.
+            ValueError: ``items`` is empty or ``on_error`` invalid.
+            ForkChooseError: ``choose`` violated its contract.
+
+        Stability:
+            ``@experimental`` per ADR-7 + Phase 2.0c-extended. The
+            curated SDK surface is :func:`persistence.sdk.Substrate.txn.fork`;
+            adapter authors who need explicit speculate-rollback-pick
+            semantics on the raw DB use this method.
+        """
+        from persistence.fact._fork import fork_impl
+
+        return fork_impl(
+            self,
+            items,
+            fn,
+            choose,
+            seed=seed,
+            tx=tx,
+            on_error=on_error,
+            provenance=provenance,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -739,18 +739,29 @@ def _exec_under_capture(source: str, *, stdin: str = "") -> CodeExecResult:
 
 
 def test_open_is_denied() -> None:
-    """``open()`` is removed from the curated ``__builtins__`` so a
-    user-source ``open('/etc/passwd')`` raises ``NameError`` inside
-    the sandbox — closes the primary host-filesystem-read vector at
-    the capability layer (Phase 2.0d W1 M1 primary fix).
+    """Verifies that ``open()`` is removed from the curated
+    ``__builtins__`` dict in the bootstrap shim — a user-source body
+    that calls ``open('/etc/passwd')`` directly by the bare name fails
+    with ``NameError`` because the lookup against the curated builtins
+    finds nothing.
 
-    The narrative "FS reads are denied" is honest post-W2 only because
-    M6 also removed ``pathlib`` from the import allowlist
-    (``pathlib.Path.read_text/.read_bytes/.open`` reach C-level
-    ``_io.open`` directly, bypassing this builtins-level denial).
-    With both M1 and M6 in place, the user-source has no curated
-    surface to read host files. See
-    :func:`test_pathlib_import_is_denied` for the M6 cross-check.
+    This test does NOT claim host-file confidentiality. Phase 2.0d W3
+    rescoped the sandbox as a soft-isolation runtime guard (see the
+    "Known limitations" section of the ``code.py`` module docstring +
+    ADR-5 W3 amendment in the design doc): a body that constructs the
+    escape via stdlib transitivity (e.g.
+    ``import dataclasses;
+    dataclasses.sys.modules['builtins'].open(...)``) reaches the same
+    function through a different reference and the dict-level removal
+    does not stop it. The xfail-strict regression test
+    :func:`test_known_escape_via_dataclasses_sys_modules_builtins_open`
+    documents that known-escape; it flips to PASS the moment the
+    v0.9.x real-OS-boundary lands.
+
+    The check here remains useful because it asserts the bare-name
+    ``NameError`` signal honest plan-step bodies see when they call
+    ``open()`` directly — the soft-isolation default still raises the
+    bar against accidental misuse.
     """
     r = _exec_under_capture("print(open('/etc/passwd').read())")
     assert r.exit_code != 0
@@ -758,6 +769,61 @@ def test_open_is_denied() -> None:
     # in stderr.
     assert "NameError" in r.stderr
     assert "open" in r.stderr
+
+
+@pytest.mark.xfail(
+    reason=(
+        "Soft-sandbox W3 known limitation: stdlib transitivity allows "
+        "reaching builtins.open via an allowed module's __dict__ "
+        "(dataclasses.sys.modules['builtins'].open). Closed by the "
+        "v0.9.x sandbox-redesign track when a real OS-level boundary "
+        "(gVisor / nsjail / Docker / WASM-Pyodide) lands. At that point "
+        "this test flips to PASS and the xfail marker is removed; the "
+        "test IS the v0.9.x acceptance signal."
+    ),
+    strict=True,
+)
+def test_known_escape_via_dataclasses_sys_modules_builtins_open() -> None:
+    """Documents the R2.3 sandbox-break repro as a known-known
+    limitation (Phase 2.0d W3 honest-rescope).
+
+    Under v0.8.5a1 soft-isolation, this body succeeds and prints the
+    first 20 bytes of ``/etc/passwd``: ``dataclasses`` is allowed,
+    its ``__dict__["sys"]`` exposes ``sys.modules``, which in turn
+    exposes ``builtins.open`` (the unscrubbed full builtins of the
+    bootstrap side). The curated user-source ``__builtins__`` dict
+    only removed the bare-name reference — it does not (and at this
+    layer cannot) prevent the escape via stdlib transitivity. The
+    body therefore exits 0 with host-file bytes in stdout, which
+    means ``assert r.exit_code != 0`` fails and the test is marked
+    ``xfail-strict``.
+
+    When the v0.9.x sandbox-redesign track ships a real OS-level
+    boundary (gVisor / nsjail / Docker / WASM-Pyodide), the
+    /etc/passwd read will be denied at the kernel layer regardless
+    of the Python escape; the assertion will hold and the xfail
+    marker should be removed (strict=True forces a CI failure if the
+    test starts passing while still marked xfail). See ADR-5 W3
+    amendment + ``code.py`` module docstring "Known limitations".
+    """
+    # /etc/passwd is the canonical Unix password file; it exists on
+    # macOS (Darwin) and on every supported Linux distribution. The
+    # 20-byte read keeps the leak small enough not to spam test output
+    # while still demonstrating real bytes were exfiltrated. If a
+    # future runner lacks /etc/passwd, swap the read target to any
+    # deterministically-readable file outside the mkdtemp'd cwd.
+    result = _exec_under_capture(
+        "import dataclasses\n"
+        "data = dataclasses.sys.modules['builtins']."
+        "open('/etc/passwd', 'r').read(20)\n"
+        "print(data)\n"
+    )
+    # Under v0.8.5a1: result.exit_code == 0 (the body succeeded and
+    # /etc/passwd bytes were leaked to stdout). Under the v0.9.x
+    # OS-level boundary: the body will fail (PermissionError /
+    # OSError / kernel-denied) and exit_code != 0. Asserting the
+    # post-v0.9.x property here lets the xfail marker flip cleanly.
+    assert result.exit_code != 0
 
 
 def test_eval_is_denied() -> None:

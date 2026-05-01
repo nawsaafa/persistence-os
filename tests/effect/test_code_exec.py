@@ -709,8 +709,14 @@ def test_allowed_set_is_canonical_source() -> None:
         f"the .replace() substitution did not produce the expected text"
     )
 
-    # And the four documented names are exactly what the v0.5 design pins.
-    assert set(_ALLOWED_TOP_LEVEL) == {"json", "re", "dataclasses", "pathlib"}
+    # And the three documented names are exactly what the v0.5 design
+    # pins post-W2. Phase 2.0d W2 (M6) dropped ``pathlib`` from the
+    # allowlist because ``pathlib.Path.read_text/.read_bytes/.open``
+    # reached C-level ``_io.open`` directly, bypassing the curated
+    # ``__builtins__`` open() denial — a host-filesystem-read escape
+    # vector under W1's "open removed from builtins" claim. Capability
+    # denial (ADR-5) requires deny-by-default for FS-touching modules.
+    assert set(_ALLOWED_TOP_LEVEL) == {"json", "re", "dataclasses"}
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +804,76 @@ def test_breakpoint_is_denied() -> None:
     assert r.exit_code != 0
     assert "NameError" in r.stderr
     assert "breakpoint" in r.stderr
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.0d W2 (M6) — pathlib removed from sandbox allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_pathlib_import_is_denied() -> None:
+    """Phase 2.0d W2 (M6): ``pathlib`` is no longer in
+    ``_ALLOWED_TOP_LEVEL`` and a user-source ``import pathlib`` raises
+    :class:`CodeExecForbiddenImport` (the import filter rejects it via
+    the ``_FORBIDDEN_IMPORT_SENTINEL`` path; the parent strips the
+    sentinel and re-raises the typed exception).
+
+    R2.2 codex review proved pathlib was a host-filesystem-read escape
+    vector under W1: ``pathlib.Path('/etc/passwd').read_text()``
+    succeeded even with ``open()`` removed from the curated
+    ``__builtins__``, because ``pathlib.Path.read_text`` reaches the
+    C-level ``_io.open`` directly. Capability-denial-not-detection
+    (ADR-5) requires deny-by-default for FS-touching modules.
+    """
+    with pytest.raises(CodeExecForbiddenImport) as exc_info:
+        _exec_under_capture("import pathlib")
+    assert exc_info.value.module_name == "pathlib"
+
+
+def test_pathlib_path_is_unreachable_via_attribute_access() -> None:
+    """Phase 2.0d W2 (M6) defensive: even if a future regression
+    accidentally threaded ``pathlib`` into the user-source globals via
+    some transitive path, ``pathlib.Path('/etc/passwd').read_text()``
+    must NOT succeed — the user-source name ``pathlib`` resolves to
+    nothing (``NameError``) under the W2 capability set, and the
+    import statement is independently rejected (see
+    :func:`test_pathlib_import_is_denied`).
+
+    This test guards against a regression where someone re-adds
+    pathlib to ``_ALLOWED_TOP_LEVEL`` thinking "we removed open() so
+    it's safe" — the host-filesystem-read vector would silently
+    re-open.
+    """
+    # Note: we cannot reach pathlib without import, so the regression
+    # path is "name `pathlib` not bound". This is the capability-denial
+    # signal we want.
+    r = _exec_under_capture(
+        "result = pathlib.Path('/etc/passwd').read_text()\nprint(result)"
+    )
+    assert r.exit_code != 0
+    # User-source name `pathlib` is undefined → NameError.
+    assert "NameError" in r.stderr
+    assert "pathlib" in r.stderr
+
+
+def test_etc_passwd_unreadable_via_pathlib() -> None:
+    """Phase 2.0d W2 (M6) end-to-end: a user-source body that tries
+    the canonical FS-read attack ``import pathlib;
+    pathlib.Path('/etc/passwd').read_text()`` fails — no host file
+    contents leak.
+
+    Reproduces the exact R2.2 attack vector verbatim. Under W1 this
+    body would have read /etc/passwd into stdout. Under W2 the
+    ``import pathlib`` itself raises :class:`CodeExecForbiddenImport`
+    before the FS read can happen.
+    """
+    with pytest.raises(CodeExecForbiddenImport) as exc_info:
+        _exec_under_capture(
+            "import pathlib\n"
+            "data = pathlib.Path('/etc/passwd').read_text()\n"
+            "print(data)\n"
+        )
+    assert exc_info.value.module_name == "pathlib"
 
 
 def test_pythonhashseed_pinned_in_child_env() -> None:

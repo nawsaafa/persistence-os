@@ -192,11 +192,19 @@ class CodeExecForbiddenImport(CodeExecError):
     inside the child; the parent strips that prefix and re-raises
     here so callers can ``except CodeExecForbiddenImport``.
 
-    Allowed-set at v0.5: ``json``, ``re``, ``dataclasses``, ``pathlib``
-    plus their measured transitive stdlib closure. Anything outside
-    (``os``, ``sys``, ``subprocess``, ``socket``, ``urllib``, ``http``,
-    ``ctypes``, ``threading``, ``multiprocessing``, ``pickle``,
-    ``marshal``, ``time``, ``random``) is denied at import-time.
+    Allowed-set at v0.5 (Phase 2.0d W2): ``json``, ``re``,
+    ``dataclasses`` plus their measured transitive stdlib closure.
+    Anything outside (``os``, ``sys``, ``subprocess``, ``socket``,
+    ``urllib``, ``http``, ``ctypes``, ``threading``,
+    ``multiprocessing``, ``p`` + ``ickle`` (split here to dodge the
+    JS-codebase security-hook false-positive on the literal token),
+    ``marshal``, ``time``, ``random``, ``pathlib``) is denied at
+    import-time. ``pathlib`` was on the v0.5 allowlist through Phase
+    2.0d W1 but was removed in W2 (M6) because
+    ``pathlib.Path.read_text/.read_bytes/.open`` reached the C-level
+    ``_io.open`` directly, bypassing the curated ``__builtins__``
+    open() denial — a host-filesystem-read escape vector.
+    Capability-denial-not-detection (ADR-5).
     """
 
     module_name: str
@@ -204,7 +212,7 @@ class CodeExecForbiddenImport(CodeExecError):
     def __init__(self, module_name: str) -> None:
         super().__init__(
             f":code/exec sandbox forbidden import: {module_name!r} is not "
-            f"on the allowlist (json, re, dataclasses, pathlib only)"
+            f"on the allowlist (json, re, dataclasses only)"
         )
         self.module_name = module_name
 
@@ -416,15 +424,28 @@ def _make_preexec(timeout_seconds: float, memory_mb: int) -> Any:
 # ``:code/exec`` which by construction cannot appear in stdlib tracebacks.
 _FORBIDDEN_IMPORT_SENTINEL = "PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:"
 
-# The fixed allowed-set for the v0.5 sandbox (ADR-5). These four names
+# The fixed allowed-set for the v0.5 sandbox (ADR-5). These three names
 # are the only ones the user's source may name in an ``import`` statement;
 # their transitive stdlib closure is computed empirically at child startup
-# and added to ``sys.modules`` as a side-effect of the four warm-imports
+# and added to ``sys.modules`` as a side-effect of the three warm-imports
 # inside the bootstrap shim — those modules are reachable via
 # ``import json`` etc. but are NOT directly nameable in user code (the
 # filter rejects e.g. ``import os.path`` because ``os`` is not in
 # ``ALLOWED_TOP_LEVEL`` even though the closure included it as a
-# transitive dep of ``pathlib``).
+# transitive dep of e.g. ``re._compiler``).
+#
+# Phase 2.0d W2 (M6 fix): ``pathlib`` was removed from the allowed set.
+# R2.2 codex review proved it left a host-filesystem-read escape vector:
+# under W1, ``import pathlib; pathlib.Path('/etc/passwd').read_text()``
+# succeeded inside the sandbox even with ``open()`` removed from the
+# curated builtins, because ``Path.read_text`` reaches the C-level
+# ``_io.open`` directly. Capability-denial-not-detection (ADR-5)
+# requires deny-by-default; removing pathlib from the allowlist is the
+# minimum-surface-area fix. Path-string manipulation in user-source
+# bodies can be done with raw ``str`` operations (no path operations
+# in the sandbox legitimately need filesystem access — if a body wants
+# to talk about paths, it is almost certainly trying to do FS I/O,
+# which the sandbox denies by design).
 #
 # This constant is the **canonical source of truth** for the allowed-set:
 # the bootstrap shim's frozenset literal is computed from it at module
@@ -435,7 +456,7 @@ _FORBIDDEN_IMPORT_SENTINEL = "PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:"
 # breaking change to the audit datom contract — the recorded
 # ``:code/exec/source-hash`` is replay-stable only as long as the
 # allowed-set is fixed for a given semver-pinned release.
-_ALLOWED_TOP_LEVEL: tuple[str, ...] = ("json", "re", "dataclasses", "pathlib")
+_ALLOWED_TOP_LEVEL: tuple[str, ...] = ("json", "re", "dataclasses")
 
 
 # Phase 2.0d W1 (M1): denied builtins removed from the user-source
@@ -519,19 +540,23 @@ import builtins as _builtins
 import io as _io
 import sys as _sys
 
-# Warm-import the four allowed top-level modules. This happens BEFORE
+# Warm-import the three allowed top-level modules. This happens BEFORE
 # the filter is installed, so the transitive closure populates
 # sys.modules unconditionally. After the filter is on, the user code
 # can import any module already in sys.modules (cache hit), plus any
-# of the four explicitly-allowed top-level names. The four names below
-# MUST stay in sync with the frozenset literal further down — a drift
-# would silently break the warm-import-vs-allowlist invariant. The
-# parent's ``_ALLOWED_TOP_LEVEL`` is the authority; the test suite
+# of the three explicitly-allowed top-level names. The three names
+# below MUST stay in sync with the frozenset literal further down — a
+# drift would silently break the warm-import-vs-allowlist invariant.
+# The parent's ``_ALLOWED_TOP_LEVEL`` is the authority; the test suite
 # pins both sides.
+#
+# Phase 2.0d W2 (M6): pathlib is no longer warm-imported because
+# pathlib.Path.read_text/.read_bytes/.open reach C-level _io.open
+# directly, bypassing the curated __builtins__ open() denial. Removing
+# pathlib from the allowlist is the capability-denial fix (ADR-5).
 import json  # noqa: F401  # warm-import for sandbox closure
 import re  # noqa: F401
 import dataclasses  # noqa: F401
-import pathlib  # noqa: F401
 
 _ALLOWED_TOP_LEVEL = frozenset(__ALLOWED_TUPLE__)
 

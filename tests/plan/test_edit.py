@@ -139,6 +139,27 @@ def db() -> DB:
     return _fresh_db()
 
 
+@pytest.fixture(autouse=True)
+def _audit_stack_for_edit_tests():
+    """Install the canonical audit stack for the duration of each test.
+
+    Phase 2.0d W1 (M2): :func:`persistence.txn.transaction._replay_effect_intents`
+    now raises :class:`AuditStackMissing` when a dosync queues
+    audit-emitting intents (e.g. ``:plan/edit``) but no effect runtime
+    is active. Most tests in this module call ``edit_step`` /
+    ``insert_step_*`` / ``delete_step`` which queue ``:plan/edit``
+    intents, so we install the canonical audit stack as an autouse
+    fixture. Tests that intentionally exercise the no-runtime path
+    (none currently in this file — those live in
+    ``tests/txn/test_audit_stack_missing.py``) can override.
+    """
+    from persistence.effect import canonical_audit_stack, with_runtime
+
+    rt = canonical_audit_stack(entries=[])
+    with with_runtime(rt):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Unit tests — edit_step
 # ---------------------------------------------------------------------------

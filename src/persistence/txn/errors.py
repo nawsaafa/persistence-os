@@ -96,6 +96,31 @@ class AtomInDosyncProhibited(TxnError):
     """
 
 
+class AuditStackMissing(TxnError):
+    """Raised when intent-replay finds a non-empty intent log but no
+    active effect runtime.
+
+    Phase 2.0d W1 (R2 MAJOR M2): the substrate-default audit stack
+    installed by :meth:`persistence.sdk.Substrate.open` covers every
+    canonical audit op (``:plan/edit`` / ``:fork/*`` / ``:code/exec`` /
+    ``:fold/chosen``). If a caller subverts the default (constructs a
+    raw ``DB`` directly, opens a substrate with ``audit=False``, or
+    pops the runtime mid-flight) AND queues an audit-emitting intent,
+    the commit-time replay would have silently dropped the intent under
+    the v0.5.x "no-runtime → no-op" rule. That dropped silently audited
+    work — the deterministic-replay invariant from design § 3.7 cannot
+    hold. This error is the fail-fast guard.
+
+    Adapter authors who legitimately need raw-DB-without-audit (sandbox
+    tests, byte-identity drift fixtures) should pop a runtime with no
+    audit middleware before the dosync runs — the runtime is non-empty,
+    so the no-runtime guard does not trip; intents reach the (empty)
+    handler stack and the standard ``Unhandled`` error surfaces if no
+    raw terminator is installed for the queued op. The two errors are
+    distinct in failure mode and remediation.
+    """
+
+
 __all__ = [
     "TxnError",
     "TxnRetryExhausted",
@@ -106,4 +131,5 @@ __all__ = [
     "NestedDosyncNotSupported",
     "AtomCASExhausted",
     "AtomInDosyncProhibited",
+    "AuditStackMissing",
 ]

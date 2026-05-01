@@ -14,6 +14,7 @@ from persistence.txn.atom import Atom
 from persistence.txn.errors import (
     AtomCASExhausted,
     AtomInDosyncProhibited,
+    AuditStackMissing,
     EffectInIoBlock,
     NestedDosyncNotSupported,
     RefBranchMismatch,
@@ -29,6 +30,7 @@ __all__ = [
     "Atom",
     "AtomCASExhausted",
     "AtomInDosyncProhibited",
+    "AuditStackMissing",
     "EffectInIoBlock",
     "freeze",
     "is_immutable_value",

@@ -12,6 +12,10 @@ Public surface (ARIS R3 F7): the core types/functions from
 ``persistence.effect`` directly rather than reaching into submodules.
 """
 
+from persistence.effect._audit_stack import (
+    CANONICAL_AUDIT_OPS,
+    canonical_audit_stack,
+)
 from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.effect.catalog import CATALOG, OP_NAMES, validate_args
 from persistence.effect.handlers.audit import (
@@ -91,7 +95,9 @@ __all__ = [
     "validate_args",
     # audit
     "AuditEntry",
+    "CANONICAL_AUDIT_OPS",
     "audit_entry_to_datom",
+    "canonical_audit_stack",
     "datom_to_audit_entry",
     "make_audit_handler",
     "verify_chain",

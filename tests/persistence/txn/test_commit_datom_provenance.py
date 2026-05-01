@@ -55,7 +55,31 @@ def test_commit_datom_carries_read_set_as_sorted_eids():
     assert prov[":persistence.txn/read-set"] == sorted([r1.eid, r2.eid])
 
 
+def _noop_log_write_runtime():
+    """Tiny runtime with a no-op terminator for ``:log/write``.
+
+    Phase 2.0d W1 (M2): :func:`_replay_effect_intents` raises
+    ``AuditStackMissing`` when intents are queued but no runtime is
+    active. These tests ONLY care about the shape of
+    ``:persistence.txn/intent-log`` on the commit datom (which is built
+    from ``tx.effect_intent_log`` BEFORE replay), so we install a
+    minimal runtime that swallows the queued ``:log/write`` calls at
+    replay time. The terminator is a no-op — this test does not
+    exercise the audit Merkle chain.
+    """
+    from persistence.effect.runtime import Handler, Runtime
+
+    handler = Handler(
+        name="log-write-noop",
+        wraps={":log/write"},
+        clauses={":log/write": lambda _args, _k, _ctx: None},
+    )
+    return Runtime(handlers=[handler])
+
+
 def test_commit_datom_carries_intent_log_in_call_order():
+    from persistence.effect.runtime import with_runtime
+
     db = DB()
     r = db.ref("v")
 
@@ -66,7 +90,8 @@ def test_commit_datom_carries_intent_log_in_call_order():
         tx.effect(":log/write", message="C")
         tx.assoc(r, 1)
 
-    body()
+    with with_runtime(_noop_log_write_runtime()):
+        body()
     prov = _commit_datom(db).provenance
     intent_log = prov[":persistence.txn/intent-log"]
     assert [item[":kwargs"]["message"] for item in intent_log] == ["A", "B", "C"]
@@ -74,6 +99,8 @@ def test_commit_datom_carries_intent_log_in_call_order():
 
 
 def test_intent_log_op_and_kwargs_round_trip():
+    from persistence.effect.runtime import with_runtime
+
     db = DB()
     r = db.ref("v")
 
@@ -82,7 +109,8 @@ def test_intent_log_op_and_kwargs_round_trip():
         tx.effect(":log/write", message="hi", level=2)
         tx.assoc(r, 1)
 
-    body()
+    with with_runtime(_noop_log_write_runtime()):
+        body()
     prov = _commit_datom(db).provenance
     intent_log = prov[":persistence.txn/intent-log"]
     assert intent_log == [

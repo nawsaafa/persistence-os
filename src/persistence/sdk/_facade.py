@@ -873,8 +873,27 @@ class _AuditNamespace:
 
     Exposes the audit-chain integrity probe (:func:`verify_chain`) and
     read-only access to the substrate's session-local audit entry list.
-    The list is the same in-memory ``entries`` parameter passed into
-    :func:`make_audit_handler` at substrate-open time.
+
+    **Phase 2.0d W1 (R2 MAJOR M2 fix).** The substrate's
+    ``_audit_entries`` list is the same in-memory ``entries`` parameter
+    passed into :func:`persistence.effect.make_audit_handler` by the
+    canonical audit stack installed by default at
+    :meth:`Substrate.open` time
+    (:func:`persistence.effect.canonical_audit_stack`). Under the W1
+    default-on regime, every audit-emitting op committed inside the
+    substrate (``:plan/edit`` / ``:fork/*`` / ``:code/exec`` /
+    ``:fold/chosen``) appends an :class:`persistence.effect.AuditEntry`
+    here at intent-replay time; :func:`verify_chain` reads back a valid
+    Merkle chain across the substrate's lifetime.
+
+    When ``Substrate.open(uri, audit=False)`` opted out, the entry list
+    stays empty unless an adapter installs its own audit middleware via
+    ``s.escape.effect.handlers``; ``s.escape``'s
+    ``:sdk/escape-hatch-access`` records use a different shape (plain
+    dicts with ``op`` / ``args``, not :class:`AuditEntry`) and are not
+    expected to verify_chain (the wire form is documented as
+    ``@experimental`` per ADR-1 W3 NIT-5). Calling
+    :func:`verify_chain` on a list mixing both shapes is undefined.
     """
 
     def __init__(self, substrate: "Substrate") -> None:
@@ -882,13 +901,38 @@ class _AuditNamespace:
 
     def verify_chain(self, entries=None) -> bool:
         """Re-verify the Merkle chain on a sequence of audit entries;
-        defaults to the substrate's session-local entry list. Thin
-        pass-through to :func:`persistence.effect.verify_chain`.
+        defaults to the substrate's session-local AuditEntry chain
+        (the canonical-handler output, dict-shaped escape-hatch
+        entries excluded). Thin pass-through to
+        :func:`persistence.effect.verify_chain`.
+
+        Phase 2.0d W1 (m2): when no ``entries`` argument is passed,
+        the default source is the substrate's
+        ``_canonical_audit_entries`` list — the AuditEntry-only chain
+        produced by the canonical audit stack installed at
+        :meth:`Substrate.open(audit=True)`. Under
+        ``Substrate.open(audit=False)`` the canonical chain is absent,
+        so this method falls back to filtering ``_audit_entries`` for
+        :class:`AuditEntry` instances; under that opt-out regime, an
+        empty chain trivially verifies.
         """
-        from persistence.effect import verify_chain
+        from persistence.effect import AuditEntry, verify_chain
 
         if entries is None:
-            entries = self._substrate._audit_entries
+            canonical = self._substrate._canonical_audit_entries
+            if canonical is not None:
+                # audit=True: read straight off the AuditEntry-only
+                # mirror list. verify_chain iterates [-1].id without
+                # tripping on dict-shaped union entries.
+                entries = list(canonical)
+            else:
+                # audit=False fallback: filter the union list for
+                # AuditEntry records. Adapter-installed audit
+                # handlers (via s.escape.effect) land here.
+                entries = [
+                    e for e in self._substrate._audit_entries
+                    if isinstance(e, AuditEntry)
+                ]
         return verify_chain(entries)
 
     def entries(self):
@@ -897,6 +941,15 @@ class _AuditNamespace:
         The caller gets a tuple (immutable) so adapter code that wants
         to filter / window the chain cannot accidentally mutate the
         substrate's ledger. Order is append-order.
+
+        Phase 2.0d W1 (m2): the returned tuple may interleave
+        :class:`persistence.effect.AuditEntry` records (canonical
+        audit-stack output, default-on under
+        :meth:`Substrate.open`) with plain dict envelopes
+        (``s.escape.*`` first-access telemetry, shape:
+        ``{"op": ":sdk/escape-hatch-access", "args": {...}}``). Callers
+        that want only the chain-verifiable subset should filter on
+        ``isinstance(e, AuditEntry)``.
         """
         return tuple(self._substrate._audit_entries)
 
@@ -1096,6 +1149,42 @@ _SUBSTRATE_PUBLIC_DIR: tuple[str, ...] = (
 )
 
 
+class _MirroringEntryList(list):
+    """A list subclass that mirrors every ``append`` into a sibling list.
+
+    Phase 2.0d W1 (M2): the canonical audit handler installed by
+    :meth:`Substrate.open` writes :class:`persistence.effect.AuditEntry`
+    records into a dedicated AuditEntry-only list (so
+    ``s.audit.verify_chain()`` can iterate ``[-1].id`` cleanly without
+    tripping on the dict-shaped ``:sdk/escape-hatch-access`` entries
+    that ``s.escape.*`` appends per ADR-1 W3 NIT-5). To preserve the
+    pre-W1 contract that ``s.audit.entries()`` returns the *union* of
+    escape-hatch dicts + audit chain entries, this list wraps each
+    canonical-handler append by also pushing into the substrate's
+    public ``_audit_entries`` list.
+
+    The mirror direction is one-way (canonical → public). Escape-hatch
+    appends go directly to the public list and do NOT reflect back
+    into the canonical-only list — they are not chain-verifiable.
+
+    The class is intentionally minimal: only ``append`` is overridden
+    because that is the only mutation the audit handler performs. If
+    a future audit-handler revision uses ``extend`` or slice
+    assignment, those paths must be added here too (otherwise the
+    mirror desyncs).
+    """
+
+    __slots__ = ("_mirror",)
+
+    def __init__(self, mirror: list) -> None:
+        super().__init__()
+        self._mirror = mirror
+
+    def append(self, item: Any) -> None:  # type: ignore[override]
+        super().append(item)
+        self._mirror.append(item)
+
+
 @stable("v0.8")
 class Substrate:
     """Curated namespace + lifecycle facade for the v0.8 adapter contract.
@@ -1122,6 +1211,25 @@ class Substrate:
 
     Per ADR-12 the SDK does NOT auto-start a REPL server; adapter
     authors call ``s.repl.serve(...)`` explicitly when they want one.
+
+    **Audit-chain installation (Phase 2.0d W1 / R2 MAJOR M2 fix).**
+    ``Substrate.open(uri)`` installs the canonical audit handler stack
+    by default — the substrate's effect runtime is wired with
+    :func:`persistence.effect.canonical_audit_stack` covering every
+    audit-emitting op shipped through Phase 2.0a / 2.0b / 2.0c / 2.0c-ext
+    (``:plan/edit`` / ``:fork/*`` / ``:code/exec`` / ``:fold/chosen``).
+    The runtime is activated via ``persistence.effect.runtime._active``
+    at substrate construction time and released in :meth:`close`, so
+    audit coverage holds for the substrate's lifetime without requiring
+    callers to wrap usage in a ``with with_runtime(...):`` block.
+
+    Pass ``audit=False`` only for sandbox tests where Merkle-chain
+    enforcement is undesirable; in that regime, do not queue
+    audit-emitting intents on a transaction (or you will get
+    :class:`persistence.txn.AuditStackMissing` at commit time per the
+    W1 fail-fast guard in :func:`persistence.txn.transaction._replay_effect_intents`).
+    Lower-level :class:`persistence.fact.DB` instances do NOT install
+    the audit stack — only the SDK-level ``Substrate`` does.
     """
 
     # Class attribute pinning the stability profile — read by the spec
@@ -1136,13 +1244,39 @@ class Substrate:
         _db: Any,
         _runtime: Any,
         _audit_entries: Optional[list] = None,
+        _audit_runtime_token: Any = None,
+        _canonical_audit_entries: Optional[list] = None,
     ) -> None:
         # Private constructor; adapter authors use :meth:`open`.
         self._db = _db
         self._runtime = _runtime
-        self._audit_entries: list[Any] = (
-            list(_audit_entries) if _audit_entries is not None else []
+        # Phase 2.0d W1 (M2): the public ``_audit_entries`` list IS the
+        # union surface (dict-shaped escape-hatch entries from
+        # ``s.escape.*`` + :class:`AuditEntry` records mirrored from
+        # the canonical handler's chain). Backward-compatible with the
+        # pre-W1 ``s.audit.entries()`` contract.
+        if _audit_entries is None:
+            self._audit_entries: list[Any] = []
+        else:
+            # Phase 2.0d W1 (M2): the open() path passes the same list
+            # the canonical-handler mirror reflects into; retain
+            # identity so ``s.audit.entries()`` sees post-commit
+            # AuditEntry mirrors.
+            self._audit_entries = _audit_entries
+        # Phase 2.0d W1 (M2): the AuditEntry-only chain backing
+        # ``s.audit.verify_chain()``. None when audit=False (or the
+        # pre-W1 path passed nothing). The list IS the
+        # :class:`_MirroringEntryList` instance that the canonical
+        # audit handler writes into; verify_chain reads ``[-1].id``
+        # cleanly here without tripping on dict-shaped union entries.
+        self._canonical_audit_entries: Optional[list] = (
+            _canonical_audit_entries
         )
+        # Phase 2.0d W1 (M2): when ``Substrate.open(audit=True)`` activates
+        # the canonical audit stack, the resulting ContextVar token is
+        # threaded back here so :meth:`close` can release it. ``None``
+        # means "no token to release" (audit=False or pre-W1 callers).
+        self._audit_runtime_token: Any = _audit_runtime_token
         self._closed = False
         # Per-substrate session id used in ADR-1 W3 NIT-5 escape-hatch
         # audit-entry payloads. v0.8 uses the system uuid generator at
@@ -1150,9 +1284,10 @@ class Substrate:
         # shape (which is itself ``@experimental`` per ADR-1 W3 NIT-5)
         # so it is not a contract surface for adapter authors. Routing
         # through ``:sys/random`` would require booting a runtime stack
-        # at substrate-open time, which the v0.8 ``Substrate.open`` is
-        # explicitly NOT in charge of (per ADR-1 + the design doc
-        # § 4 ADR-1 W2 "no pre-installed audit handler" closure).
+        # at substrate-open time — Phase 2.0d W1 added that runtime
+        # boot for the audit-default install, but the session_id stays
+        # on uuid4 because it is opaque to adapters and need not be
+        # replay-deterministic across substrate constructions.
         self._session_id = uuid.uuid4().hex  # noqa: wall-clock
         # Subsurfaces are bound at construction time so each call site
         # gets the same namespace instance back (identity stability is
@@ -1170,7 +1305,7 @@ class Substrate:
     # Lifecycle
     # ------------------------------------------------------------------
     @classmethod
-    def open(cls, uri: str = "memory") -> "Substrate":
+    def open(cls, uri: str = "memory", *, audit: bool = True) -> "Substrate":
         """Open a substrate against the given store URI.
 
         Per ADR-9 the URI may be:
@@ -1182,16 +1317,31 @@ class Substrate:
 
         URI parsing + backend dispatch are delegated to
         :func:`persistence.sdk.uri.open_store`; SDK2 wires the resulting
-        ``Store`` into a fresh :class:`persistence.fact.DB` and a bare
-        :class:`persistence.effect.Runtime`. The runtime is intentionally
-        empty in v0.8 — adapter authors who need an audit handler stack
-        push one onto ``s.escape.effect.handlers`` (the design doc § 4
-        docstring claims pre-installed audit but ADR-1 W2 escape-hatch
-        telemetry pushed handler customization to the escape-hatch
-        path; the curated ``s.effect`` surface stays small).
+        ``Store`` into a fresh :class:`persistence.fact.DB`.
+
+        **Audit-stack installation (Phase 2.0d W1 default).** When
+        ``audit=True`` (default), the substrate's effect runtime is
+        built via :func:`persistence.effect.canonical_audit_stack` and
+        activated via
+        ``persistence.effect.runtime._active.set(rt)`` for the
+        substrate's lifetime; :meth:`close` releases the activation.
+        The audit handler's :class:`AuditEntry` records are appended
+        to ``Substrate._audit_entries`` (the same list backing
+        ``s.audit.entries()`` and ``s.audit.verify_chain()``).
+
+        When ``audit=False``, a bare empty :class:`persistence.effect.Runtime`
+        is constructed and NOT activated — the substrate ships with no
+        audit middleware. This is intended for sandbox tests where
+        Merkle-chain enforcement is undesirable; do not queue
+        audit-emitting intents on a transaction in that regime, or
+        :class:`persistence.txn.AuditStackMissing` will fire at commit
+        time (W1 fail-fast guard).
 
         Args:
             uri: store URI per ADR-9; default ``"memory"``.
+            audit: install the canonical audit handler stack by
+                default. Pass ``False`` only when Merkle-chain
+                enforcement is undesirable. Default ``True``.
 
         Returns:
             a fresh :class:`Substrate` ready for use.
@@ -1201,13 +1351,48 @@ class Substrate:
             BackendNotInstalled:  per :func:`open_store`.
             ValueError:           per :func:`open_store`.
         """
-        from persistence.effect import Runtime
+        from persistence.effect import Runtime, canonical_audit_stack
+        from persistence.effect.runtime import _active as _effect_active
         from persistence.fact import DB
 
         store = open_store(uri)
         db = DB(store)
-        runtime = Runtime()
-        return cls(_db=db, _runtime=runtime)
+        # Phase 2.0d W1 (M2): the public ``_audit_entries`` list is the
+        # union surface (escape-hatch dicts + AuditEntry records) per
+        # the pre-W1 ``s.audit.entries()`` contract. The canonical
+        # audit handler writes AuditEntry records into a sibling
+        # mirror list whose ``append`` reflects into the public union;
+        # the handler iterates that mirror's ``[-1].id`` cleanly
+        # without tripping on dict-shaped escape-hatch entries.
+        audit_entries: list[Any] = []
+        if audit:
+            canonical_entries = _MirroringEntryList(mirror=audit_entries)
+            runtime = canonical_audit_stack(canonical_entries)
+            # Activate for the substrate's lifetime. The token is
+            # released in :meth:`close`. We do NOT use the
+            # ``with_runtime`` context manager here — the substrate is
+            # not necessarily used as a context manager (callers may
+            # ``Substrate.open()`` and ``s.close()`` explicitly), so we
+            # manage the ContextVar manually. The async/threading
+            # caveat in :mod:`persistence.txn.intents` (ContextVars
+            # don't propagate to raw threads) applies here too: a
+            # substrate opened in thread A will not auto-extend its
+            # audit runtime into a child thread spawned via
+            # ``threading.Thread`` from thread A. Adapters running
+            # multi-threaded substrates must re-activate per thread
+            # (or use ``with_runtime`` inline at the boundary).
+            audit_runtime_token = _effect_active.set(runtime)
+        else:
+            runtime = Runtime()
+            audit_runtime_token = None
+            canonical_entries = None
+        return cls(
+            _db=db,
+            _runtime=runtime,
+            _audit_entries=audit_entries,
+            _audit_runtime_token=audit_runtime_token,
+            _canonical_audit_entries=canonical_entries,
+        )
 
     def close(self) -> None:
         """Release substrate resources. Idempotent.
@@ -1217,6 +1402,14 @@ class Substrate:
         store exposes a ``close``) and marks the substrate as closed so
         subsequent subsurface access raises :class:`RuntimeError`.
 
+        Phase 2.0d W1 (M2): if the substrate was opened with
+        ``audit=True`` (default), the canonical audit runtime token
+        captured at construction is released here so the ContextVar
+        does not leak across substrate lifetimes. The token release
+        leaves the prior context unchanged — if a caller manually
+        wrapped the substrate in ``with_runtime(other_rt)``, the outer
+        runtime is preserved.
+
         REPL server lifetimes are NOT auto-shut down by ``close()`` per
         ADR-12 — adapter authors who started a server via
         ``s.repl.serve(...)`` are responsible for its teardown. (The
@@ -1225,6 +1418,19 @@ class Substrate:
         if self._closed:
             return
         self._closed = True
+        # Phase 2.0d W1 (M2): release the audit runtime token captured
+        # at open() time. Best-effort — if the ContextVar was already
+        # reset out of band (e.g. caller exited a nested with_runtime
+        # block in the wrong order), swallow the error rather than
+        # double-failing on close.
+        if self._audit_runtime_token is not None:
+            from persistence.effect.runtime import _active as _effect_active
+
+            try:
+                _effect_active.reset(self._audit_runtime_token)
+            except (ValueError, LookupError):  # pragma: no cover
+                pass
+            self._audit_runtime_token = None
         # Best-effort store close; not every Store impl exposes one.
         store = getattr(self._db, "store", None)
         store_close = getattr(store, "close", None)

@@ -548,9 +548,21 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
 def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
     """Replay ``tx.effect_intent_log`` through the active effect runtime.
 
-    No-op when no runtime is active (intents queue but never fire — the
-    caller is responsible for setting up the runtime if it wants effects
-    to run).
+    Phase 2.0d W1 (R2 MAJOR M2 fix): when ``tx.effect_intent_log`` is
+    non-empty AND no runtime is active, raise
+    :class:`persistence.txn.AuditStackMissing` rather than silently
+    dropping the intents. The pre-W1 behaviour ("return early if no
+    runtime") was a footgun: code paths that queued ``:plan/edit`` /
+    ``:fork/*`` / ``:code/exec`` / ``:fold/chosen`` intents on the
+    transaction would commit cleanly and then silently lose the audit
+    datoms whenever the substrate's default audit-stack install was
+    subverted. The replay-byte-identity invariant from design § 3.7
+    cannot hold under that regime.
+
+    The empty-intent-log + no-runtime case stays a no-op — that is the
+    common "raw fact-only dosync" path (no effects queued, no runtime
+    needed). The combination "empty intent log + active runtime" is
+    also a no-op (the for-loop just does not iterate).
 
     v0.5.1 N2: passes ``commit_id`` via the typed ``txn_commit`` kwarg
     instead of stuffing ``"_txn_commit"`` into the intent's kwargs dict.
@@ -562,9 +574,27 @@ def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
     back to ``intent.kwargs``.
     """
     from persistence.effect.runtime import _active as _effect_active
+    from persistence.txn.errors import AuditStackMissing
 
     rt = _effect_active.get()
     if rt is None:
+        if tx.effect_intent_log:
+            raise AuditStackMissing(
+                f"dosync committed with {len(tx.effect_intent_log)} "
+                f"queued effect intent(s) but no active effect runtime "
+                f"to replay them through. The intents would have been "
+                f"silently dropped under the pre-W1 'no-runtime → no-op' "
+                f"rule, breaking the audit-replay invariant from design "
+                f"§ 3.7 + ADR-6. Either install an audit handler stack "
+                f"(persistence.effect.canonical_audit_stack(entries) is "
+                f"the substrate-default factory; activate via "
+                f"persistence.effect.with_runtime(rt)), or use "
+                f"persistence.sdk.Substrate.open(uri) which installs "
+                f"the canonical stack by default. Pass "
+                f"Substrate.open(uri, audit=False) only for sandbox "
+                f"tests where Merkle-chain enforcement is undesirable; "
+                f"in that regime, do not queue audit-emitting intents."
+            )
         return
     for intent in tx.effect_intent_log:
         rt.perform(intent.op, dict(intent.kwargs), txn_commit=commit_id)

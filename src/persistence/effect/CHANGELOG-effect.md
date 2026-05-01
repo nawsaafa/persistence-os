@@ -2,6 +2,44 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W2 fix-pass
+
+Phase 2.0d W2 (R2.2 ARIS hard-mode fix-pass) closes the effect-side
+findings from the codex review at HEAD `8e06fa1` after W1 landed.
+
+### Fixed
+
+- **R2.2 M6 — `:code/exec` sandbox host-filesystem-read via
+  `pathlib`.** The W1 (M1) fix removed `open` from the curated
+  user-source `__builtins__`, but `pathlib` stayed in
+  `_ALLOWED_TOP_LEVEL` — so `import pathlib;
+  pathlib.Path('/etc/passwd').read_text()` succeeded inside the
+  sandbox because `pathlib.Path.read_text/.read_bytes/.open` reach
+  the C-level `_io.open` directly. Capability-denial-not-detection
+  (ADR-5) requires deny-by-default for FS-touching modules.
+  Removed `pathlib` from `_ALLOWED_TOP_LEVEL`:
+  `("json", "re", "dataclasses", "pathlib")` →
+  `("json", "re", "dataclasses")`. The bootstrap-shim warm-import
+  block dropped `import pathlib`; the `repr(_ALLOWED_TOP_LEVEL)`
+  substitution at module load time keeps the parent and child in
+  sync. `CodeExecForbiddenImport` docstring + error message
+  updated to reflect the three-name allowlist with explicit
+  call-out of pathlib's removal. Three new tests:
+  `test_pathlib_import_is_denied` (positive: `import pathlib`
+  raises `CodeExecForbiddenImport`),
+  `test_pathlib_path_is_unreachable_via_attribute_access`
+  (defensive: user-source name `pathlib` is unbound),
+  `test_etc_passwd_unreadable_via_pathlib` (end-to-end:
+  reproduces the R2.2 attack vector verbatim).
+
+### Behaviour change
+
+- User-source bodies that imported `pathlib` under v0.5 / W1 will
+  now raise `CodeExecForbiddenImport`. Path-string manipulation
+  legitimately fits inside `str` operations; if a body wants to
+  do path I/O it is almost certainly trying to read host files,
+  which the sandbox denies by design (ADR-5).
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W1 fix-pass
 
 Phase 2.0d W1 (R2 ARIS hard-mode fix-pass) closes the effect-side

@@ -526,23 +526,30 @@ def fold_into(
     # write_set + commute reapply + commit datom). An outer raise
     # discards the whole staged log along with the rest of the txn.
     # The :fork/* audit datoms already ride the outer commit via
-    # tx.effect (Phase 2.0a precedent); ``provenance`` is captured
-    # for the M5+ commit-provenance work but currently unused at the
-    # staging layer because the txn-level provenance is shared.
+    # tx.effect (Phase 2.0a precedent).
+    #
+    # Phase 2.0d W2 (m6): the pre-W2 implementation constructed a
+    # ``prov_for_batch`` dict (``{"source": "fold_into", ...}``) and
+    # bound it to ``_`` — the value was constructed and then dropped.
+    # That was dead code. ``transact_batch`` accepts ONE provenance
+    # dict per call, and the outer dosync's commit path already
+    # supplies ``_build_commit_provenance(tx, commit_id)`` for the
+    # whole batch (write_set + commute reapply + staged_facts +
+    # commit datom). Per-staged-fact provenance cannot be expressed
+    # at the ``transact_batch`` layer without substrate-level work
+    # (out of scope for the fix-pass).
+    #
+    # The ``provenance`` argument is still accepted on the public
+    # ``fold_into`` signature for API forward-compat, and is forwarded
+    # to ``db.fork`` (line 473) — though ``DB.fork`` itself does not
+    # currently consume it (see ``_fork.py:436`` "not used by DB.fork
+    # itself"). Replay-debug consumers identify fold_into-origin
+    # chosen-branch facts via the ``:fork/chosen`` audit datom's
+    # ``txn_commit`` field, which rides the existing Merkle chain at
+    # ``effect/handlers/audit.py``; the chosen ``staged_facts`` share
+    # that commit_id by construction (single ``transact_batch`` call).
     chosen_fork_idx = fork_result.chosen_index
     chosen_facts = per_branch_facts.get(chosen_fork_idx, [])
-
-    # Default provenance carries a ``"source": "fold_into"`` tag so
-    # audit consumers can identify chosen-branch-emitted datoms. The
-    # tag is currently advisory because tx.add_facts shares the
-    # outer txn's commit-time provenance dict; future revisions may
-    # thread per-staged-fact provenance through the staging API.
-    if provenance is None:
-        prov_for_batch: Optional[dict] = {"source": "fold_into"}
-    else:
-        prov_for_batch = dict(provenance)
-        prov_for_batch.setdefault("source", "fold_into")
-    _ = prov_for_batch  # reserved for future per-staged-fact provenance
 
     if chosen_facts:
         tx.add_facts(chosen_facts)

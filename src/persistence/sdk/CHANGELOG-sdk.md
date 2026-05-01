@@ -1,5 +1,71 @@
 # persistence.sdk CHANGELOG
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W2 fix-pass
+
+Phase 2.0d W2 (R2.2 ARIS hard-mode fix-pass) closes 2 NEW MAJORs +
+2 NEW MINORs surfaced by the codex review at HEAD `8e06fa1` after
+W1 landed. R2.2 raw at `/tmp/aris-r2-2-v0.8.5a1-raw.txt`.
+
+### Fixed
+
+- **R2.2 M5 — `AuditStackMissing` broke dosync atomicity (W1
+  mis-architecture).** The W1 implementation raised
+  `AuditStackMissing` from inside `_replay_effect_intents` AFTER
+  `db.transact_batch` had already committed the body's facts —
+  refs carried committed values despite the exception, audit
+  datoms were silently lost. The W2 fix hoists the check to a
+  PRE-commit gate at the top of `_commit_attempt` (Commit gate 0,
+  before spec-validate / lock / transact_batch). True all-or-
+  nothing: on `AuditStackMissing` no facts (refs / commute reapply
+  / staged fold_into facts / commit datom) land in `db.log()`.
+  New helper `persistence.txn._runtime_active()` is the shared
+  predicate for the pre-gate and the post-commit replay path.
+  `_replay_effect_intents`'s post-commit raise is kept as
+  defense-in-depth (unreachable under the normal commit_attempt
+  flow). `tests/txn/test_audit_stack_missing.py` extended:
+  `test_intent_log_without_runtime_raises` now asserts `db.log()`
+  length is unchanged + `view.entity(r.eid) == {}`; new
+  `test_audit_stack_missing_pre_gates_before_transact_batch` spies
+  on `db.transact_batch` and asserts call_count == 0 when the gate
+  trips.
+- **R2.2 m6 — `fold_into` provenance dropped (cleanup).** The W1
+  `prov_for_batch` construction in `src/persistence/sdk/_fold_into.py`
+  was dead code (built then bound to `_`). Per-staged-fact
+  provenance cannot be expressed at the `transact_batch` layer
+  (one provenance dict per call). Removed the dead block; comment
+  updated to document the rationale and point at the
+  `:fork/chosen` audit datom's `txn_commit` field as the load-
+  bearing trace for replay/debug consumers. `provenance`
+  argument is still accepted on the `fold_into` signature for
+  forward-compat (still forwarded to `db.fork`).
+
+### Documentation
+
+- **R2.2 PARTIAL M4 + m5 — `:code/exec` docstring drift.** Module
+  docstring (`src/persistence/effect/handlers/code.py:24`)
+  switched from "fresh interpreter via `sys.executable -I -S`" to
+  "`-s -P -S`" with the W1 rationale (PYTHONHASHSEED inheritance).
+  Capability-denial layer 4 updated to reflect M6 (pathlib
+  removed). New layer 5 documents the W1 (M1) curated
+  `__builtins__` denial set and the explicit retention of
+  `__import__` (IMPORT_NAME opcode resolution). Layer 7 (working
+  dir) corrected — RLIMIT_FSIZE=0 only denies writes; reads are
+  denied at the capability layer (no `open`, no `pathlib`, no
+  `os`). Bootstrap-shim comment (line 652 region) corrected: the
+  W1 comment listed `__import__` in the denied builtins set,
+  which was wrong — the actual `_DENIED_BUILTINS` tuple has six
+  names and `__import__` is intentionally retained. Comment
+  rewritten with the IMPORT_NAME rationale.
+- **AuditStackMissing class docstring** (`src/persistence/txn/errors.py`)
+  tightened opening line ("a dosync attempts to commit with"
+  rather than "intent-replay finds") and added a Phase 2.0d W2
+  paragraph documenting the pre-commit hoist and the all-or-
+  nothing atomicity semantics.
+- **`test_open_is_denied` docstring** tightened — the "host-FS-
+  reads denied" narrative is honest only post-M6 (because pathlib
+  was the open()-bypass vector). Added cross-reference to
+  `test_pathlib_import_is_denied`.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W1 fix-pass
 
 Phase 2.0d W1 (R2 ARIS hard-mode fix-pass) closes 4 MAJORs + 4 MINORs

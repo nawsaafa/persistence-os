@@ -516,24 +516,37 @@ def fold_into(
         # User fn legitimately raised under "abort" -> propagate as-is.
         raise
 
-    # ---- Commit chosen branch's facts inside the outer dosync. ---------
+    # ---- Stage chosen branch's facts onto the outer txn. ---------------
+    # Phase 2.0d W1 (M3): pre-W1 we called ``db.transact_batch`` here,
+    # which committed immediately mid-dosync — that broke atomicity:
+    # if the outer body raised after fold_into returned, the chosen-
+    # branch facts were already committed and survived the rollback.
+    # Now we queue them onto ``tx.staged_facts`` so they ride the
+    # outer dosync's single atomic transact_batch (alongside the
+    # write_set + commute reapply + commit datom). An outer raise
+    # discards the whole staged log along with the rest of the txn.
+    # The :fork/* audit datoms already ride the outer commit via
+    # tx.effect (Phase 2.0a precedent); ``provenance`` is captured
+    # for the M5+ commit-provenance work but currently unused at the
+    # staging layer because the txn-level provenance is shared.
     chosen_fork_idx = fork_result.chosen_index
     chosen_facts = per_branch_facts.get(chosen_fork_idx, [])
 
     # Default provenance carries a ``"source": "fold_into"`` tag so
-    # audit consumers can identify chosen-branch-emitted datoms.
-    prov_for_batch: Optional[dict]
+    # audit consumers can identify chosen-branch-emitted datoms. The
+    # tag is currently advisory because tx.add_facts shares the
+    # outer txn's commit-time provenance dict; future revisions may
+    # thread per-staged-fact provenance through the staging API.
     if provenance is None:
-        prov_for_batch = {"source": "fold_into"}
+        prov_for_batch: Optional[dict] = {"source": "fold_into"}
     else:
         prov_for_batch = dict(provenance)
         prov_for_batch.setdefault("source", "fold_into")
+    _ = prov_for_batch  # reserved for future per-staged-fact provenance
 
-    pre_log_len = sum(1 for _ in db.store.all_datoms())
     if chosen_facts:
-        db.transact_batch(chosen_facts, prov_for_batch)
-    post_log_len = sum(1 for _ in db.store.all_datoms())
-    committed_count = max(0, post_log_len - pre_log_len)
+        tx.add_facts(chosen_facts)
+    committed_count = len(chosen_facts)
 
     # Assemble FoldIntoResult.
     successful_indices = sorted(per_branch_score.keys())

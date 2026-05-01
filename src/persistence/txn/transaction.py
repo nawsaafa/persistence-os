@@ -65,6 +65,19 @@ class Transaction:
     # over commute at commit-time (case 2); keeping them separate keeps
     # that invariant explicit at the data-structure level.
     _commute_eager: dict[Ref, Any] = field(default_factory=dict)
+    # Phase 2.0d W1 (M3) — opaque fact dicts staged for commit-time
+    # transact_batch. Populated by surfaces that need to atomically
+    # commit "extra" facts outside the ref-write_set model (e.g.
+    # ``s.txn.fold_into`` queues the chosen branch's facts here so
+    # they ride the outer dosync commit and roll back if the outer
+    # raises). Each entry has the same shape as
+    # :meth:`persistence.fact.DB.transact_batch`'s ``facts`` arg.
+    # The list is appended to in body-order; commit-time emission
+    # preserves order. Pre-W1 callers that bypassed the txn's commit
+    # path via direct ``db.transact_batch`` mid-dosync no longer
+    # need to do so — and the bypass was unsafe under retry / outer
+    # raise.
+    staged_facts: list[dict] = field(default_factory=list)
     commit_id: str | None = None
 
     def now(self) -> datetime:
@@ -93,6 +106,40 @@ class Transaction:
                 f"Use persistence.txn.freeze(...) or wrap in pyrsistent."
             )
         self.write_set[ref] = value
+
+    def add_facts(self, facts: list[dict]) -> None:
+        """Phase 2.0d W1 (M3) — stage opaque fact dicts for commit-time
+        atomic batch.
+
+        ``facts`` has the same shape :meth:`persistence.fact.DB.transact_batch`
+        accepts: a list of dicts with ``e`` / ``a`` / ``v`` keys (and
+        optional ``valid_from`` / ``valid_to`` / ``op``). The dicts
+        are stored on ``tx.staged_facts`` in append order; at commit
+        time they ride the same atomic ``transact_batch`` call as the
+        ref write_set + commute reapply + commit datom — so an
+        outer-dosync raise rolls them back too.
+
+        This is the supported path for surfaces that need to commit
+        facts without going through ``tx.assoc`` / ``tx.alter`` (e.g.
+        ``s.txn.fold_into`` queueing the chosen branch's facts after
+        ``DB.fork`` has resolved). Pre-W1 callers used
+        ``db.transact_batch`` mid-dosync, which committed
+        immediately and broke atomicity under outer-raise / retry.
+
+        Args:
+            facts: list of fact dicts to stage. The list is shallow-
+                copied here so subsequent caller mutation does not
+                reach the txn's staged log.
+        """
+        if not isinstance(facts, list):
+            raise TypeError(
+                f"tx.add_facts: facts must be a list, got "
+                f"{type(facts).__name__}"
+            )
+        # Shallow-copy each dict so caller cannot mutate post-stage.
+        # The dict shape is opaque from this layer's perspective —
+        # commit-time spec validation lands in transact_batch.
+        self.staged_facts.extend(dict(f) for f in facts)
 
     def effect(self, op: str, **kwargs: Any) -> None:
         """Queue an effect intent to be replayed atomically at commit.
@@ -652,9 +699,16 @@ def _commit_attempt(tx: "Transaction") -> bool:
         # (case 2: explicit write wins).
         commute_facts, _resolved = _build_commute_facts(tx)
         # Apply atomically as one db.transact() — write_set + commute
-        # reapply + commit datom. ``facts`` always contains at least
-        # the commit datom, so no guard.
-        facts = write_facts + commute_facts + [commit_fact]
+        # reapply + staged_facts (Phase 2.0d W1 M3) + commit datom.
+        # ``facts`` always contains at least the commit datom, so no
+        # guard. Phase 2.0d W1 (M3): ``tx.staged_facts`` is appended
+        # by surfaces like ``s.txn.fold_into`` that need to commit
+        # opaque fact dicts atomically with the outer dosync; they
+        # ride this single transact_batch so an outer raise rolls
+        # them back along with the ref writes.
+        facts = (
+            write_facts + commute_facts + list(tx.staged_facts) + [commit_fact]
+        )
         tx.db.transact_batch(facts, provenance=provenance)
     tx.commit_id = commit_id
     _replay_effect_intents(tx, commit_id)

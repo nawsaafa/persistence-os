@@ -266,7 +266,8 @@ For "what if I rewind to step 5 and change the prompt" demos, a starting checkpo
 | `:git/commit` / `:git/branch` / `:git/log` / `:git/status` | `{argv, repo_path, ref}` | `{output, exit, oid_if_any}` | read recorded result; do **not** mutate repo | OID + output match | re-exec requires repo snapshot |
 | `:repl/request` (pause/snapshot/branch/fold/commit) | `{op, op_args, session_id, request_id, capability_token_fingerprint}` | `{op_result_payload, request_id}` | read recorded request, **re-inject** at the recorded decision boundary, read recorded response | request payload + response payload match | re-exec supported (the directive payload is the input; the agent's response to a re-injected payload runs against re-injected upstream effects) |
 | `:plan/edit` | `{plan_id, step_id, before_op_hash, after_op_hash, txn_id}` | n/a (audit-only) | read recorded edit; reconstruct edit history | hash chain matches | re-exec applies edits from log |
-| `:fold/probe` `:fold/branch` `:fold/score` `:fold/chosen` (#145) | `{probe_body_sha256, branch_ids[], seed}` | `{scores[], chosen_branch_id}` | read recorded scores + chosen | score order + chosen match | re-exec runs probe under audit-replayed sub-effects |
+| `:fold/chosen` (#145, foldl-with-marker pattern) | `{chosen_index, chosen_score, all_scores, branch_count}` | n/a (audit-only) | read recorded chosen-marker | chosen-marker matches across replays | re-exec runs `DB.fold` under audit-replayed sub-effects; non-chosen branches' facts persist (fold is foldl/reduce, not speculate-rollback) |
+| `:fork/probe` `:fork/branch` `:fork/score` `:fork/chosen` (#145ext, speculate-rollback-pick pattern) | `{seed_hash, items_hash, fn_hash, choose_hash, branch_count}` (probe); `{branch_index, branch_id, item_hash, branch_state_hash}` × N (branch); `{branch_index, score_value, score_hash}` × N (score); `{chosen_index, chosen_branch_id, chosen_state_hash}` (chosen) | n/a (audit-only) | read recorded probe + branch + score + chosen sequence | full 4-datom sequence is byte-identical across replays in canonical order (probe → N×branch → N×score → chosen); only chosen branch's facts persist | re-exec runs `fn`/`choose` under audit-replayed sub-effects (deferred to v0.10 — landing alongside FS-snapshot work; current ship is audit-replay only) |
 
 **REPL directives as first-class input log.** `coder.pause`, `coder.snapshot`, `coder.context_at`, `coder.branch`, `coder.fold`, `coder.commit` (§ 3.6) each emit a `:repl/request` datom with canonical-JSON payload at the moment the directive enters the agent's decision boundary, and a `:repl/response` datom on completion. G6/G7 byte-identity replay re-injects the recorded `:repl/request` payloads at the same decision boundary in the trajectory; the agent's downstream effects are then audit-replayed. Without this datom shape the REPL feature is non-falsifiable; with it, the most differentiated UX surface is provable.
 
@@ -308,17 +309,29 @@ The capability-denial set:
 
 **Falsifiable acceptance gate:** property test — for any code body C compatible with the capability-denial set, byte-identity replay yields the same `:code/output` datoms across replays. The complementary negative test: a body that imports a non-allowlisted module (or attempts to open a socket or write outside scratch) fails inside the sandbox with the documented exception (`ImportError`, `PermissionError`, `ENETUNREACH`). The gate does **not** assert that we have detected a bad body via static analysis; it asserts that the bad body cannot complete successfully because the capability is not reachable. This is the implementable form of the original "rejects non-determinism" claim.
 
-### 4.3 #145 `DB.fold` executor surface (working days 7-9; see § 6 task table row 2.0c)
+### 4.3 #145 + #145ext `DB.fold` + `DB.fork` executor primitives (working days 7-12.5; see § 6 task table rows 2.0c + 2.0c-extended)
 
-The PG6 substrate ships `DB.fold` as a private speculation primitive. v0.8.0a1 has already promoted it to the SDK at `s.txn.fold(seed, items, fn, **kwargs)` (`@experimental("v0.8")`, see `_facade.py:_TxnNamespace.fold`). #145 in Phase 2.0c hardens the surface for agent use:
+Phase 2.0c ships **two co-existing executor primitives** on the substrate, with curated SDK surfaces on `_TxnNamespace`. The split is intentional and pinned by ADR-7: the two primitives are semantically distinct, so they get distinct namespaces (`:fold/*` vs `:fork/*`) to avoid silent meaning-drift across replays of trajectories upgraded between v0.8.0a1 and v0.8.5a1.
 
-- `s.txn.fold(seed, items, fn, **kwargs)` — already shipped; the agent's MCTS scoring path consumes it. **Phase 2.0c task is to harden, not invent**: pin a `fold_into(seed, items, fn, choose)` convenience method on the same namespace that runs `fold` and commits the chosen branch in one txn (the current surface returns scores; the agent has to thread the commit step itself).
-- Datom shape: `:fold/probe` `:fold/branch` `:fold/score` `:fold/chosen` (all canonical-JSON).
-- Stability: stays `@experimental("v0.8")` through v0.8.5a1; promotes to `@stable("v0.9")` after Phase 2 dogfood survives without API change (per ADR-7).
+**Primitive 1 — `DB.fold` / `s.txn.fold` (foldl/reduce with chosen-marker).** PG6 substrate ships `DB.fold` as a private speculation primitive; v0.8.0a1 promoted it to `s.txn.fold(seed, items, fn, **kwargs)` (`@experimental("v0.8")`, `_facade.py:_TxnNamespace.fold`). Foldl/reduce semantics: commits every item's facts as it iterates; the legacy `:fold/chosen` audit op marks one branch within an all-committed foldl. Right shape for "accumulate over a sequence with audit-traceable provenance".
 
-**Why the agent needs it:** MCTS scoring is exactly this shape — N candidate branches, a score function, a chosen branch. `s.txn.fold` (+ the `fold_into` convenience) is the agent-facing surface.
+**Primitive 2 — `DB.fork` / `s.txn.fork` (speculate-rollback-pick).** Phase 2.0c-extended (#145ext, folds in original 2.0c carryover #201). Substrate-true rollback semantics: `fn(branch_state, item) -> branch_state` operates on opaque Python state; per-branch isolation is structural; only the chosen branch's facts are committed (non-chosen branches' tentative state is just discarded Python objects — rollback is trivial). Datom shape: the canonical 4-datom emission `:fork/probe` + `:fork/branch` × N + `:fork/score` × N + `:fork/chosen`, in that order, all under the enclosing dosync (so they share `txn_commit` and a stable Merkle prev-hash chain of `2 + 2*N` entries). Right shape for "evaluate N candidate branches, pick the best, discard the rest" — the wedge story for persistence-coder (rewind/branch/replay).
 
-**Falsifiable acceptance gate:** property test — for N branches with deterministic probe, `s.txn.fold` returns scores in the same order across two replays; `fold_into` chosen-branch commit is byte-identity.
+- `s.txn.fold(seed, items, fn, **kwargs)` — `@experimental("v0.8")`. Unchanged from v0.8.0a1.
+- `s.txn.fold_into(seed, items, fn, choose, *, tx, **kwargs)` — `@experimental` per Phase 2.0c. Phase 2.0c-extended **rewires fold_into on top of `DB.fork`** so it inherits substrate-true rollback semantics (only chosen branch's facts persist) and the canonical 4-datom audit shape. Public signature unchanged; downstream callers unaffected at the API level. The legacy `:fold/chosen` op is no longer emitted by `fold_into`.
+- `s.txn.fork(items, fn, choose, *, seed, tx, on_error, provenance)` — `@experimental("v0.8.5a1")` per Phase 2.0c-extended. New curated surface for callers who want explicit speculate-rollback-pick semantics over Python state without the fact-level convenience layer.
+- Datom shapes: `:fold/chosen` (foldl-with-marker, single datom per fold) and `:fork/probe` + `:fork/branch` × N + `:fork/score` × N + `:fork/chosen` (speculate-rollback, 4-datom shape). All canonical-JSON.
+- Stability: both primitives stay `@experimental("v0.8")` through v0.8.5a1; promote to `@stable("v0.9")` after Phase 2 dogfood survives without API change (per ADR-7).
+
+**Why the agent needs both:** MCTS scoring is the speculate-rollback-pick shape — N candidate branches, a score function, a chosen branch with the others rolled back. That's `DB.fork`. Skill-body folds (accumulate state across a sequence with audit chain) are the foldl shape. That's `DB.fold`. Without the rollback primitive the wedge story (rewind/branch/replay) is just transactional foldl.
+
+**Falsifiable acceptance gate:** property test (Hypothesis @max_examples=200) covering both primitives:
+
+- For N branches with deterministic probe, `s.txn.fold` returns scores in the same order across two replays. (Property 1.)
+- For N branches with deterministic `fn` + `choose`, two replays of `s.txn.fold_into` produce **byte-identical 4-datom intent sequences** (probe → branch × N → score × N → chosen) in the same canonical order. (Property 3.)
+- For ANY `(seed, items)` input + deterministic `fn` + argmax `choose`, only the chosen branch's eid appears in committed substrate facts. Non-chosen branch eids (modulo collisions with the chosen eid) MUST be absent. (Property 4 — substrate-true rollback verification.)
+
+5 consecutive flake-checks of all four properties at @max_examples=200 must run green.
 
 ---
 
@@ -343,31 +356,32 @@ Per project convention, each gate is a **falsifiable test**, not a narrative cla
 
 ## 6. Task breakdown
 
-**One canonical calendar: working day 1 = 2026-05-01 (Fri), working day 26 = 2026-06-05 (Fri).** The window holds exactly 26 working days (verified by Mon-Fri count across the 5 weeks 2026-05-01 → 2026-06-05) plus 2 days of slack absorbed inside it for the inevitable W-cycle. Header `Window:` line + § 1 Summary + this table all agree on **26 + 2 across this window**. Original "4-week" framing in the roadmap was calendar-month rounding; the honest working-day count is 26 (not 22, not 28).
+**One canonical calendar: working day 1 = 2026-05-01 (Fri), working day 26 = 2026-06-05 (Fri).** The window holds exactly 26 working days (verified by Mon-Fri count across the 5 weeks 2026-05-01 → 2026-06-05) plus 2 days of slack absorbed inside it for the inevitable W-cycle. Header `Window:` line + § 1 Summary + this table all agree on **26 + 2 across this window**. Original "4-week" framing in the roadmap was calendar-month rounding; the honest working-day count is 26 (not 22, not 28). **Phase 2.0c-extended (#145ext, days 10-12.5) consumes the entire 2-day slack budget** by folding original 2.0c carryover #201 forward into the 2.0c phase rather than deferring it to Phase 3; the rest of the schedule slips by 2 working days but the hard cutoff 2026-06-05 (working day 28 = working day 26 + 2 slack) is preserved since the slack always lived within the 28-day envelope.
 
 | # | Task | Working day | Deliverable |
 |---|---|---|---|
 | **2.0a** | #140 Plan Edit API design + impl + tests | 1-3 | `plan.edit_step` etc. + property test |
 | **2.0b** | #141 `:code` sandbox design + impl + tests | 3-7 | `:code/exec` Plan op + property test |
-| **2.0c** | #145 `s.txn.fold` hardening + `fold_into` + tests | 7-9 | `s.txn.fold_into` + property test (the `s.txn.fold` surface is already shipped at v0.8.0a1) |
-| **2.0c′** | #147 `s.plan` curated namespace (proposed; SDK-gap protocol) | 9-10 | `s.plan.execute(plan)` thin curated wrapper, `@experimental("v0.8.5a1")` |
-| **2.0c″** | #148 `s.mcts` curated namespace (proposed; SDK-gap protocol) | 9-10 | `s.mcts.search(...)` thin curated wrapper, `@experimental("v0.8.5a1")` |
-| **2.0d** | Substrate completion ARIS R2 + sub-tag `v0.8.5a1` | 10-11 | tag + CHANGELOG |
-| **2.1a** | `persistence.coder` skeleton + CLI entry | 12-13 | `python -m persistence.coder --task "..."` runs no-op loop |
-| **2.1b** | LLM provider abstraction + Anthropic adapter | 13-14 | first `:llm/*` datoms emitted |
-| **2.1c** | G1 contract test live before effects + plan + MCTS land | 14 | `test_sdk_consumer.py` green on the skeleton |
-| **2.2a** | `:fs` + `:shell` effect handlers | 15-16 | agent reads / writes / globs / greps the repo; allowlist versioning datomized |
-| **2.2b** | `:code` + `:git` effect handlers | 16-18 | agent runs sandboxed Python + commits |
-| **2.3a** | Plan escalation gate + Plan AST builder | 18-19 | `:strategy/plan` decisions execute via `s.plan.execute` |
-| **2.3b** | MCTS branch + `s.txn.fold_into` integration | 19-20 | `:strategy/branch` rolls out via `s.mcts.search` + `s.txn.fold_into` |
-| **2.3c** | Skill library: registry, lookup, builtin set | 20-21 | 5 builtin skills + custom-skill registration |
-| **2.3d** | REPL-steering session class | 21-23 | pause/snapshot/branch/fold/commit ops live; `:repl/request`+`:repl/response` datoms emitted |
-| **2.4a** | Dogfood: agent rebuilds `implement_function` skill + tunes confidence threshold from telemetry | 24 | golden trajectory recorded |
-| **2.4b** | 60-second demo video + walkthrough doc | 25 | `docs/demos/coder-rewind.md` + video |
-| **2.4c** | Coder contract spec doc + lockfile + CI gate (alpha-mode lockfile per § 3.2 escape-hatch sunset rule; release-tag strict-mode lockfile is Phase 3 v0.9.0 cleanup) | 25-26 | `docs/spec/coder-contract-v0.9.md` + `coder-contract.lock` (alpha) + `coder.lockfile.json` (G1 source per § 3.2 / § 5 G1(c)) |
-| **2.4d** | Phase 2 ARIS R2 + tag `v0.9.0a1` | 26 | tag + CHANGELOG |
+| **2.0c** | #145 `s.txn.fold` hardening + `fold_into` Path-A + tests | 7-9 | `s.txn.fold_into` (foldl-with-marker, Path-A) + property test (the `s.txn.fold` surface is already shipped at v0.8.0a1) |
+| **2.0c-ext** | #145ext `DB.fork` substrate primitive + `s.txn.fork` SDK + `fold_into` rewire on top + 4-datom audit + rollback verification (folds in original 2.0c carryover #201) | 10-12.5 | `s.txn.fork` + 4-datom audit shape + property tests (3 byte-identity + rollback verification at @max_examples=200) |
+| **2.0c′** | #147 `s.plan` curated namespace (proposed; SDK-gap protocol) | 12-13 | `s.plan.execute(plan)` thin curated wrapper, `@experimental("v0.8.5a1")` |
+| **2.0c″** | #148 `s.mcts` curated namespace (proposed; SDK-gap protocol) | 12-13 | `s.mcts.search(...)` thin curated wrapper, `@experimental("v0.8.5a1")` |
+| **2.0d** | Substrate completion ARIS R2 + sub-tag `v0.8.5a1` | 13-14 | tag + CHANGELOG |
+| **2.1a** | `persistence.coder` skeleton + CLI entry | 14-15 | `python -m persistence.coder --task "..."` runs no-op loop |
+| **2.1b** | LLM provider abstraction + Anthropic adapter | 15-16 | first `:llm/*` datoms emitted |
+| **2.1c** | G1 contract test live before effects + plan + MCTS land | 16 | `test_sdk_consumer.py` green on the skeleton |
+| **2.2a** | `:fs` + `:shell` effect handlers | 17-18 | agent reads / writes / globs / greps the repo; allowlist versioning datomized |
+| **2.2b** | `:code` + `:git` effect handlers | 18-20 | agent runs sandboxed Python + commits |
+| **2.3a** | Plan escalation gate + Plan AST builder | 20-21 | `:strategy/plan` decisions execute via `s.plan.execute` |
+| **2.3b** | MCTS branch + `s.txn.fork` / `s.txn.fold_into` integration | 21-22 | `:strategy/branch` rolls out via `s.mcts.search` + the fork/fold-into pair (MCTS uses `s.txn.fork` for substrate-true rollback) |
+| **2.3c** | Skill library: registry, lookup, builtin set | 22-23 | 5 builtin skills + custom-skill registration |
+| **2.3d** | REPL-steering session class | 23-25 | pause/snapshot/branch/fold/commit ops live; `:repl/request`+`:repl/response` datoms emitted |
+| **2.4a** | Dogfood: agent rebuilds `implement_function` skill + tunes confidence threshold from telemetry | 25-26 | golden trajectory recorded |
+| **2.4b** | 60-second demo video + walkthrough doc | 26 | `docs/demos/coder-rewind.md` + video |
+| **2.4c** | Coder contract spec doc + lockfile + CI gate (alpha-mode lockfile per § 3.2 escape-hatch sunset rule; release-tag strict-mode lockfile is Phase 3 v0.9.0 cleanup) | 26-27 | `docs/spec/coder-contract-v0.9.md` + `coder-contract.lock` (alpha) + `coder.lockfile.json` (G1 source per § 3.2 / § 5 G1(c)) |
+| **2.4d** | Phase 2 ARIS R2 + tag `v0.9.0a1` | 27-28 | tag + CHANGELOG |
 
-**26 working days** of explicit task rows + **2 days slack** absorbed inside the same 2026-05-01 → 2026-06-05 window (slack lives between sub-phases — typically 0.5 day after each ARIS R2 cycle and 1 day reserve at the end of 2.3 before dogfood). If we slip beyond slack, 2.4b (demo polish) is narrowed first; substrate completion (2.0a-c″) and core agent (2.1-2.3) are non-negotiable. Notice that 2.0c′ and 2.0c″ ship the `s.plan` and `s.mcts` curated namespaces in parallel with the tail of 2.0c — these are the **SDK-gap-protocol** surfaces the agent's `_planner.py` and `_mcts_policy.py` will bind to (see § 3.2). Until they ship, the agent runs through `s.escape.plan` with first-access audit emission, and G1 stays green because escape-hatch is a documented out-of-contract surface.
+**26 working days** of explicit task rows + **2 days slack** consumed inside the same 2026-05-01 → 2026-06-05 window by **Phase 2.0c-extended (#145ext)** which folded the original 2.0c carryover #201 forward into the 2.0c phase rather than deferring it to Phase 3. Net effect: the 2 days of slack that originally lived between sub-phases now sits at the front (consumed by 2.0c-ext); the rest of the schedule slips by 2 working days but **the hard cutoff 2026-06-05 (working day 28) is preserved** since the slack budget always lived within the 28-day total. If we slip BEYOND the now-zero slack budget, 2.4b (demo polish) is narrowed first; substrate completion (2.0a/2.0b/2.0c/2.0c-ext/2.0c′/2.0c″) and core agent (2.1-2.3) are non-negotiable. Notice that 2.0c′ and 2.0c″ ship the `s.plan` and `s.mcts` curated namespaces in parallel with the tail of 2.0c-ext — these are the **SDK-gap-protocol** surfaces the agent's `_planner.py` and `_mcts_policy.py` will bind to (see § 3.2). Until they ship, the agent runs through `s.escape.plan` with first-access audit emission, and G1 stays green because escape-hatch is a documented out-of-contract surface.
 
 ---
 
@@ -471,18 +485,28 @@ Per project convention, each gate is a **falsifiable test**, not a narrative cla
 **Rationale:** preserves replay byte-identity — re-executing a trajectory must reconstruct the edit history exactly.
 **Enforcement:** G3 property test at max_examples=100.
 
-### ADR-7 — `DB.fold` is a public SDK primitive on `s.txn.*`
+### ADR-7 — `DB.fold` AND `DB.fork` are public SDK primitives on `s.txn.*`
 
-**Decision:** PG6's private `DB.fold` is exposed in the SDK as `s.txn.fold` and `s.txn.fold_into`. **Single source of truth for the surface naming is § 4.3** (verified against `src/persistence/sdk/_facade.py:_TxnNamespace.fold` shipped at v0.8.0a1); this ADR defers to § 4.3 / § 3.2 / ADR-2 for the canonical surface and only ratifies the *decision* to expose `fold` as a curated SDK primitive rather than keeping it on the raw `DB`.
+**Decision:** Two co-existing executor primitives ship on `_TxnNamespace`:
 
-- `s.txn.fold(seed, items, fn, **kwargs)` — already shipped at v0.8.0a1 as `@experimental("v0.8")` (see `_facade.py:_TxnNamespace.fold:178`). Phase 2 hardens, it does NOT invent.
-- `s.txn.fold_into(seed, items, fn, choose, **kwargs)` — convenience method added in Phase 2.0c (sub-tag `v0.8.5a1`) that runs `fold` and commits the chosen branch in one txn; same `_TxnNamespace`.
+- `s.txn.fold` / `s.txn.fold_into` — foldl/reduce with chosen-marker (Path-A audit shape: `:fold/chosen`).
+- `s.txn.fork` — speculate-rollback-pick with the canonical 4-datom audit shape (`:fork/probe` + `:fork/branch` × N + `:fork/score` × N + `:fork/chosen`).
 
-**Why `s.txn` and not `s.fact`:** `fold` is a transactional speculation primitive — it opens a child txn per branch, scores them, and commits the chosen one. Per the curated-namespace shape pinned in Adapter SDK ADR-1, that lifecycle belongs on `_TxnNamespace`, not `_FactNamespace` (which is the bitemporal fact-log read/write surface). The R1-W1 cleanup notes this as a side-effect correction; ADR-7 inherits the same placement.
+**Single source of truth for the surface naming is § 4.3** (verified against `src/persistence/sdk/_facade.py:_TxnNamespace.fold:178` and `_TxnNamespace.fork` added in Phase 2.0c-extended); this ADR defers to § 4.3 / § 3.2 / ADR-2 for the canonical surface and only ratifies the *decisions* (a) to expose `fold` and `fork` as curated SDK primitives rather than keeping them on the raw `DB`, and (b) to use distinct namespaces (`:fold/*` vs `:fork/*`) to disambiguate the two semantically distinct primitives.
 
-**Rationale:** § 4.3 — MCTS scoring needs this shape; the agent is the first consumer.
-**Stability annotation:** `@experimental("v0.8")` today; promoted to `@stable("v0.9")` after Phase 2 dogfood survives without API change.
-**Cross-references (must stay in sync):** § 3.2 allowed-SDK-surface table row for `s.txn.*`; § 4.3 (the load-bearing description); ADR-2 closed allowed-set; § 13 R1+R2 changelogs.
+- `s.txn.fold(seed, items, fn, **kwargs)` — shipped at v0.8.0a1 as `@experimental("v0.8")` (see `_facade.py:_TxnNamespace.fold:178`). Foldl/reduce semantics: commits every item's facts as it iterates. Unchanged in Phase 2.
+- `s.txn.fold_into(seed, items, fn, choose, *, tx, **kwargs)` — convenience method added in Phase 2.0c (sub-tag `v0.8.5a1`) that runs the speculate-pick lifecycle and commits the chosen branch in one txn. Phase 2.0c-extended **rewires fold_into on top of `DB.fork`** so it inherits substrate-true rollback semantics (only chosen branch's facts persist) and the canonical 4-datom audit shape. Public signature unchanged; downstream callers unaffected.
+- `s.txn.fork(items, fn, choose, *, seed, tx, on_error, provenance)` — added in Phase 2.0c-extended (sub-tag `v0.8.5a1`) as the substrate-true speculate-rollback-pick primitive. For callers who want explicit speculate-rollback semantics over Python state without the fact-level convenience layer.
+
+**Why two primitives, not one:** `fold` is a transactional foldl/reduce; `fork` is speculate-rollback-pick. They are semantically distinct, and giving them distinct audit namespaces (`:fold/*` vs `:fork/*`) is **load-bearing for replay safety**. A trajectory recorded under v0.8.0a1's `fold_into`-emits-`:fold/chosen` shape would silently change meaning if upgraded to a Phase 2.0c-extended trajectory where the same call now emits `:fork/*`. The namespace split lets readers tell at a glance which semantic was in play.
+
+**Why `s.txn` and not `s.fact`:** Both primitives are transactional speculation lifecycles — they open per-branch state, score it, and commit at most one. Per the curated-namespace shape pinned in Adapter SDK ADR-1, that lifecycle belongs on `_TxnNamespace`, not `_FactNamespace` (which is the bitemporal fact-log read/write surface). The R1-W1 cleanup notes this as a side-effect correction; ADR-7 inherits the same placement for both `fold` and `fork`.
+
+**Rationale:** § 4.3 — MCTS scoring needs the speculate-rollback-pick shape (`fork`); skill-body folds need the foldl-with-audit shape (`fold`). The agent is the first consumer of both.
+
+**Stability annotation:** Both primitives are `@experimental` today (`fold`: `@experimental("v0.8")`; `fork`: `@experimental("v0.8.5a1")`); promoted to `@stable("v0.9")` after Phase 2 dogfood survives without API change.
+
+**Cross-references (must stay in sync):** § 3.2 allowed-SDK-surface table row for `s.txn.*`; § 3.7 per-effect replay table rows for both `:fold/chosen` and `:fork/*`; § 4.3 (the load-bearing description, now covering both primitives); ADR-2 closed allowed-set; § 13 R1+R2 changelogs; § 14 Phase 2.0c-extended changelog.
 
 ### ADR-8 — REPL-steering session class registers via Module 7's capability system
 
@@ -618,3 +642,47 @@ Before W3: ADR-2 had a 9-line bullet enumeration; § 3.2 had a 7-row table + 1 p
 After W3: § 3.2 is the canonical editorial source (table + proposed-additions paragraph). ADR-2's "Allowed SDK surfaces" line is now `see § 3.2 …` with no independent enumeration. G1 row cites "the canonical allowed-set defined in § 3.2" as the single source. Lockfile is generated from § 3.2 via `scripts/emit_g1_lockfile.py` (Phase 2.4c) — or, if the script slips, the editorial-source rule is sufficient.
 
 **No scope shift.** All three W3 fixes are doc-only edits. No code under `src/persistence/` was touched. No new substrate backlog items added (#147 / #148 carry the sunset issue IDs already in the substrate backlog). No new ADRs added (ADR-2 was edited in place; the "Escape-hatch sunset rule" lives in § 3.2 + cross-references in ADR-2 / G1 / § 6, not as a standalone ADR — its enforcement mechanism is G1's strict mode at the release tag, not a new contract).
+
+---
+
+## 14. Phase 2.0c-extended changelog (post-Phase-2.0c-shipped → 2.0c-ext)
+
+After Phase 2.0c shipped (`s.txn.fold_into` Path-A foldl-with-marker at HEAD `4d4fb26`, suite 1953 passed), it was clear the shipped contract did not match the canonical 4-datom audit shape from § 3.7 + § 4.3 ADR-7 (which calls for `:fold/probe` + `:fold/branch` × N + `:fold/score` × N + `:fold/chosen` with rollback semantics for non-chosen branches). The shipped Path-A emitted only `:fold/chosen` and committed all branches' facts as a foldl — semantically distinct from the design contract.
+
+**Phase 2.0c-extended (#145ext) closes the gap** by introducing `DB.fork` as a sibling substrate primitive to `DB.fold`, rewiring `s.txn.fold_into` on top of it, and adding `s.txn.fork` as a new curated SDK surface for callers who want explicit speculate-rollback-pick semantics. Key decisions:
+
+| # | Decision | Rationale |
+|---|---|---|
+| 1 | **Two co-existing primitives** (`fold` and `fork`), not one promoted from the other | `fold` (foldl/reduce + chosen-marker) and `fork` (speculate-rollback-pick) are semantically distinct; making `fold_into` rollback-by-default would silently change the shipped v0.8.0a1 `fold` contract for users of `s.txn.fold` directly |
+| 2 | **Distinct audit namespaces** (`:fold/chosen` vs `:fork/probe/branch/score/chosen`) | Replay safety: a trajectory recorded under v0.8.0a1's `fold_into`-emits-`:fold/chosen` would silently change meaning if upgraded to a 2.0c-ext trajectory where the same call now emits `:fork/*`. The split makes the semantic explicit at the wire level |
+| 3 | **`DB.fork` operates on opaque Python state, not on the substrate** | Per-branch isolation is structural (each branch starts from `seed`); rollback is trivial (non-chosen branches' state is just discarded Python objects, nothing was ever written to the substrate). Adapters that want fact-side commits (`fold_into`) thread facts through the wrapper closure and commit only the chosen branch via `tx.db.transact_batch` after `DB.fork` returns |
+| 4 | **`fold_into` rewired without changing public signature** | Downstream callers unaffected at the API level. Internal behavior changes (per-branch isolation; chosen-only commit; `:fork/*` audit shape; original-exception propagation under "abort") are documented as the v0.8.0a1 → v0.8.5a1 delta in CHANGELOG-sdk |
+| 5 | **#201 (originally proposed for v0.9.x Phase 3) folded into 2.0c** | The 4-datom shape is load-bearing for the wedge story (rewind/branch/replay needs per-branch rollback to feel real, per Karpathy product reframe). Deferring it would have left v0.8.5a1 shipping a known-incorrect contract relative to the design doc; better to consume the 2-day slack budget now than to ship a misalignment |
+
+**Schedule impact:** Phase 2.0c-extended runs days 10-12.5 (consuming 2 days of slack from the 28-day envelope). The rest of the schedule slips by 2 days (2.0d at days 13-14, 2.4d at days 27-28), but **the hard cutoff 2026-06-05 is preserved** since the slack always lived within the 28-day envelope. Slip-beyond-slack triggers narrowing 2.4b (demo polish) per § 7.5 mitigation rule.
+
+**Files touched in 2.0c-ext:**
+
+- `src/persistence/fact/_fork.py` (NEW, ~480 lines) — `DB.fork` impl + `ForkResult` / `ForkBranchResult` / `ForkOutsideDosync` / `ForkChooseError` + 4 audit-emission helpers + canonicalisation helper.
+- `src/persistence/fact/db.py` (+85 lines) — `DB.fork` method delegating to `_fork.fork_impl`. `DB.fold` untouched.
+- `src/persistence/fact/__init__.py` (+8 lines) — exports.
+- `src/persistence/sdk/_facade.py` (+66 lines) — `_TxnNamespace.fork` curated surface.
+- `src/persistence/sdk/_fold_into.py` (full rewrite ~510 lines) — rewired on top of `DB.fork`, replaces Path-A wrapper-state-list hack + `:fold/chosen` emission.
+- `src/persistence/sdk/__init__.py` (+9 lines) — `Fork*` re-exports.
+- `src/persistence/sdk/CHANGELOG-sdk.md` — v0.8.5a1 entry rewritten to document both primitives + the supersession of Path-A within 2.0c + closure of #201.
+- `tests/store/test_fork.py` (NEW, 20 cases) — `DB.fork` unit coverage.
+- `tests/store/test_fork_audit.py` (NEW, 9 cases) — 4-datom audit-shape + Merkle-chain integration.
+- `tests/store/test_substrate_txn_fork.py` (NEW, 11 cases) — `s.txn.fork` SDK pass-through coverage.
+- `tests/store/test_substrate_txn_fold_into.py` (updated) — Path-A → 2.0c-ext semantic supersession honestly called out; new rollback-verification tests.
+- `tests/store/test_substrate_txn_fold_into_audit.py` (rewritten) — replaces single-`:fold/chosen` shape with 4-datom `:fork/*` shape; Merkle-chain integration + legacy-op-not-emitted regression guard.
+- `tests/store/test_fold_byte_identity.py` (extended) — Property 3 (full 4-datom shape byte-identity at @max_examples=200) + Property 4 (rollback verification at @max_examples=200) added; existing Properties 1-2 retained.
+- `docs/plans/2026-05-01-phase-2.0c-ext-fork-primitive-impl.md` (NEW) — scratch impl plan.
+- `docs/plans/2026-04-30-phase-2-persistence-coder-design.md` (this file) — § 3.7 fold-row split into `:fold/chosen` + `:fork/*` rows; § 4.3 expanded to cover both primitives; ADR-7 amended; § 6 schedule extended; § 14 added.
+
+**Suite verification:** 1953 → 2000 passed (+47 new) / 33 skipped / 7 xfailed in ~50s. 5 consecutive flake-checks of the 4 Hypothesis byte-identity / rollback properties at @max_examples=200 all green (0.59-0.68s each, no flakes).
+
+**No version bump.** `__version__` stays 0.8.0a1; v0.8.5a1 lands at Phase 2.0d sub-tag per existing convention. CHANGELOG-sdk.md keeps "unreleased — lands at Phase 2.0d sub-tag" framing.
+
+**No new ADRs.** ADR-7 was edited in place to cover both primitives; the namespace-split decision (`:fold/*` vs `:fork/*`) is a refinement of the existing surface-naming ADR, not a new contract.
+
+**No scope shift on G1-G10 acceptance gates.** The MCTS scoring path (G7 REPL branch/fold/commit) still uses the agent-facing surface — now `s.txn.fold_into` (rewired) or directly `s.txn.fork` for explicit speculate-rollback callers. Property tests at `tests/store/test_fold_byte_identity.py` cover both primitives at @max_examples=200.

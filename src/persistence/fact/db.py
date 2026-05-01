@@ -22,7 +22,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterable, Iterator, Literal, Optional, Sequence
 
 from persistence.fact.datom import Datom
 from persistence.fact.store import TX_PLACEHOLDER, InMemoryStore, Store

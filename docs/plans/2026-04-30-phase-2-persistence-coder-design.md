@@ -479,6 +479,29 @@ Per project convention, each gate is a **falsifiable test**, not a narrative cla
 
 **Enforcement:** CHANGELOG explicit security caveat; `:code/exec` raises if `PERSISTENCE_CODER_ALLOW_CODE_EXEC` env var is unset in non-dev mode. The G2 falsifiable gate runs both positive (capability-compatible code → byte-identity replay) and negative (capability-violating code → documented exception, never silently passes) tests.
 
+**AMENDED 2026-05-01 (Phase 2.0d W3) — soft-isolation rescope.** The R2.3 codex review demonstrated that Python-level capability-denial as architected here **cannot prevent host-FS reads** when the warm-imported stdlib transitive closure is preserved. Concrete repro: `import dataclasses; dataclasses.sys.modules['builtins'].open('/etc/passwd','r').read(20)` succeeded inside the sandbox with `exit_code == 0`, leaking `/etc/passwd` bytes via `dataclasses.__dict__["sys"]` → `sys.modules["builtins"]` → `builtins.open`. The `dataclasses` warm-import (and any other allowed module's `__dict__`) gives an attacker a chain to `sys.modules`, which exposes both `builtins` and any forbidden-but-already-loaded module (`os`, `io`, etc.). Removing those references from individual module dicts is whack-a-mole at a different layer and would still leave equivalent escape vectors via other allowed modules' transitive references.
+
+The decision the substrate-completion track is taking, after this discovery, is to **rescope `:code/exec` v0.8.5a1 honestly** rather than chase Python-level confidentiality:
+
+- The sandbox is restated as a **soft-isolation runtime guard / best-effort containment** for plan-step bodies authored by the agent under user supervision. It is NOT a confidentiality boundary against an adversarial sandbox-body author.
+- What the v0.8.5a1 sandbox **does** guarantee, by construction:
+  - **Subprocess isolation** — never `eval` / `exec` in-process; user code runs in a fresh interpreter.
+  - **Wall-clock + CPU + address-space + fd + nproc bounds** via `setrlimit` (Linux honored; macOS RLIMIT_AS best-effort, others honored).
+  - **Write-denial via `RLIMIT_FSIZE=0`** — kernel-enforced `SIGXFSZ` on any `write()` from the child. This is a real OS-level write boundary; it is unaffected by the Python-level escape.
+  - **Determinism pinning** — `PYTHONHASHSEED=0`, `PYTHONDONTWRITEBYTECODE=1`, no site-packages, no user-base, no script-dir injection.
+  - **Curated user-source `__builtins__`** — `open` / `eval` / `ex`+`ec` / `compile` / `input` / `breakpoint` removed. (This is still a useful default — it raises the bar for accidental misuse and surfaces capability-violation as a `NameError` for honest plan-step bodies.)
+  - **Top-level import deny-list + closed allow-list** — only `json` / `re` / `dataclasses` are direct-importable; `os` / `sys` / `subprocess` / `socket` / `urllib` / `pathlib` / etc. raise `CodeExecForbiddenImport` at the import statement.
+  - **Audit-chain integrity** — every `:code/exec` call emits the canonical 7-key datom under the active txn's Merkle chain (M2/M5 W2 fix). Replay determinism (audit-replay default; opt-in re-execution-replay with hash verification) is intact.
+- What the v0.8.5a1 sandbox **does NOT** guarantee, and now explicitly disclaims:
+  - **Confidentiality of host filesystem contents** against a sandbox-body author who knows Python's stdlib. The `dataclasses.sys.modules['builtins'].open` escape (and equivalents via other allowed modules) is a known-known limitation.
+  - **Isolation from already-loaded forbidden modules** that landed in `sys.modules` during the warm-import phase. Any allowed module's `__dict__` may transitively expose them.
+  - **Defense against malicious or adversarial code.** A determined adversarial body can read host files. `:code/exec` is for trusted-author plan-step bodies under user supervision, not for untrusted user submissions.
+- The substrate-completion claim for v0.8.5a1 **does not depend on hard sandbox isolation**. The wedge story (Karpathy product reframe — rewind / branch / replay over agent trajectories) is load-bearing on **audit-chain integrity** + **replay determinism**, both of which are demonstrably correct (see M5 resolution at `transaction.py:703` and the W2 audit-stack tests). The sandbox's role in that story is best-effort containment of accidentally-divergent reads, not adversarial containment.
+- **Hard isolation is queued as a v0.9.x sandbox-redesign track** (forward-pointer in § 14 changelog and CHANGELOG-effect.md). The redesign uses an **OS-level boundary** (gVisor, nsjail, Docker / OCI runtime, or WASM-Pyodide) where confidentiality is enforced by the kernel / hypervisor, not by a Python-level filter. That track supersedes the v0.8.5a1 soft-isolation runtime guard rather than extending it; the audit-datom contract carries forward unchanged.
+- **Test-side documentation:** the R2.3 escape repro is preserved as an `xfail`-strict regression test (`test_known_escape_via_dataclasses_sys_modules_builtins_open` in `tests/effect/test_code_exec.py`) so the moment the v0.9.x real-OS-boundary lands, the xfail flips to PASS and the marker is removed — the regression test becomes the v0.9.x sandbox-redesign acceptance signal.
+
+The pre-W3 ADR-5 text above is preserved verbatim as the historical record of the original capability-denial framing. Where W3 deviates from it (the confidentiality claim, specifically), this amendment supersedes; everything else (write-denial, determinism, audit-replay) is unchanged.
+
 ### ADR-6 — Plan Edit API audit invariant
 
 **Decision:** every plan edit is a `:plan/edit` datom with before/after op-hash + step-id. No silent edits.

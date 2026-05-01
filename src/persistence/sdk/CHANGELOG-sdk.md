@@ -1,6 +1,6 @@
 # persistence.sdk CHANGELOG
 
-## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — `s.txn.fork` + `s.txn.fold_into` rewire (#145 + #145ext)
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — `s.txn.fork` + `s.txn.fold_into` rewire (#145 + #145ext) + `s.plan` curated namespace (#147)
 
 Phase 2.0c + Phase 2.0c-extended of the persistence-coder MVP (Phase 2
 of the v1.0 roadmap). Adds `s.txn.fork(items, fn, choose, *, seed, tx)`
@@ -168,3 +168,46 @@ of trajectories upgraded between v0.8.0a1 and v0.8.5a1.
   per-branch child-txn primitive on `DB.fold`. Resolved as a separate
   `DB.fork` primitive with `:fork/*` namespace (intentional split per
   ADR-7); `DB.fold` keeps its v0.8.0a1 semantics intact.
+
+### Added — Phase 2.0c-prime #147 `s.plan` curated namespace
+
+- New curated `s.plan.*` SDK namespace exposes Plan AST + parse +
+  execute + optimize + promote + MCTS + edit (Phase 2.0a) + registries
+  + skill-library factory via thin pass-throughs to `persistence.plan`.
+  Each method is `@experimental("v0.8.5a1")`, matching the
+  `s.txn.fold` / `s.txn.fold_into` / `s.txn.fork` ADR-7 surface-naming
+  precedent. The full curated method inventory:
+  - **Plan AST + parse**: `parse`, `unparse`, `walk`.
+  - **Execute**: `execute`.
+  - **Edit (Phase 2.0a)**: `edit_step`, `insert_step_after`,
+    `insert_step_before`, `delete_step`.
+  - **Optimize**: `optimize`.
+  - **Promote**: `promote`, `gate_g1_replay_byte_identity`,
+    `gate_g2_audit_chain`, `gate_g3_score_delta`, `gate_g4_stub`.
+  - **MCTS**: `mcts_search`, `mcts_promote`, `apply_action`.
+  - **Registries** (mutate global state — caveat documented per
+    method): `register_metric`, `unregister_metric`, `lookup_metric`,
+    `register_coercion`, `unregister_coercion`, `lookup_coercion`.
+  - **Skill library**: `skill_library` (factory).
+- Curated SDK type re-exports added: `Node`, `ExecutionResult`,
+  `OptimizedPlan`, `PromotionRecord`, `TrainingExample`, `LeafResult`,
+  `FailureInfo`. Other `persistence.plan` types — configuration /
+  protocol vocabulary (`MCTSConfig`, `Action` subclasses, `Evaluator`,
+  `Expander`, `Dispatcher`, `Handler`, `MetricRef`, `Coercion`,
+  `SkillLibrary`, error classes) — remain accessible only via direct
+  import from `persistence.plan`. The split keeps the SDK contract
+  surface narrow per ADR-1 without forcing every adapter to import
+  the whole plan module just to type-hint a return value.
+- `dir(s)` contract surface widens from 9 to 10 entries (adds
+  `plan` between `open` and `replay` in lexical position). Adapter
+  authors who pinned against `len(dir(s)) == 9` MUST update; the
+  contract surface widening is the v0.8.5a1 SDK-gap closure for the
+  existing `persistence.plan` substrate.
+- No substrate behavior change. No audit chain change. No new
+  primitives. Strictly a curated re-export layer over the existing
+  `persistence.plan` module.
+- Adapter authors who previously reached via `s.escape.plan` (which
+  fires a `:sdk/escape-hatch-access` audit entry on first access) can
+  now bind to the curated `s.plan.*` surface; the escape-hatch path
+  remains available unchanged for any sub-surface not yet curated.
+- Closes #147.

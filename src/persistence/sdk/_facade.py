@@ -307,6 +307,499 @@ class _TxnNamespace:
         return self._substrate._db.fork(items, fn, choose, **kwargs)
 
 
+class _PlanNamespace:
+    """Curated ``s.plan.*`` surface — Plan AST + execute + optimize +
+    promote + MCTS + edit (Phase 2.0a) + registries.
+
+    Thin pass-through to :mod:`persistence.plan`. Per Phase 2.0c-prime
+    #147 the existing ``persistence.plan`` substrate (which adapters
+    reach today via ``s.escape.plan`` + a ``:sdk/escape-hatch-access``
+    audit entry) is filed as a versioned SDK addition under the
+    ``@experimental("v0.8.5a1")`` ADR-7 surface-naming pattern (same
+    pattern used for ``s.txn.fold`` / ``s.txn.fold_into`` / ``s.txn.fork``).
+
+    The curated namespace surfaces FUNCTIONS only. Type vocabulary
+    (``MCTSConfig`` / ``Action`` subclasses / ``Evaluator`` / ``Expander``
+    / ``Dispatcher`` / ``Handler`` / ``MetricRef`` / ``Coercion`` /
+    ``SkillLibrary`` / error classes) stays in :mod:`persistence.plan`;
+    a small load-bearing subset of value-shape types (``Node`` /
+    ``ExecutionResult`` / ``OptimizedPlan`` / ``PromotionRecord`` /
+    ``TrainingExample`` / ``LeafResult`` / ``FailureInfo``) is also
+    re-exported at :mod:`persistence.sdk` top-level for adapter ergonomics.
+
+    No substrate behavior change. No audit chain change. No new
+    primitives. Strictly a curated re-export layer.
+    """
+
+    def __init__(self, substrate: "Substrate") -> None:
+        self._substrate = substrate
+
+    # ------------------------------------------------------------------
+    # Plan AST + parse
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.parse. Surface may evolve in v0.9 once "
+            "Phase-2 dogfooding identifies whether this is the load-"
+            "bearing shape. Adapter authors who depend on it should "
+            "not pin against @stable('v0.8') semantics."
+        )
+    )
+    def parse(self, *args, **kwargs):
+        """Parse EDN text to a :class:`persistence.plan.Node`; thin
+        pass-through to :func:`persistence.plan.parse`.
+        """
+        from persistence.plan import parse as _parse
+
+        return _parse(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.unparse. Surface may evolve in v0.9 "
+            "once Phase-2 dogfooding identifies whether this is the "
+            "load-bearing shape. Adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def unparse(self, *args, **kwargs):
+        """Emit canonical EDN text from a :class:`persistence.plan.Node`;
+        thin pass-through to :func:`persistence.plan.unparse`.
+        """
+        from persistence.plan import unparse as _unparse
+
+        return _unparse(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.walk. Surface may evolve in v0.9 once "
+            "Phase-2 dogfooding identifies whether this is the load-"
+            "bearing shape. Adapter authors who depend on it should "
+            "not pin against @stable('v0.8') semantics."
+        )
+    )
+    def walk(self, *args, **kwargs):
+        """Depth-first traversal of a Plan AST; thin pass-through to
+        :func:`persistence.plan.walk`.
+        """
+        from persistence.plan import walk as _walk
+
+        return _walk(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Execute
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.execute. Surface may evolve in v0.9 "
+            "once Phase-2 dogfooding identifies whether this is the "
+            "load-bearing shape. Adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def execute(self, *args, **kwargs):
+        """Execute a plan through a dispatcher; thin pass-through to
+        :func:`persistence.plan.execute`.
+        """
+        from persistence.plan import execute as _execute
+
+        return _execute(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Edit (Phase 2.0a) — re-export only
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.edit_step (Phase 2.0a). Surface may "
+            "evolve in v0.9 once Phase-2 dogfooding identifies whether "
+            "this is the load-bearing shape. Adapter authors who "
+            "depend on it should not pin against @stable('v0.8') "
+            "semantics."
+        )
+    )
+    def edit_step(self, *args, **kwargs):
+        """Replace the subtree rooted at ``step_id`` with a new op;
+        thin pass-through to :func:`persistence.plan.edit_step`. Must
+        be called inside a ``s.txn.dosync()`` body.
+        """
+        from persistence.plan import edit_step as _edit_step
+
+        return _edit_step(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.insert_step_after (Phase 2.0a). Surface "
+            "may evolve in v0.9 once Phase-2 dogfooding identifies "
+            "whether this is the load-bearing shape. Adapter authors "
+            "who depend on it should not pin against @stable('v0.8') "
+            "semantics."
+        )
+    )
+    def insert_step_after(self, *args, **kwargs):
+        """Insert a new step immediately after the matched step; thin
+        pass-through to :func:`persistence.plan.insert_step_after`.
+        Must be called inside a ``s.txn.dosync()`` body.
+        """
+        from persistence.plan import insert_step_after as _insert_after
+
+        return _insert_after(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.insert_step_before (Phase 2.0a). "
+            "Surface may evolve in v0.9 once Phase-2 dogfooding "
+            "identifies whether this is the load-bearing shape. "
+            "Adapter authors who depend on it should not pin against "
+            "@stable('v0.8') semantics."
+        )
+    )
+    def insert_step_before(self, *args, **kwargs):
+        """Insert a new step immediately before the matched step; thin
+        pass-through to :func:`persistence.plan.insert_step_before`.
+        Must be called inside a ``s.txn.dosync()`` body.
+        """
+        from persistence.plan import insert_step_before as _insert_before
+
+        return _insert_before(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.delete_step (Phase 2.0a). Surface may "
+            "evolve in v0.9 once Phase-2 dogfooding identifies "
+            "whether this is the load-bearing shape. Adapter authors "
+            "who depend on it should not pin against @stable('v0.8') "
+            "semantics."
+        )
+    )
+    def delete_step(self, *args, **kwargs):
+        """Delete the matched step (and its subtree); thin pass-through
+        to :func:`persistence.plan.delete_step`. Must be called inside
+        a ``s.txn.dosync()`` body.
+        """
+        from persistence.plan import delete_step as _delete_step
+
+        return _delete_step(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Optimize
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.optimize. Surface may evolve in v0.9 "
+            "once Phase-2 dogfooding identifies whether this is the "
+            "load-bearing shape. Adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def optimize(self, *args, **kwargs):
+        """Optimize a plan against a training set under a metric; thin
+        pass-through to :func:`persistence.plan.optimize`.
+        """
+        from persistence.plan import optimize as _optimize
+
+        return _optimize(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Promote
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.promote. Surface may evolve in v0.9 "
+            "once Phase-2 dogfooding identifies whether this is the "
+            "load-bearing shape. Adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def promote(self, *args, **kwargs):
+        """Run all four promotion gates against a candidate plan; thin
+        pass-through to :func:`persistence.plan.promote`.
+        """
+        from persistence.plan import promote as _promote
+
+        return _promote(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.gate_g1_replay_byte_identity. Exposed "
+            "for adapter authors who want to compose their own gate "
+            "stack. Surface may evolve in v0.9 once Phase-2 "
+            "dogfooding identifies whether this is the load-bearing "
+            "shape. Adapter authors who depend on it should not pin "
+            "against @stable('v0.8') semantics."
+        )
+    )
+    def gate_g1_replay_byte_identity(self, *args, **kwargs):
+        """G1 (replay byte-identity) gate; thin pass-through to
+        :func:`persistence.plan.gate_g1_replay_byte_identity`.
+        """
+        from persistence.plan import (
+            gate_g1_replay_byte_identity as _g1,
+        )
+
+        return _g1(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.gate_g2_audit_chain. Exposed for "
+            "adapter authors who want to compose their own gate "
+            "stack. Surface may evolve in v0.9 once Phase-2 "
+            "dogfooding identifies whether this is the load-bearing "
+            "shape. Adapter authors who depend on it should not pin "
+            "against @stable('v0.8') semantics."
+        )
+    )
+    def gate_g2_audit_chain(self, *args, **kwargs):
+        """G2 (audit chain) gate; thin pass-through to
+        :func:`persistence.plan.gate_g2_audit_chain`.
+        """
+        from persistence.plan import gate_g2_audit_chain as _g2
+
+        return _g2(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.gate_g3_score_delta. Exposed for "
+            "adapter authors who want to compose their own gate "
+            "stack. Surface may evolve in v0.9 once Phase-2 "
+            "dogfooding identifies whether this is the load-bearing "
+            "shape. Adapter authors who depend on it should not pin "
+            "against @stable('v0.8') semantics."
+        )
+    )
+    def gate_g3_score_delta(self, *args, **kwargs):
+        """G3 (score-delta) gate; thin pass-through to
+        :func:`persistence.plan.gate_g3_score_delta`.
+        """
+        from persistence.plan import gate_g3_score_delta as _g3
+
+        return _g3(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.gate_g4_stub. Exposed for adapter "
+            "authors who want to compose their own gate stack. "
+            "Surface may evolve in v0.9 once Phase-2 dogfooding "
+            "identifies whether this is the load-bearing shape. "
+            "Adapter authors who depend on it should not pin against "
+            "@stable('v0.8') semantics."
+        )
+    )
+    def gate_g4_stub(self, *args, **kwargs):
+        """G4 (stub) gate; thin pass-through to
+        :func:`persistence.plan.gate_g4_stub`.
+        """
+        from persistence.plan import gate_g4_stub as _g4
+
+        return _g4(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # MCTS
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.mcts_search. Surface may evolve in "
+            "v0.9 once Phase-2 dogfooding identifies whether this is "
+            "the load-bearing shape. Adapter authors who depend on "
+            "it should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def mcts_search(self, *args, **kwargs):
+        """PUCT tree search over a Plan AST; thin pass-through to
+        :func:`persistence.plan.mcts_search`.
+        """
+        from persistence.plan import mcts_search as _mcts_search
+
+        return _mcts_search(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.mcts_promote. Surface may evolve in "
+            "v0.9 once Phase-2 dogfooding identifies whether this is "
+            "the load-bearing shape. Adapter authors who depend on "
+            "it should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def mcts_promote(self, *args, **kwargs):
+        """MCTS-search composed with the 4-gate promote pipeline;
+        thin pass-through to :func:`persistence.plan.mcts_promote`.
+        """
+        from persistence.plan import mcts_promote as _mcts_promote
+
+        return _mcts_promote(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.apply_action. Surface may evolve in "
+            "v0.9 once Phase-2 dogfooding identifies whether this is "
+            "the load-bearing shape. Adapter authors who depend on "
+            "it should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def apply_action(self, *args, **kwargs):
+        """Apply an MCTS Action to a plan; thin pass-through to
+        :func:`persistence.plan.apply_action`.
+        """
+        from persistence.plan import apply_action as _apply_action
+
+        return _apply_action(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Registries — global mutable state. Documented caveat applies.
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.register_metric. NOTE: this mutates "
+            "the global metric registry. Surface may evolve in v0.9 "
+            "once Phase-2 dogfooding identifies whether this is the "
+            "load-bearing shape. Adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def register_metric(self, *args, **kwargs):
+        """Register a metric callable into the global registry; thin
+        pass-through to :func:`persistence.plan.register_metric`.
+        **NOTE**: mutates global state. Adapter authors should use
+        unique ``(id, version)`` refs to avoid collisions across
+        adapters that share a process.
+        """
+        from persistence.plan import register_metric as _register_metric
+
+        return _register_metric(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.unregister_metric. NOTE: this mutates "
+            "the global metric registry. Surface may evolve in v0.9 "
+            "once Phase-2 dogfooding identifies whether this is the "
+            "load-bearing shape. Adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def unregister_metric(self, *args, **kwargs):
+        """Remove a metric from the global registry; thin pass-through
+        to :func:`persistence.plan.unregister_metric`. **NOTE**:
+        mutates global state.
+        """
+        from persistence.plan import unregister_metric as _unregister_metric
+
+        return _unregister_metric(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.lookup_metric. Surface may evolve in "
+            "v0.9 once Phase-2 dogfooding identifies whether this is "
+            "the load-bearing shape. Adapter authors who depend on "
+            "it should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def lookup_metric(self, *args, **kwargs):
+        """Resolve a :class:`persistence.plan.MetricRef` to its
+        registered callable; thin pass-through to
+        :func:`persistence.plan.lookup_metric`.
+        """
+        from persistence.plan import lookup_metric as _lookup_metric
+
+        return _lookup_metric(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.register_coercion. NOTE: this mutates "
+            "the global coercion registry. Surface may evolve in "
+            "v0.9 once Phase-2 dogfooding identifies whether this is "
+            "the load-bearing shape. Adapter authors who depend on "
+            "it should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def register_coercion(self, *args, **kwargs):
+        """Register a coercion for a non-EDN value type; thin
+        pass-through to :func:`persistence.plan.register_coercion`.
+        **NOTE**: mutates global state.
+        """
+        from persistence.plan import register_coercion as _register_coercion
+
+        return _register_coercion(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.unregister_coercion. NOTE: this "
+            "mutates the global coercion registry. Surface may "
+            "evolve in v0.9 once Phase-2 dogfooding identifies "
+            "whether this is the load-bearing shape. Adapter authors "
+            "who depend on it should not pin against @stable('v0.8') "
+            "semantics."
+        )
+    )
+    def unregister_coercion(self, *args, **kwargs):
+        """Remove a coercion from the global registry; thin
+        pass-through to :func:`persistence.plan.unregister_coercion`.
+        **NOTE**: mutates global state.
+        """
+        from persistence.plan import (
+            unregister_coercion as _unregister_coercion,
+        )
+
+        return _unregister_coercion(*args, **kwargs)
+
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: curated re-export of "
+            "persistence.plan.lookup_coercion. Surface may evolve in "
+            "v0.9 once Phase-2 dogfooding identifies whether this is "
+            "the load-bearing shape. Adapter authors who depend on "
+            "it should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def lookup_coercion(self, *args, **kwargs):
+        """Resolve a coercion for a target type; thin pass-through to
+        :func:`persistence.plan.lookup_coercion`.
+        """
+        from persistence.plan import lookup_coercion as _lookup_coercion
+
+        return _lookup_coercion(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Skill library — factory
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.0c-prime #147: factory for "
+            "persistence.plan.SkillLibrary instances. Surface may "
+            "evolve in v0.9 once Phase-2 dogfooding identifies "
+            "whether this is the load-bearing shape. Adapter authors "
+            "who depend on it should not pin against @stable('v0.8') "
+            "semantics."
+        )
+    )
+    def skill_library(self, *args, **kwargs):
+        """Construct a :class:`persistence.plan.SkillLibrary`; thin
+        pass-through to the constructor.
+        """
+        from persistence.plan import SkillLibrary as _SkillLibrary
+
+        return _SkillLibrary(*args, **kwargs)
+
+
 class _ReplNamespace:
     """Curated ``s.repl.*`` surface — REPL server FACTORY.
 
@@ -589,13 +1082,14 @@ _EscapeNamespace._RAW_RESOLVERS = {
 _SUBSTRATE_PUBLIC_DIR: tuple[str, ...] = (
     # stability marker (class attribute)
     "_stability_version",
-    # 7 curated subsurfaces
+    # 8 curated subsurfaces (Phase 2.0c-prime #147 added ``plan``)
     "audit",
     "close",
     "effect",
     "escape",
     "fact",
     "open",
+    "plan",
     "replay",
     "repl",
     "txn",
@@ -669,6 +1163,7 @@ class Substrate:
         self._repl = _ReplNamespace(self)
         self._audit = _AuditNamespace(self)
         self._replay = _ReplayNamespace(self)
+        self._plan = _PlanNamespace(self)
         self._escape = _EscapeNamespace(self)
 
     # ------------------------------------------------------------------
@@ -796,6 +1291,20 @@ class Substrate:
         :class:`_ReplayNamespace`."""
         self._check_open("replay")
         return self._replay
+
+    @property
+    def plan(self) -> _PlanNamespace:
+        """Curated ``s.plan.*`` namespace; see :class:`_PlanNamespace`.
+
+        Phase 2.0c-prime #147 SDK-gap closure: surfaces the existing
+        :mod:`persistence.plan` substrate as a curated, ``@experimental
+        ('v0.8.5a1')`` re-export layer. Adapter authors who previously
+        reached via ``s.escape.plan`` (which fires a
+        ``:sdk/escape-hatch-access`` audit entry) can now bind to the
+        curated surface instead.
+        """
+        self._check_open("plan")
+        return self._plan
 
     @property
     def escape(self) -> _EscapeNamespace:

@@ -2,6 +2,109 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W3 rescope-pass
+
+Phase 2.0d W3 (R2.3 ARIS codex review fix-pass) is an **honest
+rescoping pass**, not a security-hardening pass. The R2.3 review
+demonstrated that Python-level capability-denial as architected in
+W1+W2 cannot prevent host-FS reads when stdlib transitive closure is
+preserved (concrete repro:
+`import dataclasses; dataclasses.sys.modules['builtins'].open('/etc/passwd','r').read(20)`
+prints host-file bytes with `exit_code == 0`). Rather than chase
+Python-level confidentiality (which is whack-a-mole — a different
+allowed module's `__dict__` would expose an equivalent path, and a
+sufficiently motivated body can rebuild the chain via attribute
+walks), this W3 pass **rescopes `:code/exec` honestly** as a
+soft-isolation runtime guard / best-effort containment for
+trusted-author plan-step bodies under user supervision, and queues
+hard isolation as a separate v0.9.x sandbox-redesign engineering
+project (real OS-level boundary: gVisor / nsjail / Docker / OCI
+runtime / WASM-Pyodide).
+
+**This is a rescope, not a regression.** The W1→W2→W3 trajectory
+shows the team discovered that Python-level capability-denial cannot
+achieve confidentiality without OS-level isolation; the substrate-
+completion claim was honestly corrected and real isolation queued as
+a v0.9.x project. The load-bearing substrate-completion guarantees
+(audit-chain integrity via the M5 fix at `transaction.py:703`,
+replay determinism per § 3.7) remain intact and unchanged. The wedge
+story (Karpathy product reframe — rewind / branch / replay over agent
+trajectories) does not depend on hard sandbox isolation; it depends
+on audit-chain integrity, which is demonstrably correct.
+
+### Documentation
+
+- **ADR-5 amended** in
+  `docs/plans/2026-04-30-phase-2-persistence-coder-design.md`. The
+  pre-W3 capability-denial-not-detection text is preserved verbatim
+  as the historical record; a W3 amendment block follows that:
+  - Documents the R2.3 escape vector (`dataclasses.sys.modules['builtins'].open`)
+    as a known-known limitation expected to remain until v0.9.x.
+  - Restates what the sandbox DOES guarantee — subprocess isolation,
+    `RLIMIT_FSIZE=0` kernel-enforced write-denial, determinism
+    pinning (`PYTHONHASHSEED=0`), curated user-source builtins,
+    top-level import deny-list, audit-chain integrity — all
+    unchanged by W3.
+  - Restates what it does NOT guarantee — host-FS confidentiality
+    against an adversarial body, isolation from already-loaded
+    forbidden modules via allowed modules' `__dict__`, defense
+    against malicious code.
+  - Forward-pointer to the v0.9.x sandbox-redesign track.
+- **`code.py` module docstring rewritten** to lead with
+  "Soft-isolation runtime guard, NOT a confidentiality boundary."
+  Three explicit sections: what the sandbox DOES guarantee, what it
+  does NOT guarantee (with concrete escape repro), and intended use
+  (trusted-author plan-step bodies, NOT untrusted submissions).
+- **Bootstrap shim comments cleaned up** — every "denies host
+  files" / "no curated surface to read" / "capability denial closes
+  the host-file-read vector" framing rewritten to honest
+  soft-isolation language. The import-filter logic itself is
+  correct and unchanged (it does deny imports of forbidden
+  top-level modules — the escape is via *allowed* modules'
+  transitive references, which is a different layer).
+- **`test_open_is_denied` docstring** rewritten to remove the false
+  "no curated surface to read host files" claim. The test still
+  verifies the bare-name `NameError` signal honest plan-step bodies
+  see when calling `open()` directly — that remains a useful
+  soft-isolation default.
+
+### Tests
+
+- **`test_known_escape_via_dataclasses_sys_modules_builtins_open` —
+  new xfail-strict regression test** in `tests/effect/test_code_exec.py`.
+  Reproduces the R2.3 sandbox-break verbatim:
+  `import dataclasses; data = dataclasses.sys.modules['builtins'].open('/etc/passwd','r').read(20)`.
+  Under v0.8.5a1 soft-isolation, `exit_code == 0` (host bytes
+  leaked); the assertion `result.exit_code != 0` fails; the
+  `@pytest.mark.xfail(strict=True)` marker therefore fires and the
+  test runs as `XFAIL`. When the v0.9.x sandbox-redesign track
+  ships a real OS-level boundary, the kernel denies the read,
+  `exit_code != 0`, the assertion holds, the xfail flips to `XPASS`,
+  and `strict=True` forces a CI failure if the marker is not
+  removed — i.e. the test becomes the v0.9.x acceptance signal.
+- Suite delta on this rescope-pass: 2075 passed / 35 skipped /
+  7 xfailed → 2075 passed / 35 skipped / 8 xfailed (the new known-
+  escape regression accounts for the +1 xfail; no new passing tests
+  in W3 — the work is honest documentation, not new functionality).
+
+### Forward-pointer — v0.9.x real-OS-sandbox track (#TBD)
+
+Real OS-level `:code/exec` sandbox boundary (gVisor / nsjail /
+Docker / OCI runtime / WASM-Pyodide) — supersedes the v0.8.5a1
+soft-isolation runtime guard. The audit-datom contract carries
+forward unchanged. The xfail-strict regression test
+`test_known_escape_via_dataclasses_sys_modules_builtins_open` IS
+the falsifiable acceptance signal: when it flips to PASS, the v0.9.x
+boundary is in place. Tracking #TBD (assign on track creation).
+
+### Behaviour change
+
+None. W3 is documentation + a single new regression test (xfail).
+No source files under `src/persistence/effect/` were modified for
+behaviour; only inline comments and module docstring text were
+rewritten. `:code/exec` runtime behaviour is bit-for-bit identical
+to the post-W2 state.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W2 fix-pass
 
 Phase 2.0d W2 (R2.2 ARIS hard-mode fix-pass) closes the effect-side
@@ -36,9 +139,18 @@ findings from the codex review at HEAD `8e06fa1` after W1 landed.
 
 - User-source bodies that imported `pathlib` under v0.5 / W1 will
   now raise `CodeExecForbiddenImport`. Path-string manipulation
-  legitimately fits inside `str` operations; if a body wants to
-  do path I/O it is almost certainly trying to read host files,
-  which the sandbox denies by design (ADR-5).
+  legitimately fits inside `str` operations.
+
+> **W3 RESCOPE NOTE (2026-05-01).** The W2 entry above stated
+> "the sandbox denies host files by design." That framing is
+> **superseded** by the W3 honest-rescope. The W2 pathlib fix is
+> still correct (it closes one specific path through
+> `pathlib.Path.read_text` reaching `_io.open`), but the broader
+> claim that the sandbox is confidentiality-preserving was demoted
+> in W3 — see the W3 entry above for the full rescope and the
+> documented `dataclasses.sys.modules['builtins'].open` escape vector
+> that this layer cannot block. The v0.9.x real-OS-sandbox track
+> supersedes Python-level filtering for confidentiality.
 
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W1 fix-pass
 
@@ -181,6 +293,14 @@ This is **v0.5 sandboxing** — suitable for trusted code (the agent's
 own generations under user supervision), NOT for untrusted user
 submissions. Hardening to ``firejail`` / ``bubblewrap`` lands in
 Phase 3. Any commercial deploy disables ``:code/exec`` by default.
+
+> **W3 RESCOPE NOTE (2026-05-01).** The "v0.5 sandboxing" framing
+> is superseded by the W3 honest-rescope. The substrate-completion
+> guarantee for v0.8.5a1 is **soft-isolation runtime guard /
+> best-effort containment**, NOT a confidentiality boundary. See
+> the Phase 2.0d W3 rescope-pass entry at the top of this CHANGELOG
+> for the full rationale + forward-pointer to the v0.9.x
+> sandbox-redesign track that ships a real OS-level boundary.
 
 ## [0.4.0a1] — 2026-04-25 — audit handler `parent_provenance_hash` alias
 

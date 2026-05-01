@@ -592,6 +592,22 @@ def _build_commit_provenance(tx: "Transaction", commit_id: str) -> dict:
     }
 
 
+def _runtime_active() -> bool:
+    """Return ``True`` iff an effect runtime is currently installed
+    (via :func:`persistence.effect.with_runtime` or equivalent).
+
+    Phase 2.0d W2 (M5): exposed as a small helper so ``_commit_attempt``
+    can pre-gate the ``AuditStackMissing`` check BEFORE the
+    ``transact_batch`` call (true atomicity: no commit on missing
+    runtime). Both this and the post-commit replay path consult the
+    same ``persistence.effect.runtime._active`` ContextVar; the pair
+    cannot disagree.
+    """
+    from persistence.effect.runtime import _active as _effect_active
+
+    return _effect_active.get() is not None
+
+
 def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
     """Replay ``tx.effect_intent_log`` through the active effect runtime.
 
@@ -605,6 +621,17 @@ def _replay_effect_intents(tx: "Transaction", commit_id: str) -> None:
     datoms whenever the substrate's default audit-stack install was
     subverted. The replay-byte-identity invariant from design § 3.7
     cannot hold under that regime.
+
+    Phase 2.0d W2 (M5 fix): the W1 implementation raised AFTER the
+    ``transact_batch`` call, which violated dosync atomicity (facts
+    committed but audit datoms lost). The check is now duplicated as
+    a PRE-commit gate inside :func:`_commit_attempt`, so under the
+    normal commit path this function never sees the violating state.
+    The post-commit raise below is kept as defense-in-depth: it
+    surfaces the same error if a caller invokes
+    ``_replay_effect_intents`` directly outside the commit_attempt
+    flow (no realistic path under the public surface; preserved so
+    direct-call tests / future refactors are guarded).
 
     The empty-intent-log + no-runtime case stays a no-op — that is the
     common "raw fact-only dosync" path (no effects queued, no runtime
@@ -658,6 +685,43 @@ def _commit_attempt(tx: "Transaction") -> bool:
     Both ``with db.dosync()`` and ``@db.dosync`` route their commit gate
     through this single helper.
     """
+    # Commit gate 0 (Phase 2.0d W2 / M5 fix): ``AuditStackMissing``
+    # PRE-commit gate. If the body queued effect intents but no effect
+    # runtime is active, fail BEFORE ``transact_batch`` writes anything.
+    # The W1 implementation raised AFTER ``transact_batch`` (inside
+    # ``_replay_effect_intents``), which violated dosync atomicity:
+    # facts committed and the audit datoms were silently lost. Moving
+    # the check here gives true all-or-nothing semantics — on
+    # ``AuditStackMissing`` no facts (refs / commute reapply / staged
+    # fold_into facts / commit datom) are written.
+    #
+    # The post-commit raise inside ``_replay_effect_intents`` is kept
+    # as defense-in-depth (it is unreachable under the normal flow now
+    # that this gate covers the same condition; if a caller invokes
+    # ``_replay_effect_intents`` directly, the post-commit raise still
+    # surfaces the violation).
+    if tx.effect_intent_log and not _runtime_active():
+        from persistence.txn.errors import AuditStackMissing
+
+        raise AuditStackMissing(
+            f"dosync attempted to commit with {len(tx.effect_intent_log)} "
+            f"queued effect intent(s) but no active effect runtime "
+            f"to replay them through. The intents would have been "
+            f"silently dropped under the pre-W1 'no-runtime → no-op' "
+            f"rule, breaking the audit-replay invariant from design "
+            f"§ 3.7 + ADR-6. The W2 fix raises this error BEFORE the "
+            f"transact_batch call so no facts are committed (true "
+            f"dosync atomicity). Either install an audit handler "
+            f"stack (persistence.effect.canonical_audit_stack(entries) "
+            f"is the substrate-default factory; activate via "
+            f"persistence.effect.with_runtime(rt)), or use "
+            f"persistence.sdk.Substrate.open(uri) which installs "
+            f"the canonical stack by default. Pass "
+            f"Substrate.open(uri, audit=False) only for sandbox "
+            f"tests where Merkle-chain enforcement is undesirable; "
+            f"in that regime, do not queue audit-emitting intents."
+        )
+
     # Commit gate 1: spec validation BEFORE allocating tx-id.
     _spec_validate_writes(tx.write_set)
 
@@ -776,6 +840,7 @@ __all__ = [
     "_build_commute_facts",
     "_build_commit_provenance",
     "_replay_effect_intents",
+    "_runtime_active",
     "_commit_attempt",
     "_run",
 ]

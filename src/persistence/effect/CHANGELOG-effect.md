@@ -2,6 +2,28 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W4 micro-pass
+
+Phase 2.0d W4 closes the two narrow residuals R2.4 surfaced after W3:
+
+- **W4 — RLIMIT_FSIZE wording correction.** The v0.8.0a1 entry below
+  described `RLIMIT_FSIZE = 0` as "read-only on disk" — that is wrong.
+  `RLIMIT_FSIZE = 0` is a write-denial limit at the kernel layer; it
+  does not prevent reads of host files. The line is corrected to
+  "write-denial only; does NOT prevent reads of host files" with a
+  pointer to the W3 rescope-pass entry. The runtime behaviour itself
+  was already correct from v0.8.0a1 onward — this is a documentation
+  fix, not a code change.
+- **W4 — concurrency scope honesty note (v0.8.5a1).** The
+  substrate-completion claim shipping at the v0.8.5a1 sub-tag is
+  scoped to **single-process Python under the GIL**. Multi-process
+  Postgres SERIALIZABLE serialisation already shipped at v0.8.0a1
+  (PG1-PG6 — `PostgresStore` + `transact_serializable` + cross-process
+  Hypothesis property test). No new in-process concurrency
+  guarantees are claimed for v0.8.5a1; effect handlers and audit-stack
+  installation are still single-runtime. Threaded multi-runtime
+  concurrency is a separate v0.9.x track.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W3 rescope-pass
 
 Phase 2.0d W3 (R2.3 ARIS codex review fix-pass) is an **honest
@@ -237,7 +259,9 @@ new chain code, mirrors the ``:plan/edit`` pattern from #140 / 2.0a.
      (kernel backstop), ``RLIMIT_AS = memory_mb * 1024 * 1024``
      (Linux-honored, macOS best-effort), ``RLIMIT_NOFILE = 32`` (no
      fd-flood DoS), ``RLIMIT_NPROC = 1`` (no fork bombs),
-     ``RLIMIT_FSIZE = 0`` (read-only on disk).
+     ``RLIMIT_FSIZE = 0`` (write-denial only; does NOT prevent reads
+     of host files — see W3 rescope-pass entry at the top of this
+     CHANGELOG for the soft-isolation honest framing).
   3. Wall-clock timeout via ``proc.communicate(timeout=...)`` + kill
      on ``TimeoutExpired``.
   4. Module allowlist enforced inside the child via a bootstrap shim

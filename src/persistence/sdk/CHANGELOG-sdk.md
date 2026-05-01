@@ -1,5 +1,17 @@
 # persistence.sdk CHANGELOG
 
+## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W4 micro-pass
+
+Phase 2.0d W4 — concurrency scope honesty note. The substrate-
+completion claim shipping at the v0.8.5a1 sub-tag is scoped to
+**single-process Python under the GIL** for in-process audit-stack
+install and effect-handler dispatch. Multi-process Postgres
+SERIALIZABLE serialisation already shipped at v0.8.0a1 (PG1-PG6 —
+`PostgresStore` + `transact_serializable` + cross-process Hypothesis
+property test); that path is unchanged. No new in-process threaded
+concurrency guarantees are claimed for v0.8.5a1. Threaded
+multi-runtime concurrency is queued as a separate v0.9.x track.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W2 fix-pass
 
 Phase 2.0d W2 (R2.2 ARIS hard-mode fix-pass) closes 2 NEW MAJORs +

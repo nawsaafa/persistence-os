@@ -1,8 +1,19 @@
 """`:code/exec` sandbox handler — Phase 2.0b / #141.
 
-See ``docs/plans/2026-04-30-phase-2-persistence-coder-design.md``
-§ 4.2 + § 3.7 (replay-table row ``:code/exec``) + ADR-5
-(capability-denial-not-detection) for the ground-truth design.
+**Soft-isolation runtime guard, NOT a confidentiality boundary.**
+
+This module ships v0.8.5a1's ``:code/exec`` Plan effect. Phase 2.0d W3
+(2026-05-01) explicitly rescopes the sandbox as a *best-effort* runtime
+guard for trusted-author plan-step bodies under user supervision. It
+does **not** prevent a determined adversarial body from reading host
+files via Python-stdlib transitivity (see "Known limitations" below).
+Hard isolation requires an OS-level boundary (gVisor / nsjail / Docker /
+WASM-Pyodide) and is queued as a separate v0.9.x sandbox-redesign
+track. See ADR-5 in
+``docs/plans/2026-04-30-phase-2-persistence-coder-design.md``
+(W3 amendment) for the rescope rationale, § 4.2 for the runtime-guard
+posture, and § 3.7 (replay-table row ``:code/exec``) for the audit /
+replay contract — the latter two are unchanged by W3.
 
 ## Public surface
 
@@ -19,43 +30,122 @@ See ``docs/plans/2026-04-30-phase-2-persistence-coder-design.md``
   inside :func:`exec_code` — the ``tx.effect()`` queued at intent-replay
   time exists solely to emit the audit datom.
 
-## Capability-denial layers (ADR-5)
+## What the sandbox DOES guarantee
 
-1. **Subprocess isolation** — fresh interpreter via
-   ``sys.executable -s -P -S`` (Phase 2.0d W1: ``-I`` was replaced
+These properties are kernel- or interpreter-enforced and hold
+regardless of the user-source body's intent:
+
+1. **Subprocess isolation** — user code runs in a fresh interpreter
+   via ``sys.executable -s -P -S`` (Phase 2.0d W1: ``-I`` was replaced
    because it suppressed all ``PYTHON*`` env vars including
    ``PYTHONHASHSEED``, defeating the determinism pin; ``-s -P -S`` is
    the same isolation minus ``-E`` so the substrate's
    ``PYTHONHASHSEED=0`` and ``PYTHONDONTWRITEBYTECODE=1`` actually
    take effect). Never ``eval`` / ``exec`` in-process.
-2. **POSIX ``setrlimit`` preexec hook** — RLIMIT_CPU / RLIMIT_AS /
-   RLIMIT_NOFILE / RLIMIT_NPROC / RLIMIT_FSIZE caps on the child.
+2. **POSIX ``setrlimit`` preexec hook** — RLIMIT_CPU (kernel timeout
+   backstop), RLIMIT_AS (address-space cap; Linux honored, macOS
+   best-effort), RLIMIT_NOFILE (fd-flood cap), RLIMIT_NPROC=1
+   (no fork bombs), and **RLIMIT_FSIZE=0 — kernel-enforced write
+   denial** (any ``write()`` from the child gets ``SIGXFSZ``). The
+   write boundary is real and is unaffected by the Python-level
+   stdlib-transitivity escape described below.
 3. **Wall-clock timeout** — ``proc.communicate(timeout=...)`` + kill
-   on ``TimeoutExpired``.
-4. **Module allowlist** — bootstrap shim inside the child monkey-patches
-   ``builtins.__import__`` so only ``json`` / ``re`` / ``dataclasses``
-   (and their measured transitive stdlib closure) are importable.
-   Phase 2.0d W2 (M6) removed ``pathlib`` from the allowlist —
-   ``pathlib.Path.read_text/.read_bytes/.open`` reached the C-level
-   ``_io.open`` directly, bypassing the curated builtins denial; that
-   was a host-filesystem-read escape vector. Everything else raises
-   :class:`CodeExecForbiddenImport`-shaped ``ImportError`` from inside
-   the child; the parent surfaces it via a stderr marker line.
+   on ``TimeoutExpired``; partial stdout / stderr captured into
+   :class:`CodeExecTimeout` so the parent never sees a silent kill.
+4. **Determinism pinning** — ``PYTHONHASHSEED=0`` (set / dict
+   iteration order stable across runs), ``PYTHONDONTWRITEBYTECODE=1``
+   (no ``.pyc`` pollution), no site-packages, no user-base, no
+   script-dir injection.
 5. **Curated user-source ``__builtins__``** — Phase 2.0d W1 (M1)
    removed ``open`` / ``eval`` / ``ex``+``ec`` / ``compile`` /
-   ``input`` / ``breakpoint`` from the user-source globals;
-   ``__import__`` stays because the import statement compiles to an
-   ``IMPORT_NAME`` opcode that reads ``__builtins__["__import__"]``,
-   and the import filter (above) deny-checks the top-level name
-   regardless of statement-form vs direct-call entry.
-6. **No network** — ``socket`` is blocked at import; we do NOT add a
-   netns dance (capability-denial, not detection).
-7. **Working dir + write denial** — fresh ``tempfile.mkdtemp()``
-   cleaned up on exit; ``RLIMIT_FSIZE=0`` makes any ``write()`` from
-   the child get ``SIGXFSZ`` (kernel-enforced write denial). Reads
-   are denied by capability — no ``open`` in the curated builtins,
-   no ``pathlib`` / ``os`` modules importable — not by RLIMIT_FSIZE
-   (which only caps writes).
+   ``input`` / ``breakpoint`` from the user-source globals so a body
+   that calls them directly fails with ``NameError``. ``__import__``
+   stays because the import statement compiles to an ``IMPORT_NAME``
+   opcode that reads ``__builtins__["__import__"]``; the import
+   filter (below) deny-checks the top-level name regardless of
+   statement-form vs direct-call entry.
+6. **Top-level import deny-list + closed allow-list** — bootstrap
+   shim inside the child monkey-patches ``builtins.__import__`` so
+   only ``json`` / ``re`` / ``dataclasses`` are direct-importable.
+   ``os`` / ``sys`` / ``subprocess`` / ``socket`` / ``urllib`` /
+   ``pathlib`` / etc. raise :class:`CodeExecForbiddenImport`-shaped
+   ``ImportError`` at the import statement. The deny-list runs
+   BEFORE the allow-list lookup so warm-imported transitive modules
+   cannot sneak through via the cache.
+7. **No network at import** — ``socket`` is blocked at import; we do
+   NOT add a netns dance (Python-level filter, not a kernel boundary;
+   adversarial bypass is possible — see "Known limitations").
+8. **Audit-chain integrity** — every ``:code/exec`` call emits the
+   canonical 7-key datom under the active txn's Merkle chain; the
+   audit-stack pre-gate (M5 fix at ``transaction.py:703``) ensures a
+   missing audit handler aborts the txn before any commit. Replay
+   determinism (audit-replay default; opt-in re-execution-replay
+   with hash verification) is intact.
+
+## Known limitations (W3 honest-rescope)
+
+The sandbox is **NOT** a confidentiality boundary. A determined
+adversarial body can read arbitrary host files via stdlib transitivity:
+
+- **The escape vector**: any allowed module (``json`` / ``re`` /
+  ``dataclasses``) keeps a reference to ``sys`` (or to other
+  warm-imported modules) in its ``__dict__``. From there, ``sys.modules``
+  exposes ``builtins.open`` and any forbidden-but-already-loaded module
+  (``os``, ``io``, etc.). Concrete repro from the R2.3 codex review:
+  ``import dataclasses;
+  dataclasses.sys.modules['builtins'].open('/etc/passwd','r').read(20)``
+  prints ``'##\\n# User Database\\n#\\n'`` with ``exit_code == 0``.
+- **Why we don't patch this layer**: chasing every stdlib
+  ``__dict__`` reference to ``sys`` / ``builtins`` is whack-a-mole
+  — a different allowed module would expose an equivalent path, and
+  a sufficiently motivated body can rebuild the chain via attribute
+  walks (``__class__.__mro__[1].__subclasses__()`` patterns) even
+  on heavily-stripped interpreters. Real isolation requires the
+  kernel / hypervisor, not a Python-level filter.
+- **Forward-pointer**: hard isolation lands in the v0.9.x
+  sandbox-redesign track (see CHANGELOG-effect.md / design doc § 14
+  forward-pointer). That track replaces this soft-isolation runtime
+  guard with an OS-level boundary (gVisor, nsjail, Docker / OCI
+  runtime, or WASM-Pyodide) where confidentiality is kernel-enforced.
+  The audit-datom contract carries forward unchanged.
+- **Regression-test pin**: the R2.3 repro is preserved as an
+  ``xfail``-strict test (``test_known_escape_via_dataclasses_sys_\
+modules_builtins_open`` in ``tests/effect/test_code_exec.py``) so
+  the moment the v0.9.x boundary lands, the xfail flips to PASS and
+  the marker is removed. That regression test IS the v0.9.x
+  acceptance signal.
+
+## Intended use
+
+Use ``:code/exec`` for **trusted-author plan-step bodies under user
+supervision** — code emitted by the agent inside a controlled session
+where the user can see what's running and the plan-edit audit chain
+records every body. Do NOT use ``:code/exec`` to run untrusted user
+submissions or third-party code; until the v0.9.x boundary lands,
+that use case requires a separate OS-level sandbox (the substrate
+neither prevents this misuse nor diagnoses it).
+
+## Audit datom shape (rides the existing Merkle chain via ``tx.effect``)
+
+The seven datom keys are:
+
+- ``:code/exec/source-hash`` (sha256 of source bytes)
+- ``:code/exec/stdin-hash`` (sha256 of stdin bytes)
+- ``:code/exec/output-hash`` (sha256 of canonical-JSON of
+  ``{stdout, stderr, exit_code}``)
+- ``:code/exec/exit-code`` (int)
+- ``:code/exec/wall-clock-ms`` (int)
+- ``:code/exec/timeout-seconds`` (float)
+- ``:code/exec/memory-mb`` (int)
+
+Stdout / stderr full captures are NOT in the datom (potentially huge);
+only the hashes are. Audit-replay reads the recorded hashes; re-execution
+replay re-runs and verifies ``output_hash`` matches. The caller-side
+``replay_mode`` is also NOT in the datom — two consecutive runs of the
+same source under ``replay_mode="execute"`` and ``"re-execute"`` MUST
+produce byte-identical datoms (they recorded the same outcome under
+the same caps); including the mode would break that invariant. See
+:func:`_emit_code_exec_datom` for the rationale.
 
 ## Audit datom shape (rides the existing Merkle chain via ``tx.effect``)
 

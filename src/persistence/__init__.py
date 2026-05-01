@@ -12,4 +12,4 @@ Modules:
     store    — multi-process Postgres SERIALIZABLE backbone (PG1–PG6 + PG-W1) [v0.8.0a1 shipped]
 """
 
-__version__ = "0.8.0a1"
+__version__ = "0.8.5a1"

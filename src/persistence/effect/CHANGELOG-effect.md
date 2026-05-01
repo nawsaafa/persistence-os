@@ -24,6 +24,25 @@ Phase 2.0d W4 closes the two narrow residuals R2.4 surfaced after W3:
   installation are still single-runtime. Threaded multi-runtime
   concurrency is a separate v0.9.x track.
 
+### Known issues
+
+- **macOS subprocess-startup flake under suite load.** A
+  non-deterministic subset of `tests/effect/test_code_exec.py` cases
+  occasionally hits the 5-second `CodeExecTimeout` when the full test
+  suite runs sequentially on macOS — child-process fork + Python
+  interpreter startup under heavy concurrent FS / resource pressure
+  can exceed the default 5s wall-clock budget. All cases pass in
+  isolation and on Linux. This is a platform-dependent timing
+  characteristic, not a code regression: the underlying
+  `:code/exec` handler logic is correct (verified by codex R2.4
+  hard-mode review, including audit-chain Merkle integrity and replay
+  determinism). Queued for v0.9.x: per-test `timeout_seconds` overrides
+  in the suite + macOS-specific subprocess prewarming or `pytest-xdist`
+  isolation. Local internal-alpha consumers should run
+  `pytest tests/effect/test_code_exec.py -q` separately if the
+  full-suite run shows transient `CodeExecTimeout` failures in this
+  module.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W3 rescope-pass
 
 Phase 2.0d W3 (R2.3 ARIS codex review fix-pass) is an **honest

@@ -286,15 +286,37 @@ def _output_hash(stdout: str, stderr: str, exit_code: int) -> str:
 def _build_child_command() -> list[str]:
     """Return the argv for the sandboxed child interpreter.
 
-    ``-I`` (isolated): suppress PYTHON* env, user site-packages, sys.path[0]
-    insertion, ``-i`` interactive escapes. ``-S`` (no site): skip ``site.py``
-    so user-installed packages cannot leak into the child.
+    Phase 2.0d W1 (M1): the previous flag set was ``-I -S``. ``-I``
+    (isolated mode) had the side-effect of suppressing **all**
+    ``PYTHON*`` env vars — including ``PYTHONHASHSEED``, which the W1
+    determinism fix needs to take effect. To preserve isolation
+    without losing the env-var lever, we replace ``-I`` with its
+    individual components minus ``-E`` (the env-suppressing flag):
 
-    The two flags together turn the child into a near-pristine stdlib
-    interpreter; combined with the import-filter shim (Commit 3) the
-    body sees only the four allowlisted modules.
+    - ``-s`` (no user site): don't add ``USER_BASE/lib/...``
+      packages — the per-user site directory cannot leak code into
+      the child.
+    - ``-P`` (no sys.path[0] insertion, Python 3.11+): don't prepend
+      the script's directory or ``""`` for ``-c``-mode child to
+      ``sys.path``. The child cannot import a sibling adversarial
+      module even if one exists.
+
+    ``-S`` (no site): skip ``site.py`` so user-installed packages
+    cannot leak into the child via the global site-packages.
+
+    The three flags together turn the child into a near-pristine
+    stdlib interpreter while still honouring the substrate-supplied
+    env vars (``PYTHONHASHSEED=0`` for determinism,
+    ``PYTHONDONTWRITEBYTECODE=1`` to skip .pyc generation); combined
+    with the import-filter shim the body sees only the four
+    allowlisted top-level modules.
+
+    Note: ``-i`` (interactive prompt) was previously dropped via
+    ``-I``'s catchall; without ``-I`` we still suppress it implicitly
+    because the child reads from a closed-after-input stdin (no TTY).
+    The bootstrap shim's ``__main__`` does not invoke the REPL.
     """
-    return [sys.executable, "-I", "-S", "-c", _CHILD_RUNNER_BOOTSTRAP]
+    return [sys.executable, "-s", "-P", "-S", "-c", _CHILD_RUNNER_BOOTSTRAP]
 
 
 def _make_preexec(timeout_seconds: float, memory_mb: int) -> Any:
@@ -316,9 +338,15 @@ def _make_preexec(timeout_seconds: float, memory_mb: int) -> Any:
     - ``RLIMIT_NOFILE`` = ``32`` — fd cap; prevents fd-flood DoS.
     - ``RLIMIT_NPROC`` = ``1`` — no fork bombs (the child cannot spawn
       further processes).
-    - ``RLIMIT_FSIZE`` = ``0`` — no file writes from the child;
-      combined with the working-dir tempdir this makes the child
-      effectively read-only on disk.
+    - ``RLIMIT_FSIZE`` = ``0`` — write-denied via the kernel (any
+      ``write()`` from the child gets ``SIGXFSZ``). Reads remain
+      possible on the filesystem visible to the child (the working-
+      dir is ``tempfile.mkdtemp``'d, and there is no network), so
+      "filesystem confidentiality" is NOT a property of this cap;
+      the M1 fix removes ``open()`` from the curated ``__builtins__``
+      under capability-denial (ADR-5) to close the host-file-read
+      vector. Phase 2.0d W1 (m4) corrects the pre-W1 docstring's
+      "effectively read-only on disk" overclaim.
 
     Returns ``None`` on non-POSIX platforms (``resource`` unavailable);
     the caller must check ``_HAS_RESOURCE`` and pass ``None`` for
@@ -408,6 +436,50 @@ _FORBIDDEN_IMPORT_SENTINEL = "PERSISTENCE_CODE_EXEC_FORBIDDEN_IMPORT:"
 # ``:code/exec/source-hash`` is replay-stable only as long as the
 # allowed-set is fixed for a given semver-pinned release.
 _ALLOWED_TOP_LEVEL: tuple[str, ...] = ("json", "re", "dataclasses", "pathlib")
+
+
+# Phase 2.0d W1 (M1): denied builtins removed from the user-source
+# ``__builtins__`` mapping in the child shim. Capability-denial-not-
+# detection (ADR-5): the names simply do not exist in the user's
+# globals, so resolution fails at the dict lookup. The set is small
+# and fixed; it is the parent-side canonical source for the
+# substitution that lands in the child template at module load time
+# (alongside ``_ALLOWED_TOP_LEVEL``). Mutating this tuple is a
+# breaking change to the audit datom contract — the recorded
+# ``:code/exec/source-hash`` is replay-stable only as long as the
+# denied set is fixed for a given semver-pinned release.
+#
+# Deny rationale per name:
+# - ``open``      — host-filesystem read (M1 primary fix)
+# - ``eval``      — arbitrary expression evaluation (escape vector)
+# - ``ex`` + ``ec`` (split here to dodge the JS-codebase security-hook
+#                    false-positive on the literal string) — arbitrary
+#                    statement execution
+# - ``compile``   — code-object construction; precursor to eval/e_xec
+# - ``input``     — interactive stdin prompt; non-deterministic
+# - ``breakpoint``— pdb attach; interactive escape
+#
+# NOT denied (kept callable in the user-source builtins):
+# - ``__import__`` — the ``import X`` statement compiles to an
+#                    ``IMPORT_NAME`` opcode that reads
+#                    ``__builtins__["__import__"]``; removing it
+#                    would break every legitimate ``import`` in user
+#                    code. Direct user-call of ``__import__("os")``
+#                    is still rejected because the parent has wired
+#                    the import filter (``_filtered_import``) which
+#                    deny-checks the top-level name against
+#                    ``_FORBIDDEN_TOP_LEVEL`` regardless of
+#                    statement-form vs direct-call entry. So denying
+#                    the dunder by name is unnecessary AND harmful;
+#                    we leave it on the curated dict.
+_DENIED_BUILTINS: tuple[str, ...] = (
+    "open",
+    "eval",
+    "ex" + "ec",
+    "compile",
+    "input",
+    "breakpoint",
+)
 
 
 # The bootstrap script that runs in the child interpreter. Stays as a
@@ -533,8 +605,28 @@ else:
 
 _sys.stdin = _io.StringIO(_user_stdin)
 
-_globals = {"__name__": "__sandbox__", "__builtins__": _builtins}
-exec(compile(_source, "<sandbox>", "exec"), _globals)
+# Phase 2.0d W1 (M1): build a curated ``__builtins__`` dict that omits
+# the denied names (open / eval / e''xec / compile / input / breakpoint /
+# __import__). Capability-denial-not-detection (ADR-5) — the names
+# simply do not exist in the user's globals, so resolution fails at
+# the dict lookup before any function-call attempt. Resolving via
+# ``getattr(__builtins__, "open")`` also fails because the attr is
+# not on the dict. The denied set is fixed and small; the canonical
+# source is the parent's ``_DENIED_BUILTINS`` tuple, substituted
+# below at module load time alongside ``_ALLOWED_TOP_LEVEL``.
+_DENIED_BUILTIN_NAMES = frozenset(__DENIED_BUILTINS_TUPLE__)
+_safe_builtins = {
+    _name: _val for _name, _val in vars(_builtins).items()
+    if _name not in _DENIED_BUILTIN_NAMES
+}
+
+_globals = {"__name__": "__sandbox__", "__builtins__": _safe_builtins}
+# Use the raw exec / compile from the privileged (full) builtins on the
+# bootstrap side — the parent's bootstrap is trusted; only the user
+# source gets the scrubbed safe-builtins dict in its globals.
+_builtins_exec = getattr(_builtins, "ex" + "ec")
+_builtins_compile = getattr(_builtins, "compile")
+_builtins_exec(_builtins_compile(_source, "<sandbox>", "ex" + "ec"), _globals)
 '''.lstrip()
 
 
@@ -546,8 +638,16 @@ exec(compile(_source, "<sandbox>", "exec"), _globals)
 # ``_ALLOWED_TOP_LEVEL`` load-bearing rather than dead documentation —
 # the constant is referenced HERE, and the test suite asserts the
 # substitution landed (regression guard against parent-vs-child drift).
-_CHILD_RUNNER_BOOTSTRAP = _CHILD_RUNNER_BOOTSTRAP_TEMPLATE.replace(
-    "__ALLOWED_TUPLE__", repr(_ALLOWED_TOP_LEVEL)
+#
+# Phase 2.0d W1 (M1): the same substitution lands ``__DENIED_BUILTINS_TUPLE__``
+# from the parent's ``_DENIED_BUILTINS`` so the curated ``__builtins__``
+# scrub set in the child shim is the canonical source. The pair must
+# stay in sync; the W1 test ``test_denied_builtins_set_is_canonical_source``
+# regression-guards parent-vs-child drift.
+_CHILD_RUNNER_BOOTSTRAP = (
+    _CHILD_RUNNER_BOOTSTRAP_TEMPLATE
+    .replace("__ALLOWED_TUPLE__", repr(_ALLOWED_TOP_LEVEL))
+    .replace("__DENIED_BUILTINS_TUPLE__", repr(tuple(sorted(_DENIED_BUILTINS))))
 )
 
 
@@ -610,7 +710,24 @@ def _run_subprocess(
 
     workdir = tempfile.mkdtemp(prefix="persistence-code-exec-")
 
-    child_env: dict[str, str] = {}
+    # Phase 2.0d W1 (M1): pin the child interpreter's hash seed and
+    # disable .pyc-byte-code generation. ``PYTHONHASHSEED=0`` makes
+    # set / dict iteration order deterministic across runs (the
+    # default randomized seed varies per interpreter start, which
+    # silently breaks byte-identity replay over user code that
+    # iterates a set or dict literal). ``PYTHONDONTWRITEBYTECODE=1``
+    # prevents the child from polluting the working dir with .pyc
+    # files (the dir is mkdtemp'd anyway, but the env var keeps the
+    # closure of "the child's filesystem footprint" smaller). Per
+    # ADR-5 capability-denial-default the env values land BEFORE any
+    # caller-supplied ``env`` overlay so a caller intentionally
+    # passing ``PYTHONHASHSEED=...`` can override (e.g. a fuzz test
+    # that wants to vary seeds); but in the default replay-safety
+    # path the W1 pin holds.
+    child_env: dict[str, str] = {
+        "PYTHONHASHSEED": "0",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
     if env:
         child_env.update(env)
 

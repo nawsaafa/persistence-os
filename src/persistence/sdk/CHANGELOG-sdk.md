@@ -1,5 +1,46 @@
 # persistence.sdk CHANGELOG
 
+## v0.9.0a1 (unreleased) — Phase 2.0f `s.plan.judge` curated SDK method
+
+Phase 2.0f adds a curated invocation surface for the existing
+`Evaluator` Protocol. Bhatt principle 5 (multi-agent collaboration —
+different models cross-check each other) and principle 3 (tests as
+guardrails — failing test as MCTS terminal-bad signal) both want a
+standalone judge entry point: "score this plan with this evaluator,
+return scalar, no MCTS."
+
+### Added
+
+- **`s.plan.judge(plan, *, evaluator) -> float`.** New curated method
+  on `_PlanNamespace`, thin pass-through to the new top-level
+  `persistence.plan.judge` function. Required keyword arg `evaluator`
+  (any object satisfying the `Evaluator` Protocol — `LLMJudgeEvaluator`,
+  `_StaticEvaluator`, or a custom implementation). Returns the float
+  from `evaluator.evaluate(plan)`. Pure thin wrapper: no MCTS, no
+  defaults, no rubric encoding. Caller embeds any criteria inside the
+  evaluator's provider closure (typically
+  `LLMJudgeEvaluator(provider=lambda p: my_llm.score(p, criteria='...'))`).
+  Annotated `@experimental` with reason
+  `"Phase 2.0f curated judge surface — Bhatt principle 5"`. Mirrors
+  the established 24-method curated pattern from 2.0c-prime #147;
+  widens the curated-method count 24 → 25.
+- **`persistence.plan.judge`.** New top-level function exported from
+  `persistence.plan`. Lives next to `LLMJudgeEvaluator` in `_mcts.py`.
+  Pure thin wrapper over `evaluator.evaluate(plan)`. Substrate-side
+  function the curated `s.plan.judge` SDK method delegates to.
+
+### Compatibility
+
+- `dir(s)` namespace count unchanged at 10 — `judge` is a method on
+  `_PlanNamespace`, not a new top-level namespace entry. No migration
+  note for adapter-author introspection (the 9 → 10 widening landed at
+  2.0c-prime).
+- G1 lockfile (Phase 2.4c) will add `s.plan.judge` to the
+  persistence-coder agent's allowed-set.
+- No substrate change. No audit chain change. No new primitives. No
+  re-execution-replay implications. No `__version__` bump beyond the
+  v0.9.0a1 unreleased target.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W4 micro-pass
 
 Phase 2.0d W4 — concurrency scope honesty note. The substrate-

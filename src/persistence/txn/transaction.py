@@ -79,6 +79,18 @@ class Transaction:
     # raise.
     staged_facts: list[dict] = field(default_factory=list)
     commit_id: str | None = None
+    # Phase 2.0e (#175) — set of Node.id values for plan steps that have
+    # completed execution within this transaction. Populated by the Plan
+    # executor (persistence.plan._execute) at the leaf-completion boundary
+    # (lands as a follow-up commit during Phase 2.3a Plan escalation gate
+    # work; this field is the substrate-side commitment surface). Consulted
+    # by persistence.plan._edit.delete_step to enforce the design § 4.1
+    # "only allowed if no downstream step has executed" invariant — without
+    # this field the check could only be call-site validation, which would
+    # let a buggy agent silently delete a step whose effect already ran.
+    # Mutable on purpose; appended to in body-order; reset on retry by
+    # virtue of a fresh Transaction being constructed each attempt.
+    completed_step_ids: set[str] = field(default_factory=set)
 
     def now(self) -> datetime:
         """Frozen t_start. Use this instead of datetime.now() inside

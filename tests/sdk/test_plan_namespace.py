@@ -189,7 +189,13 @@ def test_plan_namespace_smoke_edit():
 
 # The full inventory of curated methods on _PlanNamespace that wrap a
 # persistence.plan callable. Each one MUST carry the @experimental shape.
-_CURATED_METHODS: tuple[str, ...] = (
+#
+# Phase 2.0c-prime #147 landed 24 methods. Phase 2.0f appended ``judge``
+# (Bhatt principle 5 — multi-agent collaboration), widening the count
+# 24 → 25. ``judge``'s reason string carries a Phase-2.0f tag (not the
+# 2.0c-prime / #147 tag the other 24 share); the dual-tag test below
+# enforces both phase markers.
+_CURATED_METHODS_2_0C_PRIME: tuple[str, ...] = (
     "parse",
     "unparse",
     "walk",
@@ -216,12 +222,35 @@ _CURATED_METHODS: tuple[str, ...] = (
     "skill_library",
 )
 
+_CURATED_METHODS_2_0F: tuple[str, ...] = ("judge",)
+
+# Combined inventory — 24 (2.0c-prime) + 1 (2.0f) = 25 curated methods.
+_CURATED_METHODS: tuple[str, ...] = (
+    _CURATED_METHODS_2_0C_PRIME + _CURATED_METHODS_2_0F
+)
+
+
+def test_curated_method_count_is_25() -> None:
+    """Phase 2.0f raises the curated-method count from 24 → 25 by
+    adding ``judge``. This guard pins the count so a future expansion
+    has to consciously update it (mirrors the 2.0c-prime ``dir(s)``
+    9 → 10 migration-note pattern)."""
+    assert len(_CURATED_METHODS_2_0C_PRIME) == 24
+    assert len(_CURATED_METHODS_2_0F) == 1
+    assert len(_CURATED_METHODS) == 25
+
 
 @pytest.mark.parametrize("method_name", _CURATED_METHODS)
 def test_plan_namespace_methods_are_experimental(method_name: str):
-    """Each curated s.plan.<method> carries @experimental metadata
-    matching the s.txn.fork / s.txn.fold_into precedent: level is
-    ``"experimental"`` and reason mentions Phase 2.0c-prime / #147.
+    """Each curated s.plan.<method> carries @experimental metadata.
+    Phase markers are checked per-method:
+
+    * 24 of 25 (the 2.0c-prime cohort) carry ``"Phase 2.0c-prime"`` or
+      ``"#147"`` in the reason string.
+    * ``judge`` (Phase 2.0f) carries ``"Phase 2.0f"``.
+
+    The dual-marker check mirrors the s.txn.fork / s.txn.fold_into
+    precedent (each phase's curated methods carry their own tag).
     """
     with Substrate.open("memory") as s:
         method = getattr(s.plan, method_name)
@@ -236,10 +265,81 @@ def test_plan_namespace_methods_are_experimental(method_name: str):
             f"{metadata.get('level')!r}, expected 'experimental'"
         )
         reason = metadata.get("reason") or ""
-        assert "Phase 2.0c-prime" in reason or "#147" in reason, (
-            f"s.plan.{method_name} reason string does not carry the "
-            f"phase tag; got: {reason!r}"
+        if method_name in _CURATED_METHODS_2_0F:
+            assert "Phase 2.0f" in reason, (
+                f"s.plan.{method_name} (Phase 2.0f cohort) reason "
+                f"string does not carry the phase tag; got: {reason!r}"
+            )
+        else:
+            assert "Phase 2.0c-prime" in reason or "#147" in reason, (
+                f"s.plan.{method_name} reason string does not carry "
+                f"the phase tag; got: {reason!r}"
+            )
+
+
+def test_dir_substrate_count_unchanged_after_2_0f() -> None:
+    """Phase 2.0f adds a *method* on the existing _PlanNamespace, not
+    a new top-level namespace. ``dir(s)`` count must stay at 10
+    (the 2.0c-prime baseline of 9 + ``"plan"`` = 10) — no new entry.
+    """
+    with Substrate.open("memory") as s:
+        names = [n for n in dir(s) if not n.startswith("_")]
+        assert len(names) == 10, (
+            f"dir(s) public count is {len(names)}, expected 10. "
+            f"Phase 2.0f must not widen the namespace surface; "
+            f"actual entries: {sorted(names)!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 7b. Phase 2.0f — s.plan.judge behavioural smoke
+# ---------------------------------------------------------------------------
+
+
+def test_substrate_plan_judge_method_is_thin_pass_through() -> None:
+    """``s.plan.judge(plan, evaluator=ev)`` calls ``persistence.plan.judge``
+    which calls ``ev.evaluate(plan)``. End-to-end, the SDK method is a
+    pure thin pass-through.
+    """
+    from persistence.plan._mcts import _StaticEvaluator
+
+    plan = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+    evaluator = _StaticEvaluator(scores={plan.id: 0.42})
+
+    with Substrate.open("memory") as s:
+        result = s.plan.judge(plan, evaluator=evaluator)
+
+    assert result == 0.42
+
+
+def test_substrate_plan_judge_evaluator_is_keyword_only() -> None:
+    """``s.plan.judge(plan, ev)`` raises ``TypeError`` — the ``evaluator``
+    parameter is keyword-only at the SDK surface as well as the
+    underlying function. Mirrors the call-site discipline of
+    :func:`persistence.plan.mcts_search`.
+    """
+    from persistence.plan._mcts import _StaticEvaluator
+
+    plan = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+    evaluator = _StaticEvaluator(scores={plan.id: 0.5})
+
+    with Substrate.open("memory") as s:
+        with pytest.raises(TypeError):
+            s.plan.judge(plan, evaluator)  # type: ignore[misc]
+
+
+def test_substrate_plan_judge_propagates_evaluator_exceptions() -> None:
+    """The evaluator's exceptions propagate through the curated SDK
+    method unchanged — no facade-level wrapping. Mirrors the design
+    § 13 ``error_class != null`` discipline."""
+    from persistence.plan._mcts import _StaticEvaluator
+
+    plan = Node(tag=":llm-call", attrs={"prompt": "hi"}, children=())
+    evaluator = _StaticEvaluator(scores={}, on_unknown="raise")
+
+    with Substrate.open("memory") as s:
+        with pytest.raises(KeyError):
+            s.plan.judge(plan, evaluator=evaluator)
 
 
 # ---------------------------------------------------------------------------

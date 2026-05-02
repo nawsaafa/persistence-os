@@ -84,6 +84,7 @@ from persistence.plan._mcts import (
     MCTSResult,
     SubstituteLeafAction,
     apply_action,
+    judge,
     mcts_search,
 )
 from persistence.plan._mcts_promote import (
@@ -142,6 +143,7 @@ __all__ = [
     "gate_g4_stub",
     "insert_step_after",
     "insert_step_before",
+    "judge",
     "lookup_coercion",
     "lookup_metric",
     "mcts_promote",

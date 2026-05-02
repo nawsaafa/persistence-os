@@ -61,6 +61,7 @@ from typing import TYPE_CHECKING, Callable
 
 from persistence.plan._ast import Node
 from persistence.plan._errors import (
+    PlanEditDownstreamExecuted,
     PlanEditOutsideDosync,
     StepIdNotFound,
 )
@@ -196,6 +197,44 @@ def _emit_edit_datom(
         before_op_hash=before_op_hash,
         after_op_hash=after_op_hash,
     )
+
+
+def _first_executed_in_subtree(
+    subtree: Node,
+    completed: set[str],
+) -> str | None:
+    """Phase 2.0e (#175) — return the id of the first node in ``subtree``
+    (pre-order DFS, target itself first) that appears in ``completed``,
+    or ``None`` if no node in the subtree has executed.
+
+    Used by :func:`delete_step` to enforce the design § 4.1 line 285
+    invariant ("only allowed if no downstream step has executed").
+
+    A dedicated walker (instead of :func:`persistence.plan._walk.walk`)
+    is used here so the check tolerates ``:code`` / ``:branch`` leaves
+    without raising :class:`UnimplementedNodeKindError`. The
+    downstream-execution check is orthogonal to executor kind dispatch
+    — what matters is whether any node in the deletion subtree carries
+    a content-address that the executor has already committed to
+    ``tx.completed_step_ids``, regardless of the kind.
+
+    Args:
+        subtree: the matched subtree returned by ``_splice_first``
+            (target node itself; deletion would also remove all
+            descendants, so they are part of the guarded set).
+        completed: ``tx.completed_step_ids`` — set of executed step ids.
+
+    Returns:
+        First offending node id (DFS pre-order, target first) or
+        ``None`` if no offence.
+    """
+    if subtree.id in completed:
+        return subtree.id
+    for child in subtree.children:
+        offending = _first_executed_in_subtree(child, completed)
+        if offending is not None:
+            return offending
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -346,10 +385,14 @@ def delete_step(
 ) -> Node:
     """Remove the child step matching ``step_id`` from its parent's children.
 
+    Phase 2.0e (#175) made the downstream-execution check live; deletion
+    is no longer unconditional. If ``step_id`` OR any of its descendants
+    is in ``tx.completed_step_ids``, raise ``PlanEditDownstreamExecuted``.
+
     Args:
         plan: the Plan AST root.
         step_id: the 32-hex ``Node.id`` of the step to remove.
-        tx: the active ``Transaction``.
+        tx: the active ``Transaction`` (consults ``tx.completed_step_ids``).
 
     Returns:
         A new ``Node`` (root) with the matched step removed.
@@ -359,25 +402,14 @@ def delete_step(
         StepIdNotFound: if ``step_id`` is missing OR matches the root
             (deleting the root has no defined return plan; restructure
             to delete a child of a wrapping ``:seq``).
-
-    Caveat (Phase 2.0a):
-        The design § 4.1 line 285 specifies "only allowed if no
-        downstream step has executed". That falsifiable check requires
-        threading a ``completed_step_ids`` set through the Transaction
-        object — a substrate change deferred to a follow-up
-        (substrate-backlog #200; see scratch impl plan decision 2).
-        Until then, ``delete_step`` is permissive: any step inside a
-        dosync may be deleted regardless of whether downstream steps
-        have already run. Callers that care MUST validate at the call
-        site.
+        PlanEditDownstreamExecuted: if ``step_id`` or any descendant has
+            already executed within the active transaction (i.e. is in
+            ``tx.completed_step_ids``). Design § 4.1 line 285. The error
+            message names the first offending node id encountered in
+            pre-order DFS over the target subtree.
     """
     _require_dosync()
     plan_id_before = plan.id
-
-    # TODO #140 follow-up: downstream-execution check (substrate-backlog #200)
-    # Once Transaction tracks completed_step_ids, raise
-    # PlanEditDownstreamExecuted here when any downstream step's id is
-    # in the completed set. Until then, deletion is unconditional.
 
     def _splicer(siblings: tuple[Node, ...], idx: int) -> tuple[Node, ...]:
         return siblings[:idx] + siblings[idx + 1 :]
@@ -390,6 +422,27 @@ def delete_step(
             f"are undefined (no parent to splice from, no defined return "
             f"plan); restructure to delete a child of a wrapping :seq."
         )
+
+    # Phase 2.0e (#175) — downstream-execution check (design § 4.1 line 285).
+    # If the target step OR any of its descendants is in
+    # tx.completed_step_ids, deletion would silently remove an execution
+    # record. Raise PlanEditDownstreamExecuted instead. The check runs
+    # AFTER _splice_first locates the matched subtree (so a missing target
+    # surfaces as StepIdNotFound, not a downstream-check false negative)
+    # and BEFORE audit emission (so a blocked deletion does not leave a
+    # :plan/edit datom on the chain).
+    completed = getattr(tx, "completed_step_ids", None)
+    if completed:
+        offending = _first_executed_in_subtree(matched, completed)
+        if offending is not None:
+            raise PlanEditDownstreamExecuted(
+                f"delete_step: cannot remove step {step_id!r} — its "
+                f"subtree contains node {offending!r} which has already "
+                f"executed in this transaction (tx.completed_step_ids). "
+                f"Design § 4.1: 'only allowed if no downstream step has "
+                f"executed.'"
+            )
+
     _emit_edit_datom(
         tx,
         plan_id=plan_id_before,

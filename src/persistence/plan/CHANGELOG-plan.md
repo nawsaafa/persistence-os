@@ -1,5 +1,68 @@
 # persistence.plan CHANGELOG
 
+## v0.9.0a1 (unreleased) — Phase 2.0e: delete_step downstream-execution check live (#175)
+
+Phase 2.0e of the persistence-coder MVP. Closes the substrate-backlog
+follow-up tracked under the Phase 2.0a "Known gaps" entry below: the
+design § 4.1 line 285 invariant ("``delete_step`` only allowed if no
+downstream step has executed") is now substrate-enforced.
+
+### Added
+
+- **`delete_step` downstream-execution check.** The Phase 2.0a
+  permissive ``TODO #140 follow-up`` comment in
+  ``_edit.py::delete_step`` has been replaced with a live check that
+  consults ``Transaction.completed_step_ids`` (new field; see
+  ``CHANGELOG-txn.md`` for the substrate-side commitment surface).
+  When the target step OR any of its descendants is in
+  ``tx.completed_step_ids``, deletion now raises
+  ``PlanEditDownstreamExecuted``. The error message names the first
+  offending node id encountered in pre-order DFS over the target
+  subtree.
+- **`_first_executed_in_subtree` helper.** Internal pre-order DFS
+  walker dedicated to the downstream-check. Tolerates ``:code`` /
+  ``:branch`` leaves without raising
+  ``UnimplementedNodeKindError`` — the downstream-execution check is
+  orthogonal to executor kind dispatch (the question is "did any
+  node in the deletion subtree commit to ``tx.completed_step_ids``",
+  not "is every node walkable by the executor").
+- **`PlanEditDownstreamExecuted` is now LIVE.** Previously a reserved
+  exception (Phase 2.0a) for callers to pre-write ``except`` blocks
+  against; Phase 2.0e turns the exception into a real raise path.
+
+### Ordering invariants
+
+The downstream-check runs:
+- **AFTER** ``_splice_first`` locates the matched subtree, so a
+  missing target continues to surface as ``StepIdNotFound`` (no
+  downstream-check false-negative on the not-found path).
+- **BEFORE** ``_emit_edit_datom``, so a blocked deletion does not
+  leave a ``:plan/edit`` datom on the audit chain (ADR-6 invariant —
+  no audit-without-effect).
+
+### Tests
+
+- `tests/plan/test_edit.py` — 5 new cases: positive (no downstream
+  executed → succeeds), target itself executed (raises), descendant
+  executed (raises), step-not-found-with-completed-ids-still-raises-
+  not-found (downstream-check does not pre-empt
+  ``StepIdNotFound``), and a unit test for the
+  ``Transaction.completed_step_ids`` field shape.
+- `tests/plan/test_edit_downstream_executed.py` — Hypothesis property
+  test at ``@max_examples=200`` exercising the iff invariant
+  (``raise iff target_subtree_ids ∩ completed_step_ids ≠ ∅``) over
+  random plans + random execution states. 5 consecutive flake-checks
+  green per Phase 2.0c-prime precedent.
+
+### Closes
+
+- Phase 2.0a "Known gaps" entry below — ``delete_step`` is no longer
+  permissive. The ``# TODO #140 follow-up`` comment has been removed.
+- Substrate-backlog #175 (``Transaction.completed_step_ids`` threading
+  prerequisite for the lockfile snapshot at Phase 2.4c).
+
+---
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Plan Edit API (#140)
 
 Phase 2.0a of the persistence-coder MVP (Phase 2 of the v1.0 roadmap).

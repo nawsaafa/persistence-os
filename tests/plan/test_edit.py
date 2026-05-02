@@ -558,3 +558,100 @@ def test_property_sequential_edits_compose_under_one_dosync(
 
     assert final is not None
     assert final.id == replacement_b.id
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.0e (#175) — Transaction.completed_step_ids + delete_step
+# downstream-execution check
+# ---------------------------------------------------------------------------
+
+
+def test_transaction_carries_completed_step_ids_set() -> None:
+    """Phase 2.0e: Transaction exposes a mutable completed_step_ids
+    set that delete_step's downstream-check consults."""
+    from datetime import datetime
+
+    from persistence.txn.transaction import Transaction
+
+    tx = Transaction(db=None, t_start=datetime.now(), attempt=0)
+    assert hasattr(tx, "completed_step_ids")
+    assert tx.completed_step_ids == set()
+    tx.completed_step_ids.add("a" * 32)
+    assert "a" * 32 in tx.completed_step_ids
+
+
+def test_delete_step_succeeds_when_no_downstream_executed(db: DB) -> None:
+    """Phase 2.0e: delete_step still succeeds when completed_step_ids
+    is empty — empty set means no executed steps to guard."""
+    a = Node(tag=":llm-call", attrs={"prompt": "a"}, children=())
+    b = Node(tag=":llm-call", attrs={"prompt": "b"}, children=())
+    plan = Node(tag=":seq", attrs={}, children=(a, b))
+
+    new_plan: Node | None = None
+    with db.dosync() as tx:
+        # completed_step_ids is empty by default
+        assert tx.completed_step_ids == set()
+        new_plan = delete_step(plan, b.id, tx=tx)
+
+    assert new_plan is not None
+    assert b.id not in {n.id for n in _all_nodes(new_plan)}
+
+
+def test_delete_step_raises_when_target_subtree_has_executed_step(
+    db: DB,
+) -> None:
+    """Phase 2.0e: delete_step raises PlanEditDownstreamExecuted when
+    the target step itself is in tx.completed_step_ids — design § 4.1
+    line 285."""
+    from persistence.plan._errors import PlanEditDownstreamExecuted
+
+    a = Node(tag=":llm-call", attrs={"prompt": "a"}, children=())
+    b = Node(tag=":llm-call", attrs={"prompt": "b"}, children=())
+    plan = Node(tag=":seq", attrs={}, children=(a, b))
+
+    with pytest.raises(PlanEditDownstreamExecuted) as exc_info:
+        with db.dosync() as tx:
+            tx.completed_step_ids.add(b.id)  # simulate execution
+            delete_step(plan, b.id, tx=tx)
+
+    # Error message must name the offending step_id for debuggability
+    assert b.id in str(exc_info.value)
+
+
+def test_delete_step_raises_when_descendant_has_executed(db: DB) -> None:
+    """Phase 2.0e: delete_step raises if any descendant of target is
+    in tx.completed_step_ids — guards against silently dropping an
+    executed step nested under a deleted parent."""
+    from persistence.plan._errors import PlanEditDownstreamExecuted
+
+    leaf = Node(tag=":llm-call", attrs={"prompt": "leaf"}, children=())
+    parent = Node(tag=":seq", attrs={"k": "p"}, children=(leaf,))
+    other = Node(tag=":llm-call", attrs={"prompt": "other"}, children=())
+    plan = Node(tag=":seq", attrs={}, children=(parent, other))
+
+    with pytest.raises(PlanEditDownstreamExecuted) as exc_info:
+        with db.dosync() as tx:
+            tx.completed_step_ids.add(leaf.id)  # descendant ran
+            delete_step(plan, parent.id, tx=tx)
+
+    # Error message names the offending descendant id
+    assert leaf.id in str(exc_info.value)
+
+
+def test_delete_step_step_not_found_with_completed_ids_still_raises_not_found(
+    db: DB,
+) -> None:
+    """Phase 2.0e: when the target step_id doesn't exist at all,
+    StepIdNotFound continues to be the raised error (downstream-check
+    must not pre-empt the not-found path)."""
+    plan = Node(
+        tag=":seq",
+        attrs={},
+        children=(Node(tag=":llm-call", attrs={"prompt": "x"}, children=()),),
+    )
+    bogus = "1" * 32
+
+    with pytest.raises(StepIdNotFound):
+        with db.dosync() as tx:
+            tx.completed_step_ids.add(bogus)  # populated, but target missing
+            delete_step(plan, bogus, tx=tx)

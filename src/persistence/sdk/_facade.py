@@ -652,6 +652,27 @@ class _PlanNamespace:
 
         return _mcts_search(*args, **kwargs)
 
+
+    @experimental(
+        reason=(
+            "Phase 2.0f curated judge surface — Bhatt principle 5 "
+            "(multi-agent collaboration). Thin pass-through to "
+            "persistence.plan.judge. Surface may evolve in v0.9 once "
+            "Phase-2 dogfooding identifies whether this is the "
+            "load-bearing shape. Adapter authors who depend on it "
+            "should not pin against @stable('v0.8') semantics."
+        )
+    )
+    def judge(self, *args, **kwargs):
+        """Score a plan via the :class:`Evaluator` Protocol; thin
+        pass-through to :func:`persistence.plan.judge`. Required
+        keyword arg ``evaluator`` (any ``Evaluator``-protocol
+        implementer). Returns the float score.
+        """
+        from persistence.plan import judge as _judge
+
+        return _judge(*args, **kwargs)
+
     @experimental(
         reason=(
             "Phase 2.0c-prime #147: curated re-export of "

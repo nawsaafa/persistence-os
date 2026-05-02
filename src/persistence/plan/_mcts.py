@@ -484,6 +484,39 @@ class LLMJudgeEvaluator:
         return self._provider(plan)
 
 
+def judge(plan: Node, *, evaluator: Evaluator) -> float:
+    """Score ``plan`` using ``evaluator`` and return the resulting float.
+
+    Phase 2.0f curated invocation surface for the :class:`Evaluator`
+    Protocol. Pure thin wrapper — delegates to
+    ``evaluator.evaluate(plan)`` with no transformation. Caller embeds
+    any rubric / criteria inside the evaluator's own state (typically
+    ``LLMJudgeEvaluator(provider=lambda p: my_llm.score(p, criteria=...))``).
+
+    Args:
+        plan: the Plan AST to score.
+        evaluator: any object satisfying the :class:`Evaluator` Protocol —
+            ``LLMJudgeEvaluator``, ``_StaticEvaluator``, or a custom
+            implementation. Keyword-only to prevent accidental
+            positional misuse at the call site.
+
+    Returns:
+        The float returned by ``evaluator.evaluate(plan)``.
+
+    Raises:
+        Whatever the evaluator raises. The MCTS loop (B9) wraps
+        non-finite returns and exceptions into
+        :class:`EvaluatorContractError`; this top-level surface does
+        NOT — callers who want that envelope go through
+        :func:`mcts_search`.
+
+    Phase 2.0f / Bhatt principle 5 (multi-agent collaboration). The
+    curated SDK method ``s.plan.judge`` is a thin pass-through to this
+    function.
+    """
+    return evaluator.evaluate(plan)
+
+
 class _StaticEvaluator:
     """Test-only stub. Pinned signature mirrors ``LLMJudgeEvaluator``.
 

@@ -76,26 +76,22 @@ The escape-hatch infrastructure stays alive in the SDK itself (`s.escape.*` cont
 
 ### Bhatt-1 — `s.plan.judge` curated method (new task row)
 
-**Decision:** ship `_PlanNamespace.judge(plan, criteria, *, evaluator=None) -> ScoreResult` as a thin curated wrapper over the re-exported `LLMJudgeEvaluator` (re-exported in `persistence.sdk.__init__.py:78,124` per 2.0d). Lands as new task row **2.0f** at calendar Mon 2026-05-04 (~0.5d), `@experimental("v0.9.0a1")`. Parametrized stability test mirrors 2.0c-prime pattern. CHANGELOG-sdk.md entry under v0.9.0a1.
+**Decision:** ship `_PlanNamespace.judge(plan, *, evaluator) -> float` as a pure thin curated wrapper over `evaluator.evaluate(plan)` (the `Evaluator` Protocol at `src/persistence/plan/_mcts.py:454-466`). Also add a top-level `persistence.plan.judge(plan, *, evaluator)` so the curated method has a substrate-side function to thinly pass through to (mirrors the 24-method facade pattern from 2.0c-prime). Lands as new task row **2.0f** at calendar Mon 2026-05-04 (~0.5d), `@experimental("v0.9.0a1")`. Parametrized stability test mirrors 2.0c-prime pattern. CHANGELOG-sdk.md entry under v0.9.0a1.
 
-**Rationale:** Bhatt's "multi-agent collaboration" principle (different models cross-check each other) and "tests as guardrails" principle (failing test as MCTS terminal-bad signal) both want a standalone judge invocation surface — "score this plan against these criteria, return scalar — no MCTS." The 2.0d re-export expansion landed the *type* (`LLMJudgeEvaluator`) but not a curated *invocation method* on `_PlanNamespace`. v0.8.5a1 substrate-completion is a coherent ARIS-R2'd bundle; patching it with v0.8.5a2 blurs the bundle boundary. A 2.0f row treats `s.plan.judge` as a Phase 2 prerequisite (same shape as 2.0e for #175) — honest because the agent's MCTS scoring path in 2.3b is the consumer.
+**Rationale:** Bhatt's "multi-agent collaboration" principle (different models cross-check each other) and "tests as guardrails" principle (failing test as MCTS terminal-bad signal) both want a standalone judge invocation surface — "score this plan with this evaluator, return scalar — no MCTS." The 2.0d re-export expansion landed the *type* (`LLMJudgeEvaluator`) but not a curated *invocation method* on `_PlanNamespace`. v0.8.5a1 substrate-completion is a coherent ARIS-R2'd bundle; patching it with v0.8.5a2 blurs the bundle boundary. A 2.0f row treats `s.plan.judge` as a Phase 2 prerequisite (same shape as 2.0e for #175) — honest because the agent's MCTS scoring path in 2.3b is the consumer. Caller-supplied criteria/scoring policy lives inside the `Evaluator` (e.g. `LLMJudgeEvaluator(provider=closure)` where `closure` embeds whatever rubric the caller wants); the curated surface stays minimal.
 
-**Surface signature (locked):**
+**Surface signature (locked, R1 fix-pass corrected):**
 
 ```python
 @experimental("v0.9.0a1", reason="Phase 2.0f curated judge surface — Bhatt principle 5")
-def judge(
-    self,
-    plan: Plan,
-    criteria: Mapping[str, Any],
-    *,
-    evaluator: Evaluator | None = None,
-) -> ScoreResult:
-    """Score `plan` against `criteria`. If `evaluator` is omitted, defaults
-    to `LLMJudgeEvaluator` constructed from substrate's default LLM config."""
+def judge(self, plan: Node, *, evaluator: Evaluator) -> float:
+    """Score `plan` with `evaluator`. Pure thin pass-through to
+    `evaluator.evaluate(plan)`; no MCTS, no defaults, no rubric encoding.
+    Caller embeds scoring policy inside their `Evaluator` (typically
+    `LLMJudgeEvaluator(provider=...)`)."""
 ```
 
-`ScoreResult` is the existing `persistence.plan` dataclass (already re-exported at v0.8.0a1 through the `persistence.sdk.__init__.py` value-shape subset). G1 lockfile adds `s.plan.judge` to the allowed-set.
+`Node` is the existing Plan AST node type from `persistence.plan`. `Evaluator` is the existing Protocol at `_mcts.py:454-466`. No optional/default evaluator: a judge call without an evaluator is vacuous. G1 lockfile adds `s.plan.judge` to the allowed-set.
 
 ### Bhatt-2 — `:test/exec` queued as v0.9.x track (new ADR-11; no task row)
 

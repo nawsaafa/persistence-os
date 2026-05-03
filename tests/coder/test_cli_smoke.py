@@ -9,8 +9,13 @@ surface (`python -m persistence.coder`):
 - `--task` is required by argparse.
 """
 
+import os
 import subprocess
 import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+ENV = {**os.environ, "PYTHONPATH": str(REPO_ROOT / "src")}
 
 
 def test_cli_runs_skeleton_and_emits_banner_on_first_stub() -> None:
@@ -19,6 +24,8 @@ def test_cli_runs_skeleton_and_emits_banner_on_first_stub() -> None:
         capture_output=True,
         text=True,
         timeout=10,
+        env=ENV,
+        cwd=str(REPO_ROOT),
     )
     assert result.returncode == 1
     assert "persistence-coder skeleton" in result.stderr
@@ -32,6 +39,8 @@ def test_cli_warns_when_db_path_omitted() -> None:
         capture_output=True,
         text=True,
         timeout=10,
+        env=ENV,
+        cwd=str(REPO_ROOT),
     )
     assert "warning: no --db-path" in result.stderr
     assert "in-memory substrate" in result.stderr
@@ -43,6 +52,8 @@ def test_cli_rejects_missing_task() -> None:
         capture_output=True,
         text=True,
         timeout=10,
+        env=ENV,
+        cwd=str(REPO_ROOT),
     )
     assert result.returncode != 0
     assert "--task" in result.stderr  # argparse "required" message

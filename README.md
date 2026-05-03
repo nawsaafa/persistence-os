@@ -13,9 +13,10 @@ bitemporal datom; every action is an effect; every plan is an EDN AST; every
 shared state change is a transaction; every LLM boundary has a spec; everything
 is REPL-live.
 
-**Status:** v0.8.5a1 substrate-completion bundle (2093 passing / 33 skipped /
-8 xfailed on `feat/v0.9-persistence-coder@0c54e25`). v0.9.0a1 alpha targets
-June 2026. PyPI release ships with Mimir v0.1.
+**Status:** v0.8.5a1 substrate-completion bundle + Mimir Phase B Ed25519
+signing on the audit chain. 2135 tests passing / 19 skipped / 8 xfailed on
+`feat/v0.9-persistence-coder`. v0.9.0a1 alpha targets June 2026. PyPI
+release ships with Mimir v0.1.
 **License:** AGPL-3 (runtime) + CC-BY-4.0 (paper & benchmarks). Commercial option
 for vertical integrators.
 **Positioning:** substrate for **team knowledge work + accountable agentic operations.**
@@ -133,7 +134,8 @@ persistence-os/
 
 ## Build status
 
-- **v0.8.5a1 substrate-completion shipped** — annotated tag on `acb237c`, 2093 tests passing on `feat/v0.9-persistence-coder`.
+- **v0.8.5a1 substrate-completion shipped** — annotated tag on `acb237c`.
+- **Mimir Phase B Ed25519 audit signing shipped** — `feat/v0.9-persistence-coder`, 2135 tests passing. Detached signatures over each audit entry's content hash; backward compatible with unsigned chains.
 - **Phase 2 `persistence-coder` MVP in progress** — skeleton merged at `c6d448e`; remaining sub-phases land progressively.
 - **v0.9.0a1 GA targets June 2026.**
 - **v0.9.x real-OS-sandbox** queued separately with the F4 xfail-strict acceptance signal in `tests/effect/test_code_exec.py`.

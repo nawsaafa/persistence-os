@@ -15,11 +15,12 @@ Symlinks `scripts/git-hooks/pre-push` into `.git/hooks/pre-push`. One-time per c
 Scans the **net diff** of every push for internal references. Fails the push if any added line matches a banned pattern. Current banned patterns (see `pre-push` for the source-of-truth regex list, kept in sync with `CLAUDE.md` § *Public-vs-Local Branch Discipline*):
 
 - Absolute paths: `/Users/<name>/`
-- Tilde-home refs: `~/Projects/`
+- Tilde-home refs: `~/Projects/`, `~/.claude*`
 - Cross-repo refs: `ai-box/conductor/`
 - Internal track names: `conductor/tracks/<track-name>_<YYYYMMDD>/`
 - Internal hostnames: `srv870083`, `tail89def3.ts.net`
 - Vault env names: `AIOPS_VAULT_API_KEY`, `VAULT_API_KEY`
+- Vault tier/bucket refs: `nawfal-{dev,public,self,vault,prod-*,eng-*}/L<N>`
 
 The scan is on **net diff** (push range from remote to local), not per-commit — what reviewers will see in the GitHub UI is what's checked.
 

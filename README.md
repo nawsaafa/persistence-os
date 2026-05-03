@@ -122,10 +122,6 @@ persistence-os/
 └── verticals/     ← adapter scaffolds per vertical (PRIVATE — gitignored by default)
 ```
 
-The active product track lives at
-`~/Projects/ai-box/conductor/tracks/persistence-os-product_20260429/` (STATUS append
-only; do not modify the track file directly).
-
 ## Privacy posture
 
 - **Local-first:** authoritative datom log runs on operator-controlled infrastructure.

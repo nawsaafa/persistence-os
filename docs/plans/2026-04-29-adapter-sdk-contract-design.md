@@ -727,8 +727,8 @@ R1 round-1 surfaced that the original 5 OQs were not the actual blockers. The li
 
 - This design doc: `docs/plans/2026-04-29-adapter-sdk-contract-design.md`
 - ARIS R1 review: `review-stage/v0.8-adapter-sdk-r1/`
-- Conductor: `persistence-os-product_20260429/STATUS.md` Phase 1 block append
-- Vault: `nawfal-dev/L1` topic memory at design-doc-merge + R1-pass
+- Conductor: active product-track STATUS append on Phase 1 block
+- Vault: dev-tier topic memory at design-doc-merge + R1-pass
 - Serena memory: `v0.8-adapter-sdk-design-locked` post R1 PASS
 
 ---

@@ -552,8 +552,8 @@ The pre-W3 ADR-5 text above is preserved verbatim as the historical record of th
 
 ## 10. Persistence channels
 
-- Conductor: `persistence-os-product_20260429/STATUS.md` — append per-phase block (2.0 / 2.1 / 2.2 / 2.3 / 2.4)
-- Vault: `nawfal-dev/L1` topic memory at design lock + per sub-phase
+- Conductor: active product-track STATUS append per-phase block (2.0 / 2.1 / 2.2 / 2.3 / 2.4)
+- Vault: dev-tier topic memory at design lock + per sub-phase
 - Serena memory: `persistence-os/phase-2-coder-design-locked` (post-ARIS R1) → `persistence-os/v0.9.0a1-coder-mvp-shipped` (Phase 2 close)
 - Auto-memory: `MEMORY.md` index entry per major shipment + `project_persistence_os_product_track.md` topic file
 

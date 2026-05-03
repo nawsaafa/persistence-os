@@ -61,11 +61,12 @@ duality of operator + builder is the moat. **Treat this work with the gravity it
 **Banned patterns** in any commit destined for `origin/*` (enforced by `scripts/git-hooks/pre-push`; the regex list in that hook is the source of truth):
 
 - Absolute paths: `/Users/<name>/`
-- Tilde-home refs: `~/Projects/`
+- Tilde-home refs: `~/Projects/`, `~/.claude*`
 - Cross-repo refs: `ai-box/conductor/`
 - Internal track names: `conductor/tracks/<name>_<YYYYMMDD>/`
 - Internal hostnames: `srv870083`, `tail89def3.ts.net`
 - Vault env names: `AIOPS_VAULT_API_KEY`, `VAULT_API_KEY`
+- Vault tier/bucket refs: `nawfal-{dev,public,self,vault,prod-*,eng-*}/L<N>`
 
 **Bypass** for the rare acknowledged case (e.g. importing pre-existing history whose diffs contain now-banned patterns):
 

@@ -25,12 +25,14 @@ fi
 BANNED_PATTERNS=(
     '/Users/[A-Za-z0-9_-]+/'
     '~/Projects/'
+    '~/\.claude'
     'ai-box/conductor/'
     'conductor/tracks/[A-Za-z0-9_-]+_2[0-9]{7}'
     'srv870083'
     'tail89def3\.ts\.net'
     'AIOPS_VAULT_API_KEY'
     'VAULT_API_KEY'
+    'nawfal-(dev|public|self|vault|prod-[a-z0-9-]+|eng-[a-z0-9-]+)/L[0-9]'
 )
 
 ZERO='0000000000000000000000000000000000000000'

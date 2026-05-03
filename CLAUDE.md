@@ -52,6 +52,28 @@ duality of operator + builder is the moat. **Treat this work with the gravity it
 - **DO NOT touch `juba-os/CLAUDE.md`.** That file's founder paragraph (lines 46–47) is the canonical source referenced from this file and the other product CLAUDE.md files. Edit upstream there only via dedicated juba-os work.
 - **Worktree-CWD discipline.** Substrate work runs in dedicated worktrees under `~/Projects/persistence-os-worktrees/`. Always use absolute paths; never cross worktree boundaries with relative paths. (Lesson held across PG6, 2.0a, 2.0b, 2.0c, 2.0c-ext, 2.0c-prime, 2.0d.)
 - **No `Co-Authored-By: Claude` trailer.** Commits authored in any Claude Code session must NOT include the `Co-Authored-By: Claude Opus … <noreply@anthropic.com>` trailer. Establishes "this is Nawfal's work" as the canonical historical record for the public open-source repo. Effective 2026-05-03 going forward; the 283 past trailer-bearing commits stay as-is (force-push to public origin not justified for a one-line trailer).
+- **Public-vs-local branch discipline.** `origin/main` is the curated public surface; local `main` is the substrate archive. Forward changes destined for the public surface go through a `publish/<topic>` branch off `origin/main`, NOT a direct merge from local `main`. `scripts/git-hooks/pre-push` enforces a banned-pattern denylist on every push (see § Public-vs-Local Branch Discipline below). Install once per clone: `bash scripts/git-hooks/install.sh`.
+
+## Public-vs-Local Branch Discipline
+
+`origin/main` is the curated public surface. Local `main` is the substrate archive — substantive engineering work lands here first, with internal cross-references (track names, ai-box submodule, working-day cadence) intact. Forward changes destined for the public surface go through `publish/<topic>` branches off `origin/main`, not direct merges from local `main`.
+
+**Banned patterns** in any commit destined for `origin/*` (enforced by `scripts/git-hooks/pre-push`; the regex list in that hook is the source of truth):
+
+- Absolute paths: `/Users/<name>/`
+- Tilde-home refs: `~/Projects/`
+- Cross-repo refs: `ai-box/conductor/`
+- Internal track names: `conductor/tracks/<name>_<YYYYMMDD>/`
+- Internal hostnames: `srv870083`, `tail89def3.ts.net`
+- Vault env names: `AIOPS_VAULT_API_KEY`, `VAULT_API_KEY`
+
+**Bypass** for the rare acknowledged case (e.g. importing pre-existing history whose diffs contain now-banned patterns):
+
+```sh
+PERSISTENCE_OS_ALLOW_INTERNAL_REFS=1 git push ...
+```
+
+**Acknowledged historical baseline.** The `docs/aris-round-N/*` and `docs/aris-bitemporal-design-round-N/*` directories were published before this discipline existed. Their headers and bodies contain `/Users/nawfalsaadi/Projects/persistence-os/` paths. They are NOT retroactively scrubbed — force-push to public history is not justified for cosmetic path strings. Future ARIS docs use repo-relative paths only.
 
 ## Skill systems pointer — Phase 7 / `persistence-orchestrate`
 

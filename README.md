@@ -1,12 +1,22 @@
 # persistence-os
 
-The substrate that makes skill systems durable. Replay any chain, branch any step,
-steer any orchestrator — **across runs, not just within them.**
+**Branch any audit point. Recover any client to a known-good state.
+No detail is ever overwritten.**
 
-**Status:** pre-alpha, internal only. Substrate-completion bundle landed at `v0.8.5a1`
-(local annotated sub-tag on `acb237c`, branch `feat/v0.9-2.0d-completion`, NOT pushed).
-2034 tests passing / 33 skipped / 7 xfailed on the substrate-completion branch.
-**License intent:** AGPL-3 (runtime) + CC-BY-4.0 (paper & benchmarks). Commercial option
+The bitemporal substrate underneath [Mimir](https://github.com/mimir-os/mimir-os) —
+the always-on personal agent operating system. Open-core. AGPL-3. Used in
+production via the Mimir Docker image; available standalone for teams building
+their own multi-agent runtimes.
+
+Six invariants, seven modules: every fact is an immutable, content-addressed,
+bitemporal datom; every action is an effect; every plan is an EDN AST; every
+shared state change is a transaction; every LLM boundary has a spec; everything
+is REPL-live.
+
+**Status:** v0.8.5a1 substrate-completion bundle (2093 passing / 33 skipped /
+8 xfailed on `feat/v0.9-persistence-coder@0c54e25`). v0.9.0a1 alpha targets
+June 2026. PyPI release ships with Mimir v0.1.
+**License:** AGPL-3 (runtime) + CC-BY-4.0 (paper & benchmarks). Commercial option
 for vertical integrators.
 **Positioning:** substrate for **team knowledge work + accountable agentic operations.**
 Not a creator-factory or AI-avatar enabler — durability and steerability are the axis,

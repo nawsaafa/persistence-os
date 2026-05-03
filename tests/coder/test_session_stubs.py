@@ -41,32 +41,33 @@ def test_run_raises_on_first_stub(substrate):
     coder = Coder(task="hi", substrate=substrate)
     with pytest.raises(CoderStubNotImplemented) as exc:
         coder.run()
-    assert "Phase 2.2a" in str(exc.value)
-    assert "substrate read via s.fact.q" in str(exc.value)
+    assert str(exc.value) == "Phase 2.2a — substrate read via s.fact.q"
 
 
+# F3 from impl ARIS R1: exact-equality pins each stub's downstream-phase
+# tag AND its semantic hint. Substring matching let a typo or accidental
+# message edit slip through as long as the phase prefix survived.
 @pytest.mark.parametrize(
-    "method_name, expected_phase_tag",
+    "method_name, expected_message",
     [
-        ("_observe",                 "Phase 2.2a"),
-        ("_decide",                  "Phase 2.1b"),
-        ("_act",                     "Phase 2.2a"),
-        ("_should_escalate_plan",    "Phase 2.3a"),
-        ("_escalate_plan",           "Phase 2.3a"),
-        ("_should_escalate_branch",  "Phase 2.3b"),
-        ("_escalate_branch",         "Phase 2.3b"),
-        ("_check_pause",             "Phase 2.3d"),
+        ("_observe",                "Phase 2.2a — substrate read via s.fact.q"),
+        ("_decide",                 "Phase 2.1b — LLM provider call → :llm/decision datom"),
+        ("_act",                    "Phase 2.2a — s.effect.perform on :fs/:shell/:code/:git"),
+        ("_should_escalate_plan",   "Phase 2.3a — checks decision.kind == 'plan'"),
+        ("_escalate_plan",          "Phase 2.3a — Plan AST builder + s.plan.execute"),
+        ("_should_escalate_branch", "Phase 2.3b — decision.kind == 'branch' or confidence < threshold"),
+        ("_escalate_branch",        "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"),
+        ("_check_pause",            "Phase 2.3d — :repl/request datom check + pause/resume"),
     ],
 )
-def test_each_stub_raises_with_phase_tag(
-    substrate, method_name, expected_phase_tag
+def test_each_stub_raises_with_exact_message(
+    substrate, method_name, expected_message
 ):
     coder = Coder(task="hi", substrate=substrate)
     method = getattr(coder, method_name)
-    fake_arg = None
     with pytest.raises(CoderStubNotImplemented) as exc:
         if method_name in ("_observe", "_check_pause"):
             method()
         else:
-            method(fake_arg)
-    assert expected_phase_tag in str(exc.value)
+            method(None)
+    assert str(exc.value) == expected_message

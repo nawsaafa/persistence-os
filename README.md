@@ -35,8 +35,9 @@ primitives that make a skill system durable across runs:
 - **Forward-only schema migrations** on the bitemporal datom log.
 - **Plan editing** that lets an agent rewrite its own next step (`s.plan.edit_step` + an MCTS-driven optimizer over the plan AST).
 
-The product is the substrate. `persistence-coder` (Phase 2 of the product roadmap, not
-yet started) is the first vertical demo.
+The product is the substrate. `persistence-coder` (Phase 2 of the product roadmap;
+skeleton shipped at `c6d448e` on `feat/v0.9-persistence-coder`) is the first vertical
+demo.
 
 ## Thesis
 
@@ -158,7 +159,7 @@ Tracked in `~/Projects/ai-box/conductor/tracks/persistence-os-product_20260429/S
 - **Phase 1 (fact + effect + spec + replay):** done — v0.1.0a1 (2026-04-20).
 - **Phase 1 closure (Adapter SDK + multi-process Postgres SERIALIZABLE):** done — v0.8.0a1 (2026-04-30, ARIS R2 PASS at mean 8.81 / min 8.0).
 - **Substrate completion (Plan Edit API + `:code/exec` soft-isolation + `s.txn.fold` + `DB.fork` + `s.plan` SDK namespace + audit-stack/atomicity/sandbox-rescope):** done — `v0.8.5a1` annotated sub-tag on `acb237c`, branch `feat/v0.9-2.0d-completion`, NOT pushed (internal-alpha only). ARIS R2 hard-mode codex closed at 6.4 with W3 honest-rescope of `:code/exec` accepted as architecturally correct.
-- **Phase 2 of product roadmap (`persistence-coder` MVP, weeks 4–8):** not yet started. Phase 2.4c (lockfile snapshot) is the gate for Phase 7 of the cross-project skill-systems-integration track.
+- **Phase 2 of product roadmap (`persistence-coder` MVP, weeks 4–8):** in progress — Phase 2.1a skeleton shipped at `c6d448e` (`feat/v0.9-persistence-coder`); Phase 2.1b → 2.4c remaining. Phase 2.4c (lockfile snapshot) is the gate for Phase 7 of the cross-project skill-systems-integration track.
 - **v0.9.x real-OS-sandbox:** queued separately, F4 xfail-strict acceptance signal in `tests/effect/test_code_exec.py`.
 - **Phase 7 (`persistence-orchestrate` meta-skill, GA target alongside `v0.9.0a1`):** blocked by Phase 2.4c.
 

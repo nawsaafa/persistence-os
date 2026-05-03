@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# pre-push hook for persistence-os.
+#
+# Blocks pushes whose net diff contains internal references — absolute paths,
+# tilde-home refs, cross-repo references (ai-box submodule), internal track
+# names, internal hostnames, vault env vars. See CLAUDE.md § Public-vs-Local
+# Branch Discipline for rationale.
+#
+# Bypass (rare, acknowledged — e.g. importing pre-existing history whose
+# diffs contain now-banned patterns):
+#   PERSISTENCE_OS_ALLOW_INTERNAL_REFS=1 git push ...
+#
+# Install: bash scripts/git-hooks/install.sh
+
+set -euo pipefail
+
+if [[ "${PERSISTENCE_OS_ALLOW_INTERNAL_REFS:-0}" == "1" ]]; then
+    echo "pre-push: PERSISTENCE_OS_ALLOW_INTERNAL_REFS=1 -> bypassing internal-ref scan" >&2
+    exit 0
+fi
+
+# Banned patterns (POSIX extended regex). Each must NOT appear in any added
+# line of the net diff being pushed. Keep in sync with CLAUDE.md
+# § Public-vs-Local Branch Discipline.
+BANNED_PATTERNS=(
+    '/Users/[A-Za-z0-9_-]+/'
+    '~/Projects/'
+    'ai-box/conductor/'
+    'conductor/tracks/[A-Za-z0-9_-]+_2[0-9]{7}'
+    'srv870083'
+    'tail89def3\.ts\.net'
+    'AIOPS_VAULT_API_KEY'
+    'VAULT_API_KEY'
+)
+
+ZERO='0000000000000000000000000000000000000000'
+
+violations=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+    if [[ "$local_sha" == "$ZERO" ]]; then
+        # Branch deletion — nothing to scan
+        continue
+    fi
+
+    if [[ "$remote_sha" == "$ZERO" ]]; then
+        # New remote branch. Compare against origin/main if it exists,
+        # otherwise scan the tip commit only.
+        if git rev-parse --verify origin/main >/dev/null 2>&1; then
+            base=$(git merge-base origin/main "$local_sha" 2>/dev/null || echo "")
+            if [[ -n "$base" ]]; then
+                range="$base..$local_sha"
+            else
+                range="$local_sha"
+            fi
+        else
+            range="$local_sha"
+        fi
+    else
+        range="$remote_sha..$local_sha"
+    fi
+
+    if [[ "$range" == *..* ]]; then
+        if ! git rev-list "$range" >/dev/null 2>&1; then
+            continue
+        fi
+        added=$(git diff --no-color "$range" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+ ' || true)
+    else
+        added=$(git show --pretty="" --no-color "$range" 2>/dev/null | grep -E '^\+' | grep -vE '^\+\+\+ ' || true)
+    fi
+
+    if [[ -z "$added" ]]; then
+        continue
+    fi
+
+    for pat in "${BANNED_PATTERNS[@]}"; do
+        matches=$(echo "$added" | grep -E "$pat" || true)
+        if [[ -n "$matches" ]]; then
+            echo "pre-push: banned pattern in push to $remote_ref" >&2
+            echo "  pattern: $pat" >&2
+            echo "$matches" | head -5 | sed 's/^/    /' >&2
+            violations=$((violations + 1))
+        fi
+    done
+done
+
+if (( violations > 0 )); then
+    echo "" >&2
+    echo "pre-push: $violations banned-pattern violation(s) found." >&2
+    echo "Sanitize the offending lines, OR if intentional (acknowledged baseline):" >&2
+    echo "  PERSISTENCE_OS_ALLOW_INTERNAL_REFS=1 git push ..." >&2
+    exit 1
+fi
+
+exit 0

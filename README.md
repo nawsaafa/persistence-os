@@ -1,12 +1,23 @@
 # persistence-os
 
-The substrate that makes skill systems durable. Replay any chain, branch any step,
-steer any orchestrator — **across runs, not just within them.**
+**Branch any audit point. Recover any client to a known-good state.
+No detail is ever overwritten.**
 
-**Status:** pre-alpha, internal only. Substrate-completion bundle landed at `v0.8.5a1`
-(local annotated sub-tag on `acb237c`, branch `feat/v0.9-2.0d-completion`, NOT pushed).
-2034 tests passing / 33 skipped / 7 xfailed on the substrate-completion branch.
-**License intent:** AGPL-3 (runtime) + CC-BY-4.0 (paper & benchmarks). Commercial option
+The bitemporal substrate underneath [Mimir](https://github.com/mimir-os/mimir-os) —
+the always-on personal agent operating system. Open-core. AGPL-3. Used in
+production via the Mimir Docker image; available standalone for teams building
+their own multi-agent runtimes.
+
+Six invariants, seven modules: every fact is an immutable, content-addressed,
+bitemporal datom; every action is an effect; every plan is an EDN AST; every
+shared state change is a transaction; every LLM boundary has a spec; everything
+is REPL-live.
+
+**Status:** v0.8.5a1 substrate-completion bundle + Mimir Phase B Ed25519
+signing on the audit chain. 2135 tests passing / 19 skipped / 8 xfailed on
+`feat/v0.9-persistence-coder`. v0.9.0a1 alpha targets June 2026. PyPI
+release ships with Mimir v0.1.
+**License:** AGPL-3 (runtime) + CC-BY-4.0 (paper & benchmarks). Commercial option
 for vertical integrators.
 **Positioning:** substrate for **team knowledge work + accountable agentic operations.**
 Not a creator-factory or AI-avatar enabler — durability and steerability are the axis,
@@ -25,8 +36,9 @@ primitives that make a skill system durable across runs:
 - **Forward-only schema migrations** on the bitemporal datom log.
 - **Plan editing** that lets an agent rewrite its own next step (`s.plan.edit_step` + an MCTS-driven optimizer over the plan AST).
 
-The product is the substrate. `persistence-coder` (Phase 2 of the product roadmap, not
-yet started) is the first vertical demo.
+The product is the substrate. `persistence-coder` (Phase 2 of the product roadmap;
+skeleton shipped at `c6d448e` on `feat/v0.9-persistence-coder`) is the first vertical
+demo.
 
 ## Thesis
 
@@ -88,9 +100,6 @@ Three independent analyses converged the same week:
 - **Howie Liu HyperAgent fit (2026-04-30 AM).** Ship persistence primitives as Anthropic Skills. Drives the Phase 7 distribution channel (`persistence-orchestrate` meta-skill, blocked by the Phase 2.4c lockfile snapshot of `persistence-coder`).
 - **Simon Scrapes skill systems (2026-04-30 PM).** Orchestrator-skill compositional architecture. Drives the curated SDK facade's packaging into a chainable Anthropic Skill.
 
-Research artefacts: `~/Projects/research-output-2026-04-30-simon-scrapes-skills.md` and
-the Simon Scrapes video transcript at `~/Projects/transcript-FD53kEpLh9c.txt`.
-
 ## Repository layout
 
 ```
@@ -113,19 +122,6 @@ persistence-os/
 └── verticals/     ← adapter scaffolds per vertical (PRIVATE — gitignored by default)
 ```
 
-## Relationship to ai-box
-
-Persistence is a **standalone repository** referenced from `ai-box/` as a git submodule
-at `ai-box/vendor/persistence-os`. This keeps the runtime open-sourceable while `ai-box`
-itself (the monorepo containing the vertical integrations, conductor tracks, and
-operator-specific state) remains private.
-
-```bash
-# from ai-box/ root
-git submodule add git@github.com:nawsaafa/persistence-os vendor/persistence-os
-git submodule update --init --recursive
-```
-
 The active product track lives at
 `~/Projects/ai-box/conductor/tracks/persistence-os-product_20260429/` (STATUS append
 only; do not modify the track file directly).
@@ -142,20 +138,13 @@ only; do not modify the track file directly).
 
 ## Build status
 
-Tracked in `~/Projects/ai-box/conductor/tracks/persistence-os-product_20260429/STATUS.md`.
+- **v0.8.5a1 substrate-completion shipped** — annotated tag on `acb237c`.
+- **Mimir Phase B Ed25519 audit signing shipped** — `feat/v0.9-persistence-coder`, 2135 tests passing. Detached signatures over each audit entry's content hash; backward compatible with unsigned chains.
+- **Phase 2 `persistence-coder` MVP in progress** — skeleton merged at `c6d448e`; remaining sub-phases land progressively.
+- **v0.9.0a1 GA targets June 2026.**
+- **v0.9.x real-OS-sandbox** queued separately with the F4 xfail-strict acceptance signal in `tests/effect/test_code_exec.py`.
 
-- **Phase 0 (bootstrap):** done.
-- **Phase 1 (fact + effect + spec + replay):** done — v0.1.0a1 (2026-04-20).
-- **Phase 1 closure (Adapter SDK + multi-process Postgres SERIALIZABLE):** done — v0.8.0a1 (2026-04-30, ARIS R2 PASS at mean 8.81 / min 8.0).
-- **Substrate completion (Plan Edit API + `:code/exec` soft-isolation + `s.txn.fold` + `DB.fork` + `s.plan` SDK namespace + audit-stack/atomicity/sandbox-rescope):** done — `v0.8.5a1` annotated sub-tag on `acb237c`, branch `feat/v0.9-2.0d-completion`, NOT pushed (internal-alpha only). ARIS R2 hard-mode codex closed at 6.4 with W3 honest-rescope of `:code/exec` accepted as architecturally correct.
-- **Phase 2 of product roadmap (`persistence-coder` MVP, weeks 4–8):** not yet started. Phase 2.4c (lockfile snapshot) is the gate for Phase 7 of the cross-project skill-systems-integration track.
-- **v0.9.x real-OS-sandbox:** queued separately, F4 xfail-strict acceptance signal in `tests/effect/test_code_exec.py`.
-- **Phase 7 (`persistence-orchestrate` meta-skill, GA target alongside `v0.9.0a1`):** blocked by Phase 2.4c.
-
-The paper in `paper/` (live source at `paper/tex/persistence-nesy-2026.tex`, rendered
-PDF alongside) stands as the formal substrate spec. The NeSy 2026 publication deadline
-has been dropped to remove time pressure; the paper is maintained as living spec, not
-as a venue artifact.
+The paper in `paper/` is the formal substrate spec.
 
 ## Related work beachheads we unify
 
@@ -176,7 +165,6 @@ pip install -e .
 pytest -q      # 2034+ tests on the substrate-completion branch
 ```
 
-Substrate work runs in dedicated worktrees under `~/Projects/persistence-os-worktrees/`.
 For session orientation in fresh Claude Code agents, see `CLAUDE.md`.
 
 ---

@@ -44,12 +44,36 @@ duality of operator + builder is the moat. **Treat this work with the gravity it
 ## Hard rules
 
 - **DO NOT modify `src/` without an active design plan + ARIS review.** Standard soft-mode threshold is mean ≥ 8.0 / min ≥ 7.5. Hard-mode reviews (used when stakes are high or the design is adversarial) can pass below those thresholds *only* via the W3 honest-rescope pattern: a finding that can't be fixed in scope gets queued as a separate v0.9.x track with a **falsifiable acceptance signal** (e.g. an xfail-strict marker that flips when the fix lands). Phase 2.0d closing at 6.4 is the precedent — `tests/effect/test_code_exec.py` F4 xfail-strict is the v0.9.x real-OS-sandbox acceptance signal. Do not invoke "hard-mode precedent" without queueing the rescope artifact.
+- **Impl ARIS — when REQUIRED vs SKIPPABLE.** Design ARIS (above) is mandatory before touching `src/`. A SECOND impl-time ARIS pass on the merge diff is **REQUIRED** when impl introduces architectural decisions not litigated at design ARIS — new public surface names, new error-class hierarchies, new ADRs, or multi-file integration where "did the implementer copy the spec right" doesn't fully describe the work. **SKIPPABLE** when impl is verbatim-from-spec translation gated by pyright-clean + AST-guard greps + suite green — Phase 2.1a is the precedent (design ARIS R1 PASS-WITH-FIXES → TDD subagent dispatch with locked code per task → impl ARIS retroactive at user prompt, mean 8.X / min 7.X). Default when unclear: run it; retroactive impl ARIS on a merge commit via `codex-companion.mjs task --background --fresh --effort xhigh` is cheap (~5–15 min wall, one cache-warm window).
 - **DO NOT modify landed ADRs.** ADR-17 (in `docs/plans/2026-04-29-adapter-sdk-contract-design.md`) is load-bearing for v0.8 confidentiality posture; the v0.9 privacy-arch work is the proper venue for any change.
-- **DO NOT push `v0.8.5a1` annotated tag to origin.** Local-only by design until `v0.9.0a1` GA. Same for any `feat/v0.9-*` branch.
+- **PUSH allowed.** `v0.8.5a1` annotated tag + `feat/v0.9-*` branches MAY be pushed to `origin` as of 2026-05-03 (Mimir Phase A, ADR-003 in `~/Projects/conductor/tracks/mimir-os-product_20260503/decisions.md`). Repository visibility flipped public same day. Substrate distribution moves from local-only to open-core under AGPL-3 to back the Mimir commercial wrapper. The `@experimental` stability gates remain authoritative for surface stability — public visibility does NOT imply API stability before `v0.9.0a1`.
 - **DO NOT branch off `feat/v0.9-persistence-coder` for docs work.** Branch off `main`. (This file lives on `docs/claude-md-voice` off `main` for that reason.)
 - **DO NOT modify the active track file** at `~/Projects/ai-box/conductor/tracks/persistence-os-product_20260429/`. STATUS append only.
 - **DO NOT touch `juba-os/CLAUDE.md`.** That file's founder paragraph (lines 46–47) is the canonical source referenced from this file and the other product CLAUDE.md files. Edit upstream there only via dedicated juba-os work.
 - **Worktree-CWD discipline.** Substrate work runs in dedicated worktrees under `~/Projects/persistence-os-worktrees/`. Always use absolute paths; never cross worktree boundaries with relative paths. (Lesson held across PG6, 2.0a, 2.0b, 2.0c, 2.0c-ext, 2.0c-prime, 2.0d.)
+- **No `Co-Authored-By: Claude` trailer.** Commits authored in any Claude Code session must NOT include the `Co-Authored-By: Claude Opus … <noreply@anthropic.com>` trailer. Establishes "this is Nawfal's work" as the canonical historical record for the public open-source repo. Effective 2026-05-03 going forward; the 283 past trailer-bearing commits stay as-is (force-push to public origin not justified for a one-line trailer).
+- **Public-vs-local branch discipline.** `origin/main` is the curated public surface; local `main` is the substrate archive. Forward changes destined for the public surface go through a `publish/<topic>` branch off `origin/main`, NOT a direct merge from local `main`. `scripts/git-hooks/pre-push` enforces a banned-pattern denylist on every push (see § Public-vs-Local Branch Discipline below). Install once per clone: `bash scripts/git-hooks/install.sh`.
+
+## Public-vs-Local Branch Discipline
+
+`origin/main` is the curated public surface. Local `main` is the substrate archive — substantive engineering work lands here first, with internal cross-references (track names, ai-box submodule, working-day cadence) intact. Forward changes destined for the public surface go through `publish/<topic>` branches off `origin/main`, not direct merges from local `main`.
+
+**Banned patterns** in any commit destined for `origin/*` (enforced by `scripts/git-hooks/pre-push`; the regex list in that hook is the source of truth):
+
+- Absolute paths: `/Users/<name>/`
+- Tilde-home refs: `~/Projects/`
+- Cross-repo refs: `ai-box/conductor/`
+- Internal track names: `conductor/tracks/<name>_<YYYYMMDD>/`
+- Internal hostnames: `srv870083`, `tail89def3.ts.net`
+- Vault env names: `AIOPS_VAULT_API_KEY`, `VAULT_API_KEY`
+
+**Bypass** for the rare acknowledged case (e.g. importing pre-existing history whose diffs contain now-banned patterns):
+
+```sh
+PERSISTENCE_OS_ALLOW_INTERNAL_REFS=1 git push ...
+```
+
+**Acknowledged historical baseline.** The `docs/aris-round-N/*` and `docs/aris-bitemporal-design-round-N/*` directories were published before this discipline existed. Their headers and bodies contain `/Users/nawfalsaadi/Projects/persistence-os/` paths. They are NOT retroactively scrubbed — force-push to public history is not justified for cosmetic path strings. Future ARIS docs use repo-relative paths only.
 
 ## Skill systems pointer — Phase 7 / `persistence-orchestrate`
 

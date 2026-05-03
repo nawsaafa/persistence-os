@@ -67,6 +67,19 @@ class AuditEntry:
     this from an ``args`` sentinel (``_txn_commit``) to a first-class
     field — see :func:`audit_entry_to_datom` for the wire shape.
     """
+    signature: str | None = None
+    """Detached Ed25519 signature over :attr:`id`, in
+    ``"ed25519:<urlsafe_b64>"`` form. ``None`` for unsigned entries
+    (backward-compatible with v0.5.x..v0.8.0a1 chains). Mimir Phase B —
+    closes the "do you cryptographically prove what your AI did?" gap.
+    Signatures are never part of the content hash; see
+    :meth:`to_dict`."""
+    signer_id: str | None = None
+    """Opaque identifier for the keypair that produced :attr:`signature`.
+    Typically ``persistence.effect._signing.fingerprint(public_key)`` —
+    a short SHA-256 prefix of the raw public key. Verifiers map
+    ``signer_id`` → public key bytes via the ``public_keys`` argument
+    to :func:`verify_chain`. ``None`` iff :attr:`signature` is None."""
 
     def __post_init__(self) -> None:
         """Format invariants on :attr:`op` (ARIS Round 3 P-op-invariants).
@@ -183,6 +196,15 @@ class AuditEntry:
         # ``audit_entry_to_datom``.
         if d.get("txn_commit") is None:
             d.pop("txn_commit", None)
+        # Mimir Phase B: signature/signer_id are NEVER part of the content
+        # hash — the signature signs entry.id (which is the content hash),
+        # so including them would make the hash circular. Strip
+        # unconditionally so signed and unsigned entries with otherwise-
+        # identical content produce the same content hash, preserving
+        # backward compatibility for chains that mix signed and unsigned
+        # entries.
+        d.pop("signature", None)
+        d.pop("signer_id", None)
         return d
 
     def with_fields(self, **changes: Any) -> AuditEntry:
@@ -240,6 +262,13 @@ class AuditEntry:
                 edn[":audit/run-id"] = self.run_id
         if self.parent is not None:
             edn[":audit/parent"] = self.parent
+        # Mimir Phase B: emit Ed25519 signature + signer-id when set.
+        # Both fields are optional in the spec; unsigned entries omit
+        # them entirely, preserving wire compatibility with v0.8.0a1.
+        if self.signature is not None:
+            edn[":audit/signature"] = self.signature
+        if self.signer_id is not None:
+            edn[":audit/signer-id"] = self.signer_id
         # Self-conform at output — a malformed AuditEntry fails loudly
         # here instead of polluting the audit log.
         from persistence.spec import conform as _conform
@@ -297,6 +326,8 @@ class AuditEntry:
             principal=_keyword_map_to_principal(edn.get(":audit/principal", {})),
             run_id=run_id,
             parent=edn.get(":audit/parent"),
+            signature=edn.get(":audit/signature"),
+            signer_id=edn.get(":audit/signer-id"),
         )
 
 
@@ -354,9 +385,31 @@ def _canonicalise_content(content: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def verify_chain(entries: Iterable[AuditEntry]) -> bool:
+def verify_chain(
+    entries: Iterable[AuditEntry],
+    *,
+    public_keys: dict[str, bytes] | None = None,
+) -> bool:
     """True iff every entry's id is the content hash of its fields AND
     prev_hash references the previous entry's id.
+
+    If ``public_keys`` is supplied, additionally verify Ed25519 signatures
+    on every signed entry. The map is keyed by ``signer_id`` (the value
+    stored on each :class:`AuditEntry`) and maps to raw 32-byte public
+    key bytes. A signed entry whose ``signer_id`` is missing from the
+    map, or whose signature fails Ed25519 verification, fails the chain.
+
+    Unsigned entries (``signature is None``) pass through the signature
+    check regardless of ``public_keys`` — backward-compatible with v0.5.x
+    chains. Mixed signed / unsigned chains are tolerated to support
+    rolling key adoption.
+
+    Args:
+        entries: Audit entries in chain order (oldest first).
+        public_keys: Optional ``signer_id → raw_public_key`` map. When
+            ``None`` (default), only the hash chain is verified —
+            preserving the v0.5.x..v0.8.0a1 behaviour for callers that
+            don't yet have keys to verify against.
     """
     prev: str | None = None
     for entry in entries:
@@ -368,6 +421,20 @@ def verify_chain(entries: Iterable[AuditEntry]) -> bool:
             return False
         if entry.prev_hash != prev:
             return False
+        # Mimir Phase B: optional signature verification.
+        if public_keys is not None and entry.signature is not None:
+            if entry.signer_id is None:
+                # Signed entries must declare which key signed them, or
+                # the verifier has no way to look up the public key.
+                return False
+            pub = public_keys.get(entry.signer_id)
+            if pub is None:
+                # Unknown signer — fail closed rather than silently
+                # accept an entry the verifier cannot validate.
+                return False
+            from persistence.effect._signing import verify as _verify_sig
+            if not _verify_sig(entry.id, entry.signature, pub):
+                return False
         prev = entry.id
     return True
 
@@ -385,6 +452,7 @@ def make_audit_handler(
     run_id: str | None = None,
     principal: dict[str, Any] | None = None,
     policy_id: str | None = None,
+    signer: tuple[str, bytes] | None = None,
 ) -> Handler:
     """Return an audit handler that appends to ``entries``.
 
@@ -401,6 +469,12 @@ def make_audit_handler(
         ``:audit/emit`` (masked). Spec §9 anti-pattern avoidance.
     run_id, principal, policy_id
         Fields copied into every entry.
+    signer
+        Optional ``(signer_id, private_key_bytes)`` tuple. When set, every
+        emitted entry is signed with Ed25519 over its content hash and
+        carries the resulting ``signature`` + ``signer_id``. Backward
+        compatible: omitting ``signer`` produces unsigned entries
+        (matching v0.5.x..v0.8.0a1 behaviour). Mimir Phase B.
     """
     audit_name = "audit"
 
@@ -484,7 +558,20 @@ def make_audit_handler(
             # of ``entry.to_dict()`` (which ``verify_chain`` recomputes).
             canonical_content = _canonicalise_content(content)
             entry_id = _content_hash(canonical_content)
-            entry = AuditEntry(id=entry_id, **canonical_content)
+            # Mimir Phase B: sign the entry's content hash when a signer
+            # is configured. The signature is detached — it lives on the
+            # AuditEntry but is excluded from to_dict()/_content_hash so
+            # signed and unsigned entries with otherwise-identical
+            # content produce the same id (preserves chain continuity
+            # for callers that adopt signing mid-chain).
+            sig_kwargs: dict[str, Any] = {}
+            signer_cfg = ctx.get("signer")
+            if signer_cfg is not None:
+                from persistence.effect._signing import sign as _sign
+                signer_id_cfg, private_key = signer_cfg
+                sig_kwargs["signature"] = _sign(entry_id, private_key)
+                sig_kwargs["signer_id"] = signer_id_cfg
+            entry = AuditEntry(id=entry_id, **canonical_content, **sig_kwargs)
             ctx["entries"].append(entry)
             # Drain to named sink if configured.
             sink = ctx.get("sink_name")
@@ -518,6 +605,7 @@ def make_audit_handler(
             "principal": principal or {},
             "policy_id": policy_id,
             "handler_chain": (),
+            "signer": signer,
         },
     )
 

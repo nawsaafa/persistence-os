@@ -2,6 +2,73 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## v0.9.0a1 (unreleased) — Mimir Phase B: Ed25519 signing on the audit chain
+
+Closes the "do you cryptographically prove what your AI did?" gap surfaced by
+the May-2026 competitive-landscape audit. The hash-chained Merkle log shipped
+at v0.5.x..v0.8.0a1 already detected tampering of stored entries; Phase B
+adds **detached Ed25519 signatures** so a third-party verifier (regulator,
+compliance auditor, downstream contract counterparty) can prove the chain
+was produced by a specific keypair without trusting the runtime that emitted
+it.
+
+**Backward compatible.** Unsigned chains continue to verify via the existing
+hash check; signed chains additionally verify Ed25519 signatures when a
+public-key map is supplied to `verify_chain`. Mixed chains are tolerated for
+rolling key adoption.
+
+### Added
+
+- **`persistence.effect._signing`** — new module with four primitives:
+  - `generate_keypair() -> (priv: bytes, pub: bytes)` — fresh Ed25519
+    keypair as raw 32-byte bytes (no PEM/DER ceremony).
+  - `sign(content_hash: str, private_key: bytes) -> str` — returns
+    `"ed25519:<urlsafe_b64>"`.
+  - `verify(content_hash: str, signature: str, public_key: bytes) -> bool` —
+    returns `False` on any failure mode (malformed signature, wrong key,
+    tampered content, malformed public key); never raises.
+  - `fingerprint(public_key: bytes) -> str` — short opaque ID
+    (`"ed25519-pub:<16-hex>"`) suitable as `signer_id`.
+- **`AuditEntry.signature: str | None`** + **`AuditEntry.signer_id: str | None`** —
+  new optional fields on the audit dataclass. `signature` is the detached
+  Ed25519 signature over `entry.id`; `signer_id` identifies which keypair
+  produced it. Both default to `None` for backward compatibility.
+- **`make_audit_handler(..., signer=(signer_id, private_key))`** — new
+  optional kwarg. When set, every emitted entry is signed with Ed25519 over
+  its content hash and carries the resulting `signature` + `signer_id`.
+- **`verify_chain(entries, *, public_keys=None)`** — new optional
+  `public_keys: dict[str, bytes] | None` kwarg. When supplied, the function
+  additionally verifies Ed25519 signatures on every signed entry. Unknown
+  `signer_id`, malformed signature, or signature/key mismatch causes the
+  chain to fail. Unsigned entries pass through unchanged.
+- **Wire format extensions** — `AuditEntry.to_edn()` emits `:audit/signature`
+  + `:audit/signer-id` when set; `AuditEntry.from_edn()` restores them.
+  Spec `:persistence.effect/audit-entry` registers both as optional keys.
+
+### Hash-chain invariant
+
+Signature metadata is **NEVER part of the content hash**. `AuditEntry.to_dict`
+unconditionally strips `signature` and `signer_id` before hashing, so a signed
+and an unsigned entry with otherwise-identical content produce the same
+`entry.id` — preserving the chain continuity guarantee for callers that adopt
+signing mid-chain and avoiding the circular-hash problem (signature signs the
+hash, so the hash cannot include the signature).
+
+### Dependencies
+
+- Adds `cryptography>=42.0` to base dependencies. The `_signing` module
+  depends on `cryptography.hazmat.primitives.asymmetric.ed25519`; this is
+  the de facto standard Ed25519 implementation in the Python ecosystem.
+
+### Tests
+
+- `tests/effect/test_audit_signing.py` — 29 new test cases covering: bare
+  signing primitives (keypair generation, sign / verify, tamper detection,
+  malformed input), `AuditEntry` field semantics + content-hash
+  independence, wire-form roundtrip, `make_audit_handler` integration,
+  and `verify_chain` with signatures including signature-tamper / unknown-
+  signer-id / mixed-chain cases.
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W4 micro-pass
 
 Phase 2.0d W4 closes the two narrow residuals R2.4 surfaced after W3:

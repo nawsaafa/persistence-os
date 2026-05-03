@@ -340,6 +340,14 @@ _audit_entry = keys(
         ":audit/policy-id": maybe(_keyword_spec),
         ":audit/run-id": maybe(uuid_()),
         ":audit/parent": maybe(or_(uuid_(), _sha256_spec)),
+        # Mimir Phase B — Ed25519 signing on audit chain. Both fields are
+        # optional and only emitted when a signer is configured on the
+        # audit handler. Wire form is "ed25519:<urlsafe_b64>" for the
+        # signature and an opaque short string for signer-id (typically
+        # ``persistence.effect._signing.fingerprint(public_key)``).
+        # See ``persistence.effect.handlers.audit.AuditEntry.signature``.
+        ":audit/signature": maybe(str_()),
+        ":audit/signer-id": maybe(str_()),
     },
 )
 register(":persistence.effect/audit-entry", _audit_entry)

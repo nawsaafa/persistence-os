@@ -15,6 +15,11 @@ authors = [
 dependencies = [
     "edn_format>=0.7.5",
     "pyrsistent>=0.20",
+    # Mimir Phase B — Ed25519 signing on the audit chain. Used by
+    # persistence.effect._signing (sign/verify/generate_keypair) and the
+    # optional ``signer=`` parameter on make_audit_handler. Backwards
+    # compatible: chains without signers continue to work unchanged.
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

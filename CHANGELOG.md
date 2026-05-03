@@ -3,6 +3,27 @@
 All notable changes to Persistence OS are tracked here. Versions follow
 `<semver>` with a `-aN` pre-release suffix until the paper lands.
 
+## v0.9.0a1 (unreleased)
+
+Phase 2 of the persistence-coder product roadmap. First agents
+built ON the v0.8.5a1 substrate.
+
+### Added — `persistence.coder` (Phase 2.1a)
+
+- **`persistence.coder` package** (`src/persistence/coder/`). 9th
+  module under `persistence.*`; FIRST consumer-side module (imports
+  from `persistence.sdk` only, never raw substrate modules). Phase
+  2.1a delivers the no-op ReAct skeleton: `Coder` dataclass with
+  substrate dependency-injected, `run()` walks the base § 3.4
+  agent-loop shape and raises `CoderStubNotImplemented` on the first
+  un-filled stub. CLI entry `python -m persistence.coder --task "..."`
+  exits 1 with a stderr banner. Subsequent sub-phases (2.1b LLM
+  provider, 2.1c G1 lockfile contract test, 2.2a/b effects, 2.3a/b/d
+  escalation + REPL pause, 2.4a-d harden) fill the methods. ARIS R1
+  PASS-WITH-FIXES (codex hard-mode mean 8.0 / min 7.6) on design doc
+  `docs/plans/2026-05-03-phase-2.1a-coder-skeleton-design.md`. Per-module
+  CHANGELOG at `src/persistence/coder/CHANGELOG-coder.md`.
+
 ## v0.8.0a1 — 2026-04-30 (Phase 1 closure: Adapter SDK + multi-process Postgres SERIALIZABLE)
 
 Phase 1 of the persistence-coder product roadmap. Cumulative train of two

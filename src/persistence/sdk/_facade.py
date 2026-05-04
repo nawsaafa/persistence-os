@@ -30,7 +30,7 @@ ADR-1 escape-hatch boundary.
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from persistence.sdk._audit import build_escape_hatch_payload
 from persistence.sdk._stability import experimental, stable
@@ -133,7 +133,7 @@ class _EffectNamespace:
         """
         return self._substrate._runtime.is_well_formed(catalog)
 
-    def install_handler(self, handler: "Handler", *, position: str = "bottom") -> None:
+    def install_handler(self, handler: "Handler", *, position: Literal["bottom", "top"] = "bottom") -> None:
         """Install a handler into the substrate's runtime stack.
 
         ``position="bottom"`` inserts at ``handlers[0]`` (innermost — the
@@ -147,8 +147,6 @@ class _EffectNamespace:
         audit middleware so audit wraps the LLM call. Library callers
         (Mode 3, ``make_callable_llm_handler``) use the same method.
         """
-        from persistence.effect.runtime import Handler  # local for forward ref
-
         if position not in ("bottom", "top"):
             raise ValueError(
                 f"position must be 'bottom' or 'top', got {position!r}"

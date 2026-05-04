@@ -56,6 +56,13 @@ _SCHEMAS: dict[str, type[BaseModel]] = {
     ":claim/blob-put": _BlobPutAttrs,
 }
 
+# Drift guard: every kind in CLAIM_KINDS must have a registered schema, and
+# vice versa. Failing fast at import time turns a future KeyError-on-validate
+# into a clear load-time error.
+assert frozenset(_SCHEMAS.keys()) == CLAIM_KINDS, (
+    f"CLAIM_KINDS ↔ _SCHEMAS drift: {CLAIM_KINDS ^ frozenset(_SCHEMAS.keys())!r}"
+)
+
 
 def validate_attrs(kind: str, attrs: dict[str, Any]) -> dict[str, Any]:
     """Validate `attrs` against the registered schema for `kind`.

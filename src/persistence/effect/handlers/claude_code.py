@@ -125,7 +125,25 @@ async def _aggregate_stream(stream: Any) -> dict[str, Any]:
     - Picks ``fingerprint`` as (in order of preference) the last
       AssistantMessage ``message_id``, the ResultMessage ``session_id``,
       or empty string.
+
+    Block discrimination uses ``isinstance`` against the lazily-imported
+    SDK classes as the primary path. If the SDK ever renames
+    ``TextBlock`` / ``ToolUseBlock``, the ``isinstance`` check fails on
+    real SDK instances and the ``__class__.__name__`` fallback also
+    misses — surfacing the drift loudly (empty result + Task 6 cross-
+    handler equivalence test failure) instead of silently dropping
+    content. The name-string fallback is preserved ONLY for test fakes
+    that are not real SDK instances (e.g. mocks bypassing dataclass
+    field constraints).
     """
+    try:
+        from claude_agent_sdk import TextBlock, ToolUseBlock
+    except ImportError:
+        # SDK absent at runtime: no real instances possible, name-string
+        # match on fakes is the only path.
+        TextBlock = None  # type: ignore[assignment]
+        ToolUseBlock = None  # type: ignore[assignment]
+
     text_chunks: list[str] = []
     tool_calls: list[dict[str, Any]] = []
     usage: dict[str, Any] = {}
@@ -134,23 +152,42 @@ async def _aggregate_stream(stream: Any) -> dict[str, Any]:
     last_session_id: str | None = None
 
     async for msg in stream:
-        # Duck-type rather than isinstance — keeps the path independent
-        # of import order and lets test fakes bypass dataclass
-        # constraints when convenient.
         content = getattr(msg, "content", None)
         if isinstance(content, list):
             for block in content:
-                btype = getattr(block, "__class__", type(None)).__name__
-                if btype == "TextBlock":
+                # Primary: isinstance against real SDK classes. Fallback:
+                # __class__.__name__ string match for test fakes that
+                # aren't real SDK instances (mocks bypassing dataclass
+                # field constraints). If the SDK ever renames TextBlock
+                # / ToolUseBlock, isinstance fails on real instances AND
+                # the name-string fallback also misses — block is
+                # dropped, surfacing drift loudly via Task 6 cross-
+                # handler equivalence + the empty result, instead of
+                # silently passing.
+                if TextBlock is not None and isinstance(block, TextBlock):
                     text_chunks.append(getattr(block, "text", ""))
-                elif btype == "ToolUseBlock":
+                elif ToolUseBlock is not None and isinstance(block, ToolUseBlock):
                     tool_calls.append({
                         "id": getattr(block, "id", ""),
                         "name": getattr(block, "name", ""),
                         "input": getattr(block, "input", {}),
                     })
-                # Other block kinds (Thinking/ToolResult/ServerTool*)
-                # are not part of the catalog wire shape — drop.
+                else:
+                    # Test-fake fallback: block is not a real SDK
+                    # instance (or the SDK is absent). Match on class
+                    # name so existing fakes that bypass dataclass
+                    # constraints still flow.
+                    btype = getattr(block, "__class__", type(None)).__name__
+                    if btype == "TextBlock":
+                        text_chunks.append(getattr(block, "text", ""))
+                    elif btype == "ToolUseBlock":
+                        tool_calls.append({
+                            "id": getattr(block, "id", ""),
+                            "name": getattr(block, "name", ""),
+                            "input": getattr(block, "input", {}),
+                        })
+                    # Other block kinds (Thinking/ToolResult/ServerTool*)
+                    # are not part of the catalog wire shape — drop.
         msg_usage = getattr(msg, "usage", None)
         if isinstance(msg_usage, dict) and msg_usage:
             usage = msg_usage

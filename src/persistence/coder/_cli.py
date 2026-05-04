@@ -17,8 +17,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python -m persistence.coder",
         description=(
             "persistence-coder MVP — agent built on the persistence-os "
-            "substrate. v0.9.0a1 skeleton (Phase 2.1a): runs no-op loop, "
-            "raises CoderStubNotImplemented on the first un-filled stub."
+            "substrate. v0.9.0a1 (Phase 2.1b): _decide body lights up, "
+            "first :llm/messages + :llm/decision datoms emit. Run still "
+            "raises CoderStubNotImplemented on _observe (Phase 2.2a)."
         ),
     )
     parser.add_argument(
@@ -33,5 +34,20 @@ def build_parser() -> argparse.ArgumentParser:
             'Substrate URI ("memory" / "sqlite:///<abs-path>"). '
             "Omitted → in-memory + stderr warning."
         ),
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["auto", "anthropic", "claude-code"],
+        default="auto",
+        help=(
+            "LLM provider. 'auto' (default) tries claude-code → anthropic → echo. "
+            "'anthropic' uses the Anthropic API (requires ANTHROPIC_API_KEY). "
+            "'claude-code' uses claude-agent-sdk (Max subscription via host session)."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        default="claude-opus-4-7",
+        help="Model identifier passed to the provider. Default: claude-opus-4-7.",
     )
     return parser

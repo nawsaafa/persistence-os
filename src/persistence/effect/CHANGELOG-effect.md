@@ -69,6 +69,8 @@ hash, so the hash cannot include the signature).
   and `verify_chain` with signatures including signature-tamper / unknown-
   signer-id / mixed-chain cases.
 
+- **Canonical audit stack now wraps `:llm/call`** (`_audit_stack.py`). Phase 2.1b. The constant `CANONICAL_AUDIT_OPS` is split into two purpose-specific tuples: `CANONICAL_AUDIT_WRAPPED_OPS` (audit middleware wraps these — now includes `:llm/call`) and `CANONICAL_AUDIT_RAW_OPS` (raw no-op terminator covers these — excludes `:llm/call`). The provider handler for `:llm/call` is installed separately via `s.effect.install_handler(handler, position="bottom")` (see `CHANGELOG-sdk.md`). `CANONICAL_AUDIT_OPS = CANONICAL_AUDIT_WRAPPED_OPS` is preserved as a backwards-compatibility alias and is **deprecated** in v0.9.0a1; downstream callers should pick the explicit tuple per their use case (audit-coverage perspective vs raw-terminator perspective). Observable change: every `:llm/call` perform now produces an `:audit/llm.call` entry with prev-hash linkage on the existing Merkle chain (Mimir Phase B Ed25519 signature included).
+
 ## v0.8.5a1 (unreleased — lands at Phase 2.0d sub-tag) — Phase 2.0d W4 micro-pass
 
 Phase 2.0d W4 closes the two narrow residuals R2.4 surfaced after W3:

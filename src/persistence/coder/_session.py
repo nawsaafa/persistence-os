@@ -1,21 +1,28 @@
-"""Phase 2.1a — `Coder` ReAct skeleton + CoderStubNotImplemented sentinel.
+"""Phase 2.1a/b — `Coder` ReAct skeleton + first-LLM-call body.
 
-Every behavioral method raises `CoderStubNotImplemented` tagged with
-the downstream sub-phase that fills it. Substrate ownership is
-dependency-injected (LD2 / refresh Q2): callers (CLI, tests) open the
-substrate; Coder never does.
+Phase 2.1a: skeleton — every behavioral method raises
+`CoderStubNotImplemented` tagged with the downstream sub-phase.
+Phase 2.1b: `_decide` body filled — calls :llm/call, transacts
+:llm/messages (before) + :llm/decision (after), returns a structured
+LLMDecision. Other stubs unchanged.
 
-The loop shape mirrors base design § 3.4 (agent-loop diagram)
-top-to-bottom; reordering is an ARIS-reviewable architectural change,
-not a refactor.
+Substrate ownership is dependency-injected (LD2 / refresh Q2):
+callers (CLI, tests) own the substrate; Coder never opens or closes it.
+
+Loop shape mirrors base design § 3.4 (agent-loop diagram); reordering
+is an ARIS-reviewable architectural change, not a refactor.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import uuid
 from dataclasses import dataclass
 
+from persistence.effect.canonical import canonical_dumps
 from persistence.sdk import Substrate
 
+from ._prompt import EMIT_DECISION_TOOL_SCHEMA, build_messages, parse_text_decision
 from ._types import LLMDecision, Observation
 
 
@@ -33,10 +40,11 @@ class Coder:
 
     task: str
     substrate: Substrate
+    model: str = "claude-opus-4-7"             # Phase 2.1b; overridable from CLI --model
     confidence_threshold: float = 0.65          # base § 3.4; tuned at 2.4a
-    missing_confidence_default: float = 0.5     # base § 3.4 fail-safe
+    missing_confidence_default: float = 0.5     # base § 3.4 fail-safe (must be < confidence_threshold)
 
-    # main entry — Phase 2.1b fills the loop body (one iter → while-loop)
+    # main entry — Phase 2.1b loop body deferred to 2.2a
     def run(self) -> None:
         obs = self._observe()
         decision = self._decide(obs)
@@ -56,8 +64,94 @@ class Coder:
         )
 
     def _decide(self, obs: Observation) -> LLMDecision:
-        raise CoderStubNotImplemented(
-            "Phase 2.1b — LLM provider call → :llm/decision datom"
+        """Phase 2.1b: call the LLM provider via :llm/call, transact
+        :llm/messages provenance BEFORE the call (so it persists even
+        if the call raises), parse the response in two tiers (tool-use
+        primary, text-envelope fallback, missing-confidence default
+        last), transact :llm/decision AFTER parsing.
+        """
+        messages = build_messages(self.task, obs)
+        tools = [EMIT_DECISION_TOOL_SCHEMA]
+        call_id = uuid.uuid4().hex  # noqa: wall-clock — entity-id (txn precedent)
+        now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts; routes through :sys/now in 2.4a
+
+        # Provenance BEFORE the call — captured even if perform() raises.
+        self.substrate.fact.transact([
+            {
+                "e": call_id,
+                "a": ":llm/messages",
+                "v": canonical_dumps({
+                    "messages": messages,
+                    "tools": tools,
+                    "model": self.model,
+                }),
+                "valid_from": now,
+            },
+        ])
+
+        result = self.substrate.effect.perform(
+            ":llm/call",
+            {
+                "model": self.model,
+                "messages": messages,
+                "tools": tools,
+            },
+        )
+
+        decision, parsed_via = self._parse_decision(result)
+
+        decision_id = uuid.uuid4().hex  # noqa: wall-clock — entity-id (txn precedent)
+        self.substrate.fact.transact([
+            {
+                "e": decision_id,
+                "a": ":llm/decision",
+                "v": canonical_dumps({
+                    "kind": decision.kind,
+                    "confidence": decision.confidence,
+                    "payload": dict(decision.payload),
+                    "parsed_via": parsed_via,
+                    "source_call": call_id,
+                }),
+                "valid_from": now,
+            },
+        ])
+        return decision
+
+    def _parse_decision(self, result: dict) -> tuple[LLMDecision, str]:
+        """Two-tier parsing per LD3 + tier-3 missing-confidence default."""
+        # Tier 1: tool-use
+        if result.get("tool_calls"):
+            try:
+                payload = result["tool_calls"][0]["input"]
+                kind = payload["kind"]
+                if kind not in {"act", "plan", "branch"}:
+                    raise ValueError("invalid kind")
+                confidence = float(payload["confidence"])
+                if not (0.0 <= confidence <= 1.0):
+                    raise ValueError("confidence out of range")
+                return (
+                    LLMDecision(
+                        kind=kind,
+                        confidence=confidence,
+                        payload=payload.get("payload", {}),
+                    ),
+                    "tool_use",
+                )
+            except (KeyError, ValueError, TypeError):
+                pass  # malformed tool_call — fall through to tier 2
+
+        # Tier 2: text envelope fallback
+        if (parsed := parse_text_decision(result.get("text", ""))) is not None:
+            return (LLMDecision(**parsed), "text_fallback")
+
+        # Tier 3: missing-confidence default — branch-escalates per base § 3.4
+        return (
+            LLMDecision(
+                kind="act",
+                confidence=self.missing_confidence_default,
+                payload={"raw_text": result.get("text", "")},
+            ),
+            "missing_default",
         )
 
     def _act(self, decision: LLMDecision) -> None:

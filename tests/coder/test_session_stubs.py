@@ -51,7 +51,7 @@ def test_run_raises_on_first_stub(substrate):
     "method_name, expected_message",
     [
         ("_observe",                "Phase 2.2a — substrate read via s.fact.q"),
-        ("_decide",                 "Phase 2.1b — LLM provider call → :llm/decision datom"),
+        # _decide removed — filled in Phase 2.1b (Task 9), no longer a stub.
         ("_act",                    "Phase 2.2a — s.effect.perform on :fs/:shell/:code/:git"),
         ("_should_escalate_plan",   "Phase 2.3a — checks decision.kind == 'plan'"),
         ("_escalate_plan",          "Phase 2.3a — Plan AST builder + s.plan.execute"),

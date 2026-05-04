@@ -281,13 +281,17 @@ def test_dir_substrate_count_unchanged_after_2_0f() -> None:
     """Phase 2.0f adds a *method* on the existing _PlanNamespace, not
     a new top-level namespace. ``dir(s)`` count must stay at 10
     (the 2.0c-prime baseline of 9 + ``"plan"`` = 10) — no new entry.
+
+    Phase 2.1c intentionally widens to 11 by adding ``"claim"`` to
+    the public surface. This guard is updated to reflect the new
+    baseline rather than a regression.
     """
     with Substrate.open("memory") as s:
         names = [n for n in dir(s) if not n.startswith("_")]
-        assert len(names) == 10, (
-            f"dir(s) public count is {len(names)}, expected 10. "
-            f"Phase 2.0f must not widen the namespace surface; "
-            f"actual entries: {sorted(names)!r}"
+        assert len(names) == 11, (
+            f"dir(s) public count is {len(names)}, expected 11. "
+            f"Phase 2.1c added 'claim'; any further widening must "
+            f"update this guard. actual entries: {sorted(names)!r}"
         )
 
 

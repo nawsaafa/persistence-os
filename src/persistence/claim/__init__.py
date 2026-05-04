@@ -1,5 +1,26 @@
-"""persistence.claim — HTTP claim surface stub (Phase 2.1c).
+"""Persistence claims layer (Phase 2.1c, @experimental("v0.9.x")).
 
-Public API populated in Task 5 (T5). This stub marks the package boundary
-and is intentionally empty until the full claim namespace is wired.
+Trust-boundary module: owns the ``:claim/*`` kind namespace, schema validation,
+and identity-attestation hooks. Imported by ``persistence.http``; never imports
+from ``persistence.http``.
+
+See Design doc §5 (claims layer epistemic posture), §8 (module layout).
 """
+from __future__ import annotations
+
+from persistence.claim._identity import CallerIdentity
+from persistence.claim._registry import CLAIM_KINDS, is_claim_kind
+from persistence.claim._validate import (
+    ClaimValidationError,
+    UnknownClaimKindError,
+    validate_attrs,
+)
+
+__all__ = [
+    "CLAIM_KINDS",
+    "is_claim_kind",
+    "validate_attrs",
+    "ClaimValidationError",
+    "UnknownClaimKindError",
+    "CallerIdentity",
+]

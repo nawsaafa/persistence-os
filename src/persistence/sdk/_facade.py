@@ -30,11 +30,14 @@ ADR-1 escape-hatch boundary.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from persistence.sdk._audit import build_escape_hatch_payload
 from persistence.sdk._stability import experimental, stable
 from persistence.sdk.uri import open_store
+
+if TYPE_CHECKING:  # pragma: no cover
+    from persistence.effect.runtime import Handler
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +109,10 @@ class _FactNamespace:
 class _EffectNamespace:
     """Curated ``s.effect.*`` surface.
 
-    Thin pass-through to :class:`persistence.effect.Runtime`. Callers
-    needing the raw runtime (e.g. to push handlers) reach via
-    ``s.escape.effect``.
+    Thin pass-through to :class:`persistence.effect.Runtime`, plus the
+    curated :meth:`install_handler` for stack composition (Phase 2.1b).
+    Callers needing the raw runtime for advanced/test-only use can
+    reach via ``s.escape.effect``.
     """
 
     def __init__(self, substrate: "Substrate") -> None:
@@ -128,6 +132,33 @@ class _EffectNamespace:
         :meth:`persistence.effect.Runtime.is_well_formed`.
         """
         return self._substrate._runtime.is_well_formed(catalog)
+
+    def install_handler(self, handler: "Handler", *, position: str = "bottom") -> None:
+        """Install a handler into the substrate's runtime stack.
+
+        ``position="bottom"`` inserts at ``handlers[0]`` (innermost — the
+        raw-terminator slot per :class:`Runtime` docstring convention).
+        ``position="top"`` appends to ``handlers[-1]`` (outermost — the
+        middleware slot). Idempotent: re-installing a handler with the
+        same ``name`` replaces the existing one in place.
+
+        Phase 2.1b: ``coder/__main__.py`` uses ``position="bottom"`` to
+        install the chosen ``:llm/call`` handler under the canonical
+        audit middleware so audit wraps the LLM call. Library callers
+        (Mode 3, ``make_callable_llm_handler``) use the same method.
+        """
+        from persistence.effect.runtime import Handler  # local for forward ref
+
+        if position not in ("bottom", "top"):
+            raise ValueError(
+                f"position must be 'bottom' or 'top', got {position!r}"
+            )
+        rt = self._substrate._runtime
+        rt.handlers = [h for h in rt.handlers if h.name != handler.name]
+        if position == "bottom":
+            rt.handlers.insert(0, handler)
+        else:  # "top"
+            rt.handlers.append(handler)
 
 
 class _TxnNamespace:

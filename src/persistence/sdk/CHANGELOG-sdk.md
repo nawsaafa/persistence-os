@@ -28,6 +28,7 @@ return scalar, no MCTS."
   `persistence.plan`. Lives next to `LLMJudgeEvaluator` in `_mcts.py`.
   Pure thin wrapper over `evaluator.evaluate(plan)`. Substrate-side
   function the curated `s.plan.judge` SDK method delegates to.
+- **`s.effect.install_handler(handler, *, position="bottom")` — curated handler-install surface** (`_facade.py`, `_EffectNamespace`). Replaces the prior pattern of reaching through `s.escape.effect` to mutate `Runtime.handlers` directly. `position="bottom"` inserts at innermost (provider-handler slot); `position="top"` appends at outermost (middleware slot). Idempotent: re-installing by `name` replaces in place. Phase 2.1b consumer: `persistence.coder.__main__` installs the chosen `:llm/call` provider handler under the canonical audit middleware. Class docstring updated to steer callers to the curated method first; `s.escape.effect` reserves to "raw runtime, advanced/test-only use".
 
 ### Compatibility
 

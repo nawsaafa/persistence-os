@@ -210,7 +210,7 @@ def test_audit_perform_failure_does_not_roll_back_facts(app_client):
     log_before = len(list(substrate._db.log()))
 
     # Install a top-position handler that raises on :claim/emit.
-    def _raise_on_emit(args, k, ctx):
+    def _raise_on_emit(_args, _k, _ctx):
         raise RuntimeError("simulated audit perform failure (G4)")
 
     failing = Handler(

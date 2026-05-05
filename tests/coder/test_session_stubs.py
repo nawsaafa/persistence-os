@@ -48,12 +48,14 @@ def test_stub_subtype_inherits_from_not_implemented_error():
 
 
 def test_run_raises_on_first_stub(substrate_with_echo):
-    # Phase 2.2a T4: _observe no longer stubs — _decide can proceed with echo
-    # handler, then _should_escalate_branch is the first real stub hit.
+    # Phase 2.2a T6: _should_escalate_* are now filled. With echo handler,
+    # echo returns kind="act" confidence=0.5 (missing_confidence_default)
+    # which is below threshold 0.65 — _should_escalate_branch returns True
+    # → _escalate_branch raises the stub.
     coder = Coder(task="hi", substrate=substrate_with_echo)
     with pytest.raises(CoderStubNotImplemented) as exc:
         coder.run()
-    assert str(exc.value) == "Phase 2.3b — decision.kind == 'branch' or confidence < threshold"
+    assert str(exc.value) == "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"
 
 
 # F3 from impl ARIS R1: exact-equality pins each stub's downstream-phase
@@ -65,9 +67,9 @@ def test_run_raises_on_first_stub(substrate_with_echo):
         # _observe removed — filled in Phase 2.2a T4, no longer a stub.
         # _decide removed — filled in Phase 2.1b (Task 9), no longer a stub.
         # _act removed — filled in Phase 2.2a T5, no longer a stub.
-        ("_should_escalate_plan",   "Phase 2.3a — checks decision.kind == 'plan'"),
+        # _should_escalate_plan removed — filled in Phase 2.2a T6, no longer a stub.
+        # _should_escalate_branch removed — filled in Phase 2.2a T6, no longer a stub.
         ("_escalate_plan",          "Phase 2.3a — Plan AST builder + s.plan.execute"),
-        ("_should_escalate_branch", "Phase 2.3b — decision.kind == 'branch' or confidence < threshold"),
         ("_escalate_branch",        "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"),
         ("_check_pause",            "Phase 2.3d — :repl/request datom check + pause/resume"),
     ],
@@ -83,3 +85,53 @@ def test_each_stub_raises_with_exact_message(
         else:
             method(None)
     assert str(exc.value) == expected_message
+
+
+# Phase 2.2a T6 — _should_escalate_* gate tests (one-liners filled)
+def test_should_escalate_branch_returns_true_for_kind_branch():
+    s = Substrate.open("memory")
+    coder = Coder(task="t", substrate=s)
+    from persistence.coder._types import LLMDecision
+    assert coder._should_escalate_branch(LLMDecision(kind="branch", confidence=0.9, payload={})) is True
+    s.close()
+
+
+def test_should_escalate_branch_returns_true_below_threshold():
+    s = Substrate.open("memory")
+    coder = Coder(task="t", substrate=s)
+    from persistence.coder._types import LLMDecision
+    assert coder._should_escalate_branch(LLMDecision(kind="act", confidence=0.4, payload={})) is True
+    s.close()
+
+
+def test_should_escalate_branch_returns_false_above_threshold_act():
+    s = Substrate.open("memory")
+    coder = Coder(task="t", substrate=s)
+    from persistence.coder._types import LLMDecision
+    assert coder._should_escalate_branch(LLMDecision(kind="act", confidence=0.9, payload={})) is False
+    s.close()
+
+
+def test_should_escalate_plan_returns_true_for_kind_plan():
+    s = Substrate.open("memory")
+    coder = Coder(task="t", substrate=s)
+    from persistence.coder._types import LLMDecision
+    assert coder._should_escalate_plan(LLMDecision(kind="plan", confidence=0.9, payload={})) is True
+    s.close()
+
+
+def test_should_escalate_plan_returns_false_for_kind_act():
+    s = Substrate.open("memory")
+    coder = Coder(task="t", substrate=s)
+    from persistence.coder._types import LLMDecision
+    assert coder._should_escalate_plan(LLMDecision(kind="act", confidence=0.9, payload={})) is False
+    s.close()
+
+
+def test_escalate_plan_still_raises_stub():
+    s = Substrate.open("memory")
+    coder = Coder(task="t", substrate=s)
+    from persistence.coder._types import LLMDecision
+    with pytest.raises(CoderStubNotImplemented):
+        coder._escalate_plan(LLMDecision(kind="plan", confidence=0.9, payload={}))
+    s.close()

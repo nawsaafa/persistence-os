@@ -14,9 +14,10 @@ import pytest
 
 def test_main_module_invokes_uvicorn_with_proxy_headers_disabled(monkeypatch):
     """Inspect __main__.py's uvicorn.run call args via mock."""
-    captured = {}
+    captured: dict = {}
 
     def fake_run(*args, **kwargs):
+        captured["args"] = args
         captured.update(kwargs)
         # short-circuit instead of actually starting a server
 
@@ -26,15 +27,22 @@ def test_main_module_invokes_uvicorn_with_proxy_headers_disabled(monkeypatch):
     monkeypatch.setattr(uvicorn, "run", fake_run)
 
     from persistence.http.__main__ import main
-    main()
+    try:
+        main()
 
-    assert captured.get("proxy_headers") is False, (
-        "uvicorn must be started with proxy_headers=False to prevent "
-        "X-Forwarded-* from rewriting request.client.host (Design §7.1, R1.2 N3)"
-    )
-    assert captured.get("forwarded_allow_ips") == "", (
-        "forwarded_allow_ips must be empty string to disable proxy header trust"
-    )
+        assert captured.get("proxy_headers") is False, (
+            "uvicorn must be started with proxy_headers=False to prevent "
+            "X-Forwarded-* from rewriting request.client.host (Design §7.1, R1.2 N3)"
+        )
+        assert captured.get("forwarded_allow_ips") == "", (
+            "forwarded_allow_ips must be empty string to disable proxy header trust"
+        )
+    finally:
+        # Close the substrate that build_app() created — otherwise the audit
+        # ContextVar leaks into subsequent tests (T14.1 invariant).
+        app = captured.get("args", (None,))[0] if captured.get("args") else None
+        if app is not None and hasattr(app.state, "substrate"):
+            app.state.substrate.close()
 
 
 def test_main_hermetic_subprocess(tmp_path):

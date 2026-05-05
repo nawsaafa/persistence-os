@@ -20,6 +20,10 @@ class Observation:
     """Substrate read result returned by `_observe`. Empty in 2.1a/2.1b;
     fields land in 2.2a as the read shape stabilizes."""
 
+    iter_count: int = 0
+    recent_decisions: tuple[Mapping[str, Any], ...] = ()
+    recent_actions: tuple[Mapping[str, Any], ...] = ()
+
 
 @dataclass(frozen=True)
 class LLMDecision:

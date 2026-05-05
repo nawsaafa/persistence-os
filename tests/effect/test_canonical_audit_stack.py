@@ -1,4 +1,4 @@
-"""Canonical audit-handler stack tests — Phase 2.0d W1 + Phase 2.1c.6 extensions.
+"""Canonical audit-handler stack tests — Phase 2.0d W1 + Phase 2.1c.6 + Phase 2.2a extensions.
 
 Tests pin the membership of CANONICAL_AUDIT_WRAPPED_OPS and
 CANONICAL_AUDIT_RAW_OPS, verifying that new audit-emitting ops are
@@ -35,3 +35,33 @@ def test_canonical_audit_raw_ops_includes_2_1c_6_ops():
         "2.1c.6 contract: :blob/put is audit-only — raw terminator must "
         "cover it (the request datom IS the audit signal)."
     )
+
+
+def test_canonical_audit_stack_covers_phase_2_ops():
+    """Drift-pin: every wrapped audit op shipped through Phase 2.0a-2.2a is here.
+
+    Phase 2.2a additions: :fs/read, :fs/write, :fs/glob, :fs/grep, :shell/exec.
+    These are substantive-return ops — wrapped by audit middleware but NOT in
+    CANONICAL_AUDIT_RAW_OPS (their bottom-of-stack handler IS the substantive
+    handler installed via s.effect.install_handler at position="bottom").
+    """
+    from persistence.effect._audit_stack import (
+        CANONICAL_AUDIT_RAW_OPS,
+        CANONICAL_AUDIT_WRAPPED_OPS,
+    )
+
+    expected_wrapped = {
+        # Phase 2.0a / 2.0b / 2.0c / 2.0c-ext / 2.1b / 2.1c.6
+        ":plan/edit", ":code/exec",
+        ":fork/probe", ":fork/branch", ":fork/score", ":fork/chosen",
+        ":fold/chosen", ":llm/call",
+        ":claim/emit", ":blob/put",
+        # Phase 2.2a additions:
+        ":fs/read", ":fs/write", ":fs/glob", ":fs/grep", ":shell/exec",
+    }
+    assert set(CANONICAL_AUDIT_WRAPPED_OPS) == expected_wrapped
+
+    # The 2.2a fs/shell ops are NOT in RAW_OPS — they have substantive returns.
+    new_ops = {":fs/read", ":fs/write", ":fs/glob", ":fs/grep", ":shell/exec"}
+    assert not (new_ops & set(CANONICAL_AUDIT_RAW_OPS)), \
+        "fs/shell ops MUST NOT be in CANONICAL_AUDIT_RAW_OPS"

@@ -2,6 +2,90 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## Phase 2.2a — 2026-05-05 (:fs/* + :shell/exec handler factories + canonical audit op extension)
+
+Phase 2.2a ships two new handler factories that give the persistence-coder
+`_act` body real FS and shell tools. Both ops are added to
+`CANONICAL_AUDIT_WRAPPED_OPS`; neither is added to `CANONICAL_AUDIT_RAW_OPS`
+because they return substantive results (LD9 — substantive-return ops live in
+WRAPPED only, matching the `:llm/call` precedent from Phase 2.1b).
+
+### Added
+
+- **`make_fs_handler(*, project_root, scratch_dir, name="fs")`**
+  (`handlers/fs.py`). Capability-denial-not-detection via
+  `Path.resolve(strict=False).is_relative_to`. Variadic internal helper
+  `_safe_resolve(*allowed_roots)` — `:fs/read` allows `project_root` and
+  `scratch_dir`; `:fs/write` allows `scratch_dir` only; `:fs/glob` and
+  `:fs/grep` allow both. Four ops covered:
+  - `:fs/read` — returns `bytes_or_text: str`. `encoding="binary"` returns
+    base64-encoded str (LD10 — canonical-JSON byte-identity safety; raw bytes
+    cannot be canonical-JSON serialised).
+  - `:fs/write` — atomic write to `scratch_dir`; raises `FsCapabilityDenied`
+    for paths outside the allowed root.
+  - `:fs/glob` — `sorted()` output (canonical determinism).
+  - `:fs/grep` — `sorted()` output (canonical determinism).
+  Escaping the allowed root raises `FsCapabilityDenied`. Symlink targets are
+  resolved before the `is_relative_to` check, so `../`-escaped symlinks are
+  caught.
+
+- **`make_shell_handler(*, allowlist=ALLOWLIST_V1, env_passthrough=ENV_DEFAULT,
+  name="shell")`** (`handlers/shell.py`). One op: `:shell/exec`. Hardening:
+  - `argv` must be `list[str]`; `shell=False` always; `cwd` required.
+  - `env` subset filtered through `env_passthrough`; no env inheritance.
+  - 30 s default timeout; SIGKILL on `TimeoutExpired` → `exit=-9` + partial
+    stdout/stderr captured.
+  - Empty `argv` → `ShellAllowlistDenied("argv is empty")` (T3 contract fix).
+  - Full-path executables are matched by basename so `/usr/bin/echo` and
+    `echo` both pass; relative paths like `./echo` are accepted.
+
+- **`ALLOWLIST_V1`** — 14 stems: `git`, `make`, `python`, `python3`, `uv`,
+  `pytest`, `ruff`, `mypy`, `pyright`, `echo`, `cat`, `ls`, `cp`, `mv`.
+
+- **`ENV_DEFAULT`** — 5 keys: `PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`.
+
+- **`ALLOWLIST_VERSION`** — auto-derived `sha256(canonical_dumps(sorted(
+  ALLOWLIST_V1)))[:16]`; stored in every `:shell/exec` audit datom. Runtime
+  raises `ShellAllowlistVersionMismatch` if a replay datom's recorded version
+  does not match the version the replaying runtime computed. This makes
+  allowlist drift visible in audit rather than silently passing or failing.
+
+- **Five new ops in `CANONICAL_AUDIT_WRAPPED_OPS`**: `:fs/read`, `:fs/write`,
+  `:fs/glob`, `:fs/grep`, `:shell/exec`. None added to
+  `CANONICAL_AUDIT_RAW_OPS` (LD9 — substantive returns; raw ops are
+  bookkeeping-only).
+
+- **New exceptions** (all exported from `persistence.effect`):
+  `FsCapabilityDenied`, `ShellAllowlistDenied`, `ShellAllowlistVersionMismatch`.
+
+### Notes
+
+- TimeoutExpired bytes-branch in the shell handler (macOS `_check_timeout`
+  joins raw bytes before decode) is empirically live, NOT dead code. Tests
+  that exercise the timeout path confirm the bytes branch fires on macOS.
+- The threat model is capability-denial-not-detection throughout: allowlist by
+  command stem, FS path check by `is_relative_to`. There is no attempt to
+  detect bad intent in allowed commands — that is the policy handler's job.
+- Handler factories are intentionally named (not anonymous lambdas) so the
+  runtime's named-dispatch and mask primitives work without surprises.
+
+### Tests
+
+- `tests/effect/handlers/test_fs_handler.py` — 13 tests covering capability
+  denial, binary base64 round-trip, glob/grep canonical sort, symlink escape,
+  and `scratch_dir` glob symmetry.
+- `tests/effect/handlers/test_shell_handler.py` — 12 tests covering
+  allowlist pass/denial, version pin, timeout, version-mismatch replay,
+  env passthrough, full-path basename matching, empty-argv denial.
+
+### Refs
+
+- Design: `docs/plans/2026-05-05-phase-2.2a-observe-act-design.md`
+- ARIS: Impl R1 PASS (mean 8.38 / min 8.0)
+- Suite delta at merge: 2300 → 2354 (+54)
+
+---
+
 ## Phase 2.1c.6 — 2026-05-05 (audit chain wiring for claim emits + blob puts)
 
 ### Added

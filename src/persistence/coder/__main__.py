@@ -58,6 +58,7 @@ def main(argv: list[str] | None = None) -> int:
                 task=args.task,
                 substrate=substrate,
                 model=args.model,
+                max_iters=args.max_iters,
             ).run()
     except CoderStubNotImplemented as exc:
         print(f"persistence-coder skeleton: {exc}", file=sys.stderr)

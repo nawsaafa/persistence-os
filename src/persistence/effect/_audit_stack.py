@@ -89,6 +89,13 @@ CANONICAL_AUDIT_WRAPPED_OPS: tuple[str, ...] = (
     # s.fact.transact for provenance-survives-audit-failure).
     ":claim/emit",
     ":blob/put",
+    # Phase 2.2a — fs/shell substantive-return ops; bottom-of-stack handler
+    # installed separately via s.effect.install_handler(..., position="bottom").
+    ":fs/read",
+    ":fs/write",
+    ":fs/glob",
+    ":fs/grep",
+    ":shell/exec",
 )
 
 

@@ -5,6 +5,13 @@ Phase 2.1a: skeleton — every behavioral method raises
 Phase 2.1b: `_decide` body filled — calls :llm/call, transacts
 :llm/messages (before) + :llm/decision (after), returns a structured
 LLMDecision. Other stubs unchanged.
+Phase 2.2a: `_observe` reads (iter_count, recent_decisions ≤5,
+recent_actions ≤5) via s.fact.since(self._session_start_dt). `_act`
+dispatches structured payload via s.effect.perform(op, args) and
+records :act/result provenance in BOTH success and failure paths
+(R0 B1 — bare raise INSIDE except). `run()` widens to a max-iters
+loop with done/plan/branch exit paths. `_should_escalate_{plan,branch}`
+filled as one-liners. `_escalate_*` and `_check_pause` keep 2.1a stubs.
 
 Substrate ownership is dependency-injected (LD2 / refresh Q2):
 callers (CLI, tests) own the substrate; Coder never opens or closes it.
@@ -16,10 +23,12 @@ is an ARIS-reviewable architectural change, not a refactor.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any
 
-from persistence.effect.canonical import canonical_dumps
+from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.sdk import Substrate
 
 from ._prompt import EMIT_DECISION_TOOL_SCHEMA, build_messages, parse_text_decision
@@ -43,24 +52,57 @@ class Coder:
     model: str = "claude-opus-4-7"             # Phase 2.1b; overridable from CLI --model
     confidence_threshold: float = 0.65          # base § 3.4; tuned at 2.4a
     missing_confidence_default: float = 0.5     # base § 3.4 fail-safe (must be < confidence_threshold)
+    max_iters: int = 20                          # Phase 2.2a LD2; loop ceiling for run()
+    observe_depth: int = 5                       # Phase 2.2a LD3; trailing datom window
+    _session_start_dt: dt.datetime | None = field(init=False, default=None)  # set by run() — T6
+    _iter_count: int = field(init=False, default=0)                          # incremented each loop iter
 
-    # main entry — Phase 2.1b loop body deferred to 2.2a
+    # main entry — Phase 2.2a T6: max-iters loop
     def run(self) -> None:
-        obs = self._observe()
-        decision = self._decide(obs)
-        if self._should_escalate_branch(decision):
-            self._escalate_branch(decision)
-        elif self._should_escalate_plan(decision):
-            self._escalate_plan(decision)
-        else:
+        """Phase 2.2a: max-iters loop. Three exit paths:
+        1. payload.done=true → return BEFORE _act (LD2; locked § 5.7).
+        2. _should_escalate_{plan,branch} → escalation body raises CoderStubNotImplemented
+           (2.3a / 2.3b territory; gate logic routes correctly).
+        3. max_iters exhausted → silent return (no :loop/exhausted sentinel; revisit 2.4a).
+        _check_pause is NOT called — re-added in 2.3d (REPL pause hook).
+        """
+        self._session_start_dt = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
+        for i in range(self.max_iters):
+            self._iter_count = i
+            obs = self._observe()
+            decision = self._decide(obs)
+            if self._should_escalate_branch(decision):
+                self._escalate_branch(decision)  # raises CoderStubNotImplemented
+                return
+            if self._should_escalate_plan(decision):
+                self._escalate_plan(decision)  # raises CoderStubNotImplemented
+                return
+            if decision.payload.get("done"):
+                return
             self._act(decision)
-        self._check_pause()
 
     # --- ReAct primitives — Phase 2.1b/2.2a fill these ---------------
 
     def _observe(self) -> Observation:
-        raise CoderStubNotImplemented(
-            "Phase 2.2a — substrate read via s.fact.q"
+        view = self.substrate.fact.since(self._session_start_dt)
+        in_tx_order = sorted(view.datoms, key=lambda d: d.tx)
+        decisions = [
+            d for d in in_tx_order
+            if d.a == "llm/decision" and d.op == "assert"  # Datom.__post_init__ strips leading colon
+        ][-self.observe_depth:]
+        actions = [
+            d for d in in_tx_order
+            if d.a == "act/result" and d.op == "assert"    # Datom.__post_init__ strips leading colon
+        ][-self.observe_depth:]
+        # d.v is canonical_dumps()-encoded by every writer of these attrs
+        # (T5 _act, 2.1b _decide, test helpers). Local-only substrate,
+        # closed schema — no defensive JSONDecodeError guard. If a future
+        # phase opens this attribute to external writers (2.4a HTTP
+        # concurrent path), revisit at that boundary, not here.
+        return Observation(
+            iter_count=self._iter_count,
+            recent_decisions=tuple(json.loads(d.v) for d in decisions),
+            recent_actions=tuple(json.loads(d.v) for d in actions),
         )
 
     def _decide(self, obs: Observation) -> LLMDecision:
@@ -155,29 +197,52 @@ class Coder:
         )
 
     def _act(self, decision: LLMDecision) -> None:
-        raise CoderStubNotImplemented(
-            "Phase 2.2a — s.effect.perform on :fs/:shell/:code/:git"
-        )
+        if decision.kind != "act":
+            raise ValueError(f"_act called with kind={decision.kind!r}")
+        op = decision.payload.get("op")
+        args = decision.payload.get("args", {})
+        if not isinstance(op, str) or not op.startswith(":"):
+            raise ValueError(f"malformed act payload: missing/invalid op {op!r}")
 
-    # --- Escalation gates — Phase 2.3a/b fill these ------------------
+        t0 = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
+
+        def _record(result: Any | None, error: str | None) -> None:
+            latency_ms = int((dt.datetime.now(dt.timezone.utc) - t0).total_seconds() * 1000)  # noqa: wall-clock
+            self.substrate.fact.transact([{
+                "e": uuid.uuid4().hex,                             # noqa: wall-clock — entity-id (txn precedent)
+                "a": ":act/result",
+                "v": canonical_dumps({
+                    "op": op,
+                    "args_hash": canonical_hash(args),
+                    "result_summary": _summarize_result(result) if result is not None else None,
+                    "error": error,
+                    "latency_ms": latency_ms,
+                }),
+                "valid_from": t0,
+            }])
+
+        try:
+            result = self.substrate.effect.perform(op, args)
+        except Exception as e:
+            _record(None, f"{type(e).__name__}: {e}")
+            raise
+
+        _record(result, None)
+
+    # --- Escalation gates — Phase 2.2a T6 filled these ---------------
 
     def _should_escalate_plan(self, decision: LLMDecision) -> bool:
-        raise CoderStubNotImplemented(
-            "Phase 2.3a — checks decision.kind == 'plan'"
-        )
+        return decision.kind == "plan"
 
-    def _escalate_plan(self, decision: LLMDecision) -> None:
+    def _escalate_plan(self, _decision: LLMDecision) -> None:
         raise CoderStubNotImplemented(
             "Phase 2.3a — Plan AST builder + s.plan.execute"
         )
 
     def _should_escalate_branch(self, decision: LLMDecision) -> bool:
-        raise CoderStubNotImplemented(
-            "Phase 2.3b — decision.kind == 'branch' "
-            "or confidence < threshold"
-        )
+        return decision.kind == "branch" or decision.confidence < self.confidence_threshold
 
-    def _escalate_branch(self, decision: LLMDecision) -> None:
+    def _escalate_branch(self, _decision: LLMDecision) -> None:
         raise CoderStubNotImplemented(
             "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"
         )
@@ -188,3 +253,22 @@ class Coder:
         raise CoderStubNotImplemented(
             "Phase 2.3d — :repl/request datom check + pause/resume"
         )
+
+
+def _summarize_result(r: Any) -> Any:
+    """Truncate large blobs; keep small results intact for prompt re-read.
+
+    Only truncates string values >512 chars inside dict-shaped results.
+    Non-dict results are returned unchanged. If a future op returns a
+    bare string >512 chars it will not be truncated — accepted limitation
+    per Phase 2.2a spec (revisit at 2.4a if prompt sizes become a problem).
+    """
+    if isinstance(r, dict):
+        out = {}
+        for k, v in r.items():
+            if isinstance(v, str) and len(v) > 512:
+                out[k] = v[:256] + "...[truncated]..." + v[-256:]
+            else:
+                out[k] = v
+        return out
+    return r

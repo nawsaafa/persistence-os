@@ -29,8 +29,9 @@ def test_cli_runs_skeleton_and_emits_banner_on_first_stub() -> None:
     )
     assert result.returncode == 1
     assert "persistence-coder skeleton" in result.stderr
-    assert "Phase 2.2a" in result.stderr
-    assert "substrate read via s.fact.q" in result.stderr
+    # Phase 2.2a T6: _should_escalate_* filled; first stub hit is _escalate_branch.
+    assert "Phase 2.3b" in result.stderr
+    assert "s.plan.mcts_search" in result.stderr
 
 
 def test_cli_warns_when_db_path_omitted() -> None:

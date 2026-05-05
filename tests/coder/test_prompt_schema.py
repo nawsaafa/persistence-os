@@ -94,3 +94,29 @@ def test_parse_text_decision_invalid_returns_none(text):
     from persistence.coder._prompt import parse_text_decision
 
     assert parse_text_decision(text) is None
+
+
+def test_build_messages_includes_recent_history_when_present():
+    from persistence.coder._prompt import build_messages
+    from persistence.coder._types import Observation
+
+    obs = Observation(
+        iter_count=2,
+        recent_decisions=({"kind": "act", "confidence": 0.9},),
+        recent_actions=({"op": ":fs/read", "result_summary": {"size": 12}},),
+    )
+    msgs = build_messages("write README", obs)
+    body = msgs[0]["content"]
+    assert "Recent loop history" in body
+    assert "iter 2" in body or "iteration 2" in body.lower()
+    assert ":fs/read" in body
+
+
+def test_build_messages_omits_history_section_when_empty():
+    from persistence.coder._prompt import build_messages
+    from persistence.coder._types import Observation
+
+    obs = Observation(iter_count=0, recent_decisions=(), recent_actions=())
+    msgs = build_messages("t", obs)
+    body = msgs[0]["content"]
+    assert "Recent loop history" not in body

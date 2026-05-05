@@ -45,9 +45,9 @@ def test_main_auto_no_providers_prints_echo_warning_and_exits_one():
     assert result.returncode == 1
     assert "no LLM provider available" in result.stderr
     assert "echo handler" in result.stderr
-    # Coder.run() raises CoderStubNotImplemented on _observe(), which the
-    # CLI banner-masks → exits 1 with the skeleton banner.
-    assert "Phase 2.2a" in result.stderr
+    # Phase 2.2a T4: _observe no longer stubs; _decide runs with echo handler;
+    # first stub hit is _should_escalate_branch → CLI banner-masks → exits 1.
+    assert "Phase 2.3b" in result.stderr
 
 
 def test_main_explicit_anthropic_no_key_exits_with_error():

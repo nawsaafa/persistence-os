@@ -57,7 +57,7 @@ def _shell_exec_clause(allowlist: frozenset[str], env_passthrough: frozenset[str
             )
         cwd = args["cwd"]  # KeyError if missing — required
         env_subset = args.get("env_allowlist_subset", [])
-        env = {k: os.environ[k] for k in env_subset if k in os.environ}
+        env = {k: os.environ[k] for k in env_subset if k in env_passthrough and k in os.environ}
         timeout_s = args.get("timeout_s", 30.0)
 
         t0 = time.monotonic()  # noqa: wall-clock — subprocess wall-time measurement is outside audit-clock domain

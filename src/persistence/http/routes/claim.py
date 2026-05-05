@@ -159,11 +159,11 @@ async def emit(
     # Forced-spec-deviation: impl plan used txn.commit_claims(...) which
     # does not exist. Using substrate.fact.transact per DB.transact contract.
     substrate = request.app.state.substrate
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts; routes through :sys/now in 2.4a
     datoms: list[dict] = []
     claim_ids: list[str] = []
     for kind, attrs in canonicalized:
-        claim_id = uuid.uuid4().hex
+        claim_id = uuid.uuid4().hex  # noqa: wall-clock — entity-id (txn precedent)
         claim_ids.append(claim_id)
         datoms.append({
             "e": claim_id,

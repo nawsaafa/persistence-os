@@ -67,9 +67,9 @@ async def put(
     }
     # Canonical-validate — defensive; should always pass since we built the dict.
     validated = validate_attrs(":claim/blob-put", attrs)
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts; routes through :sys/now in 2.4a
     substrate.fact.transact([{
-        "e": uuid.uuid4().hex,
+        "e": uuid.uuid4().hex,  # noqa: wall-clock — entity-id (txn precedent)
         "a": ":claim/blob-put",
         "v": canonical_dumps(validated),
         "valid_from": now,

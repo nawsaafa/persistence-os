@@ -47,12 +47,18 @@ def _shell_exec_clause(allowlist: frozenset[str], env_passthrough: frozenset[str
             raise TypeError(f"argv must be list[str], got {type(argv).__name__}")
         if not argv:
             raise ShellAllowlistDenied("argv is empty")
-        # Allowlist is by command stem, not full path. Relative paths like
-        # "./echo" pass the check (basename is "echo"). This is deliberate
-        # per the capability-denial-not-detection threat model — the agent
-        # controlling argv is a trusted component, and absolute-path attacks
-        # like ["/usr/bin/curl", ...] still get denied because their basename
-        # is not in the allowlist.
+        # Allowlist check is by command stem (basename), not full path.
+        # Threat model: path separators in argv[0] ARE accepted — rejecting
+        # them would break sys.executable on macOS venvs (e.g.
+        # /path/.venv/bin/python3). The basename contract is still safe:
+        # absolute-path attacks like ["/usr/bin/curl", ...] get denied via
+        # basename mismatch ("curl" not in ALLOWLIST_V1). Relative paths like
+        # ["./echo", ...] pass (basename "echo") — deliberate per the
+        # capability-denial-not-detection design: the LLM agent controlling
+        # argv is a trusted component inside the substrate sandbox; OS-level
+        # isolation is a separate v0.9.x track (see test_code_exec.py F4
+        # xfail-strict). The allowlist denies unknown stems, it does not
+        # attempt to detect all possible path-escape variants.
         stem = os.path.basename(argv[0])
         if stem not in allowlist:
             raise ShellAllowlistDenied(
@@ -64,9 +70,13 @@ def _shell_exec_clause(allowlist: frozenset[str], env_passthrough: frozenset[str
                 f"recorded={recorded_version} current={current_version}"
             )
         cwd = args["cwd"]  # KeyError if missing — required
-        env_subset = args.get("env_allowlist_subset", [])
+        # Stable-API defaults: env_allowlist_subset=[] and timeout_s=30.0 are
+        # part of the stable `:shell/exec` contract. Changing either default
+        # changes observable caller behavior; treat like an allowlist-content
+        # change — bump ALLOWLIST_VERSION when updating.
+        env_subset = args.get("env_allowlist_subset", [])  # stable default: []
         env = {k: os.environ[k] for k in env_subset if k in env_passthrough and k in os.environ}
-        timeout_s = args.get("timeout_s", 30.0)
+        timeout_s = args.get("timeout_s", 30.0)  # stable default: 30.0 s
 
         t0 = time.monotonic()  # noqa: wall-clock — subprocess wall-time measurement is outside audit-clock domain
         try:

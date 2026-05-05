@@ -13,6 +13,9 @@ class FsCapabilityDenied(Exception):
     """Raised when path resolves outside the configured project_root or scratch_dir."""
 
 
+_VALID_WRITE_MODES: tuple[str, ...] = ("w", "wb", "a", "ab")
+
+
 def _safe_resolve(p: str | Path, *allowed_roots: Path) -> Path:
     """Resolve `p` strict=False (path may not exist for writes); deny if real path
     is not relative to ANY of `allowed_roots`. Symlink-following is intentional."""
@@ -56,6 +59,10 @@ def _write_clause(scratch_dir: Path) -> Any:
         path = _safe_resolve(args["path"], scratch_dir)
         content = args["bytes_or_text"]
         mode = args.get("mode", "w")
+        if mode not in _VALID_WRITE_MODES:
+            raise ValueError(
+                f":fs/write mode must be one of {_VALID_WRITE_MODES!r}, got {mode!r}"
+            )
         if mode in ("wb", "ab"):
             data = base64.b64decode(content)
             with path.open(mode) as f:

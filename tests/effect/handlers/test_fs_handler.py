@@ -177,3 +177,15 @@ def test_fs_glob_scratch_dir_allowed(fs_runtime):
             "flags": {"recursive": False},
         })
     assert len(result["matches"]) == 2
+
+
+def test_fs_write_invalid_mode_rejected(fs_runtime):
+    """Fix 3 (ARIS Impl R1 IMPORTANT): :fs/write rejects modes outside {w, wb, a, ab}."""
+    project_root, scratch_dir, rt = fs_runtime
+    target = scratch_dir / "out.txt"
+    with with_runtime(rt) as r, pytest.raises(ValueError, match=":fs/write mode must be"):
+        r.perform(":fs/write", {
+            "path": str(target),
+            "bytes_or_text": "x",
+            "mode": "r+",
+        })

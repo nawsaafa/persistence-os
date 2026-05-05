@@ -76,6 +76,11 @@ class Coder:
             d for d in in_tx_order
             if d.a == "act/result" and d.op == "assert"    # Datom.__post_init__ strips leading colon
         ][-self.observe_depth:]
+        # d.v is canonical_dumps()-encoded by every writer of these attrs
+        # (T5 _act, 2.1b _decide, test helpers). Local-only substrate,
+        # closed schema — no defensive JSONDecodeError guard. If a future
+        # phase opens this attribute to external writers (2.4a HTTP
+        # concurrent path), revisit at that boundary, not here.
         return Observation(
             iter_count=self._iter_count,
             recent_decisions=tuple(json.loads(d.v) for d in decisions),

@@ -40,7 +40,7 @@ def _valid_tool_exec_payload(draw, session_id: str):
 # Property 1 — Round-trip: emit → query returns an equivalent claim
 # ---------------------------------------------------------------------------
 
-@given(payload=_valid_tool_exec_payload(session_id="hp-roundtrip"))
+@given(payload=_valid_tool_exec_payload(session_id="hp-roundtrip"))  # pyright: ignore[reportCallIssue]  # @st.composite strips `draw` arg, pyright doesn't model it
 @settings(
     max_examples=50,
     deadline=None,

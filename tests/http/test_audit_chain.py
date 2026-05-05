@@ -5,9 +5,6 @@ import datetime as dt
 import json
 import uuid
 
-import pytest
-
-
 # app_client fixture is provided by tests/http/conftest.py (yield + substrate teardown).
 
 

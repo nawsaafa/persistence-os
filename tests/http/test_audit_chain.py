@@ -46,15 +46,12 @@ def test_audit_chain_head_advances_with_emits(app_client):
     """audit_chain_head must be a valid sha256:<hex> string and must change
     between two consecutive emits.
 
-    Marked xfail(strict=True) — Phase 2.1c R1.1 W3 honest-rescope:
-    ``s.fact.transact`` bypasses the canonical audit chain, so
-    ``_extract_audit_chain_head`` returns None for all emits.  This test
-    asserts ``h1.startswith("sha256:")`` which raises AttributeError on None,
-    making it a *failing* test that xfail correctly captures.
-
-    This test flips PASS (and strict-xfail becomes an unexpected-pass ERROR)
-    when Phase 2.1c.6 ships proper audit-chain wiring — serving as the
-    falsifiable acceptance signal per the W3 honest-rescope pattern.
+    Phase 2.1c.6 (R1 BLOCKING fold from 2.1c R1.1 W3 rescope): the audit
+    chain advances on each :claim/emit perform via the canonical audit
+    middleware (see _audit_stack.py CANONICAL_AUDIT_WRAPPED_OPS). This
+    test asserts the head shape AND that two consecutive emits produce
+    distinct heads — the falsifiable acceptance signal that confirmed
+    2.1c.6 shipped (was xfail-strict in 2.1c, flipped PASS here).
 
     See: docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md
     """
@@ -85,8 +82,7 @@ def test_audit_chain_head_advances_with_emits(app_client):
     # Heads must be valid sha256:<hex> shape
     assert h1.startswith("sha256:")
     assert h2.startswith("sha256:")
-    # In real wiring, h1 != h2 (head advances). With the placeholder, both are
-    # 'sha256:placeholder' so this assertion fails — that is the expected failure.
+    # Heads must advance — the 2.1c.6 acceptance contract.
     assert h1 != h2, (
         f"audit_chain_head did not advance: {h1!r} == {h2!r}. Either the audit chain "
         "is not wired against build_app's substrate, OR emits are not committing. "

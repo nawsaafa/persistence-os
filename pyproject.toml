@@ -45,6 +45,11 @@ dev = [
     "psycopg[binary]>=3.1",
     "psycopg-pool>=3.2",
 ]
+http = [
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.32,<1.0",
+    "pydantic>=2.9,<3.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

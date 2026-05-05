@@ -32,6 +32,12 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
+from persistence.claim import (
+    CLAIM_KINDS,
+    CallerIdentity,
+    is_claim_kind,
+    validate_attrs,
+)
 from persistence.sdk._audit import build_escape_hatch_payload
 from persistence.sdk._stability import experimental, stable
 from persistence.sdk.uri import open_store
@@ -1150,6 +1156,46 @@ class _EscapeNamespace:
         )
 
 
+class _ClaimIdentityNamespace:
+    """`s.claim.identity.*` — caller identity attestation primitives.
+
+    Stub in 2.1c; real in 2.1c.5.
+    """
+
+    def __init__(self, substrate: "Substrate") -> None:
+        self._substrate = substrate
+
+    @staticmethod
+    def attest(*, caller_id, payload, signature):
+        """Verify a caller-signed payload; stub returns None in 2.1c."""
+        return CallerIdentity.attest(
+            caller_id=caller_id, payload=payload, signature=signature
+        )
+
+
+class _ClaimNamespace:
+    """`s.claim.*` — claim kind namespace + schema validation.
+
+    @experimental("v0.9.x")
+    """
+
+    def __init__(self, substrate: "Substrate") -> None:
+        self._substrate = substrate
+        self.identity = _ClaimIdentityNamespace(substrate)
+
+    kinds: frozenset = CLAIM_KINDS
+
+    @staticmethod
+    def is_kind(kind: str) -> bool:
+        """Return True iff *kind* is a registered ``:claim/*`` kind."""
+        return is_claim_kind(kind)
+
+    @staticmethod
+    def validate(kind: str, attrs: dict) -> dict:
+        """Validate *attrs* for the given claim *kind* and return canonical attrs."""
+        return validate_attrs(kind, attrs)
+
+
 def _resolve_raw_fact(s: "Substrate") -> Any:
     return s._db
 
@@ -1212,8 +1258,9 @@ _EscapeNamespace._RAW_RESOLVERS = {
 _SUBSTRATE_PUBLIC_DIR: tuple[str, ...] = (
     # stability marker (class attribute)
     "_stability_version",
-    # 8 curated subsurfaces (Phase 2.0c-prime #147 added ``plan``)
+    # 9 curated subsurfaces (Phase 2.0c-prime #147 added ``plan``; 2.1c adds ``claim``)
     "audit",
+    "claim",
     "close",
     "effect",
     "escape",
@@ -1377,6 +1424,7 @@ class Substrate:
         self._replay = _ReplayNamespace(self)
         self._plan = _PlanNamespace(self)
         self._escape = _EscapeNamespace(self)
+        self._claim = _ClaimNamespace(self)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -1596,6 +1644,15 @@ class Substrate:
         emits one ``:sdk/escape-hatch-access`` audit entry."""
         self._check_open("escape")
         return self._escape
+
+    @property
+    def claim(self) -> _ClaimNamespace:
+        """Curated ``s.claim.*`` namespace; see :class:`_ClaimNamespace`.
+
+        @experimental("v0.9.x")
+        """
+        self._check_open("claim")
+        return self._claim
 
     # ------------------------------------------------------------------
     # Frozen surface

@@ -84,6 +84,11 @@ CANONICAL_AUDIT_WRAPPED_OPS: tuple[str, ...] = (
     # separately at position="bottom" by coder/__main__.py or by
     # library callers via s.effect.install_handler).
     ":llm/call",
+    # Phase 2.1c.6 — claim/blob audit anchors (audit-only; the request
+    # datom IS the audit signal — facts are committed separately via
+    # s.fact.transact for provenance-survives-audit-failure).
+    ":claim/emit",
+    ":blob/put",
 )
 
 
@@ -100,6 +105,9 @@ CANONICAL_AUDIT_RAW_OPS: tuple[str, ...] = (
     ":fork/score",
     ":fork/chosen",
     ":fold/chosen",
+    # Phase 2.1c.6 — both audit-only; raw terminator returns None.
+    ":claim/emit",
+    ":blob/put",
     # NOT ":llm/call" — see CANONICAL_AUDIT_WRAPPED_OPS above.
 )
 

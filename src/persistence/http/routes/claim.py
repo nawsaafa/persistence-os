@@ -12,10 +12,12 @@ Accessor notes:
   recoverable via ``substrate._db.store.next_tx() - 1`` (next_tx is a method,
   not a property; it returns max(tx)+1; after transact the max is the one just
   assigned). T14 fix: call next_tx() not next_tx.
-- ``audit_chain_head``: returns ``None`` in Phase 2.1c — ``s.fact.transact``
-  bypasses the canonical audit chain (effect-level only). Wiring deferred to
-  Phase 2.1c.6 (W3 honest-rescope). T16 strict-xfail is the acceptance signal.
-  See docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md.
+- ``audit_chain_head``: Phase 2.1c.6 wires the canonical audit chain via
+  ``substrate.effect.perform(":claim/emit", {...})`` AFTER ``s.fact.transact``.
+  The perform call anchors an AuditEntry on ``_canonical_audit_entries`` via
+  the audit middleware wrapping ``:claim/emit`` (added to
+  CANONICAL_AUDIT_WRAPPED_OPS in T1). Head is the most recent entry's id.
+  See docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md § 3.2.
 
 Forced-spec-deviation (T14 — oversize_body):
   Design §4.1 specifies a 1 MiB body cap with 413 oversize_body. FastAPI
@@ -42,6 +44,7 @@ from persistence.claim import (
 )
 from persistence.effect.canonical import canonical_dumps
 from persistence.http.auth import require_auth
+from persistence.http.routes._audit import extract_audit_chain_head
 from persistence.http.schemas import (
     ClaimEmitRequest,
     ClaimEmitResponse,
@@ -72,25 +75,16 @@ def _extract_tx(substrate: Any) -> int:
         ) from exc  # TODO T14: surface if real tx accessor differs
 
 
-def _extract_audit_chain_head(substrate: Any) -> None:
-    """Return the current audit-chain head hash, or None.
+def _kind_counts(canonicalized: list[tuple[str, dict]]) -> dict[str, int]:
+    """Count claims per kind for the :claim/emit audit args.
 
-    Phase 2.1c R1.1 W3 honest-rescope (ARIS finding F1 BLOCKING):
-    ``s.fact.transact(datoms)`` does NOT populate
-    ``substrate._canonical_audit_entries`` — the canonical audit chain is
-    only populated by ``tx.effect(...)`` calls (effect-level), not
-    fact-level writes. The placeholder ``"sha256:placeholder"`` was silently
-    masking this substrate-side gap.
-
-    Returns None unconditionally until Phase 2.1c.6 wires the audit chain
-    properly.  The T16 strict-xfail (``test_audit_chain_head_advances_with_emits``)
-    is the falsifiable acceptance signal — it flips PASS when 2.1c.6 lands.
-
-    TODO 2.1c.6: extend s.fact.transact to write canonical audit entries,
-    OR add an explicit tx.effect(":claim/emit", ...) wrapper in the emit
-    handler. See docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md.
+    Phase 2.1c.6: included in the audit entry's args_hash so the audit
+    log captures the kind distribution of each emit batch.
     """
-    return None  # substrate gap: s.fact.transact bypasses canonical audit chain  # TODO T14 — wire to real audit head
+    counts: dict[str, int] = {}
+    for kind, _attrs in canonicalized:
+        counts[kind] = counts.get(kind, 0) + 1
+    return counts
 
 
 # 1 MiB body cap for /v1/claim/emit (Design §4.1)
@@ -173,16 +167,26 @@ async def emit(
             "valid_from": now,
         })
     # transact is atomic: all datoms land in one tx or none do.
+    # Provenance survives any subsequent audit-perform failure (matches
+    # Phase 2.1b :llm/messages-survives-:llm/call-failure pattern).
     substrate.fact.transact(datoms)
+    real_tx = _extract_tx(substrate)
 
-    # --- Phase 3: extract response fields ---
-    # tx: store.next_tx - 1 after successful transact gives the real tx id.
-    tx = _extract_tx(substrate)
-    # audit_chain_head: from canonical audit entries if present.
-    audit_chain_head = _extract_audit_chain_head(substrate)
+    # --- Phase 3 (Phase 2.1c.6): anchor audit entry on the canonical chain ---
+    # Per design § 3.2: fact-write happens first; the perform anchors the
+    # AuditEntry on _canonical_audit_entries via the audit middleware
+    # wrapping :claim/emit (added to CANONICAL_AUDIT_WRAPPED_OPS in T1).
+    substrate.effect.perform(":claim/emit", {
+        "claim_ids": claim_ids,
+        "tx": real_tx,
+        "kind_counts": _kind_counts(canonicalized),
+    })
+
+    # --- Phase 4: extract response fields ---
+    audit_chain_head = extract_audit_chain_head(substrate)
 
     return ClaimEmitResponse(
-        tx=tx,
+        tx=real_tx,
         claim_ids=claim_ids,
         audit_chain_head=audit_chain_head,
         caller_identity=None,  # CallerIdentity stub returns None in 2.1c (T4)

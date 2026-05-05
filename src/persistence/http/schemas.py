@@ -18,7 +18,7 @@ class ClaimEmitRequest(BaseModel):
 class ClaimEmitResponse(BaseModel):
     tx: int
     claim_ids: list[str]
-    audit_chain_head: Optional[str] = None  # None until 2.1c.6 wires audit chain (W3 rescope)
+    audit_chain_head: str  # Phase 2.1c.6: wired via :claim/emit perform on canonical audit chain
     caller_identity: Optional[str] = None
 
 
@@ -39,6 +39,7 @@ class BlobPutResponse(BaseModel):
     hash: str
     size_bytes: int
     duplicate: bool
+    audit_chain_head: str  # Phase 2.1c.6: wired via :blob/put perform on canonical audit chain
 
 
 class ErrorResponse(BaseModel):

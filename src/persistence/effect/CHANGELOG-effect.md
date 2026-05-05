@@ -2,6 +2,26 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## Phase 2.1c.6 — 2026-05-05 (audit chain wiring for claim emits + blob puts)
+
+### Added
+- `:claim/emit` and `:blob/put` joined `CANONICAL_AUDIT_WRAPPED_OPS` and
+  `CANONICAL_AUDIT_RAW_OPS`. Both are audit-only ops; the request datom
+  IS the audit signal — facts are committed separately via
+  `s.fact.transact` for the provenance-survives-audit-failure guarantee
+  (matches Phase 2.1b `:llm/call` pattern).
+- Drift-pin tests in `tests/effect/test_canonical_audit_stack.py`
+  pinning the new ops in both wrapped and raw sets.
+
+### Changed
+- `_make_canonical_raw_terminator()` now covers `:claim/emit` and
+  `:blob/put` automatically (it iterates `CANONICAL_AUDIT_RAW_OPS`).
+
+### Refs
+- Design: `docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md`
+- ARIS: R1 PASS-WITH-FIXES (8.14/7.1) → R1.1 fold → R1.1 lite PASS (8.16/7.8)
+- Acceptance signal: `tests/http/test_audit_chain.py::test_audit_chain_head_advances_with_emits` xfail-strict → PASS
+
 ## v0.9.0a1 (unreleased) — Mimir Phase B: Ed25519 signing on the audit chain
 
 Closes the "do you cryptographically prove what your AI did?" gap surfaced by

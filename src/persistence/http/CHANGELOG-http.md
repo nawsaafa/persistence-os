@@ -1,5 +1,62 @@
 # persistence.http CHANGELOG
 
+## Phase 2.1c.6 — 2026-05-05 (audit chain wiring for claim emits + blob puts)
+
+### Added
+- `POST /v1/claim/emit` now performs `s.effect.perform(":claim/emit", ...)`
+  AFTER `s.fact.transact(datoms)` to anchor the canonical audit chain.
+  `audit_chain_head` is now a real `sha256:<hex>` string (was the W3
+  placeholder `None` in 2.1c).
+- `POST /v1/blob/put` now performs `s.effect.perform(":blob/put", ...)`
+  after the fact transact. `BlobPutResponse` gains `audit_chain_head: str`.
+- New shared helper `src/persistence/http/routes/_audit.py::extract_audit_chain_head`
+  used by both routes.
+- 6 new test gates: G1 (xfail flip), G2 (args_hash assertion), G3 (replay
+  byte-identity), G4 (audit-perform failure semantics), G6 (blob put
+  parity), G7 (audit=False ergonomics). G8 (concurrent chain integrity)
+  updated from the 2.1c placeholder version.
+
+### Changed
+- `ClaimEmitResponse.audit_chain_head: Optional[str] = None` → `str`.
+  Downstream consumers MUST handle the type change. The 2.1c R1.1 W3
+  honest-rescope is closed; `audit_chain_head` is now a real audit head.
+- `BlobPutResponse.audit_chain_head: str` (new field).
+
+### Removed
+- `@pytest.mark.xfail(strict=True)` decorator from
+  `tests/http/test_audit_chain.py::test_audit_chain_head_advances_with_emits`.
+  The strict-xfail flips PASS, marking 2.1c.6 as shipped per the
+  falsifiable acceptance signal contract.
+
+### Notes
+- `:claim/emit` audit args do NOT include `session_id` (a per-claim
+  attribute, not a batch attribute). `:blob/put` audit args DO include
+  `session_id` (route boundary owns a single session via X-Session-Id
+  header). See design § 3.4.
+- `AuditEntry` persists `args_hash` only (not raw args). G2 test asserts
+  `args_hash == canonical_hash(expected_args)` via
+  `from persistence.effect.canonical import canonical_hash`.
+
+### Known limitations (queued for v0.9.x graduation)
+- **`tx` extraction race under truly concurrent HTTP serving** (Impl
+  R1 IMPORTANT 2). `_extract_tx(substrate) = substrate._db.store.next_tx() - 1`
+  reads the store AFTER `substrate.fact.transact(...)`, so two threads
+  racing on transact can each read the OTHER thread's tx into their
+  audit args + response. The audit args and HTTP response are
+  self-consistent within a single request (same return value), so a
+  client never sees a mismatched tx vs their audit head — but client A
+  could see client B's tx attributed in their audit entry. Pre-existing
+  from 2.1c. Requires substrate-API-level fix (`DB.transact` returns
+  the allocated tx, OR audit middleware reads tx from the perform
+  itself). Queued for v0.9.x graduation alongside Phase 2.4a
+  substrate-controlled clock/random work.
+
+### Refs
+- Design: `docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md`
+- ARIS: R1 PASS-WITH-FIXES (8.14/7.1) → R1.1 fold → R1.1 lite PASS (8.16/7.8)
+- Impl R1: PASS (8.38/8.0) — 2 IMPORTANTs folded as design doc updates +
+  this known-limitations entry; no impl change required for R1 PASS.
+
 ## v0.9.0a1 (unreleased) — Phase 2.1c `persistence.http` module
 
 Phase 2.1c ships the `persistence.http` package — a FastAPI-based

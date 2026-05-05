@@ -41,7 +41,7 @@ def test_fs_read_capability_denial_outside_project_root(fs_runtime, tmp_path):
     outside.write_text("nope")
     with with_runtime(rt) as r, pytest.raises(FsCapabilityDenied) as exc:
         r.perform(":fs/read", {"path": str(outside)})
-    assert "outside project_root" in str(exc.value)
+    assert "outside the allowed roots" in str(exc.value)
 
 
 def test_fs_read_missing_file(fs_runtime):

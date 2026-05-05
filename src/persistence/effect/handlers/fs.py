@@ -13,32 +13,20 @@ class FsCapabilityDenied(Exception):
     """Raised when path resolves outside the configured project_root or scratch_dir."""
 
 
-def _safe_resolve(p: str | Path, allowed_root: Path) -> Path:
+def _safe_resolve(p: str | Path, *allowed_roots: Path) -> Path:
     """Resolve `p` strict=False (path may not exist for writes); deny if real path
-    is not relative to `allowed_root.resolve()`. Symlink-following is intentional."""
+    is not relative to ANY of `allowed_roots`. Symlink-following is intentional."""
     resolved = Path(p).resolve(strict=False)
-    if not resolved.is_relative_to(allowed_root.resolve()):
+    if not any(resolved.is_relative_to(root.resolve()) for root in allowed_roots):
         raise FsCapabilityDenied(
-            f"path {p!r} resolves to {resolved} which is outside project_root/scratch_dir"
-        )
-    return resolved
-
-
-def _safe_resolve_read(p: str | Path, project_root: Path, scratch_dir: Path) -> Path:
-    """Read is allowed from both project_root and scratch_dir (agent reads its own writes)."""
-    resolved = Path(p).resolve(strict=False)
-    root_r = project_root.resolve()
-    scratch_r = scratch_dir.resolve()
-    if not (resolved.is_relative_to(root_r) or resolved.is_relative_to(scratch_r)):
-        raise FsCapabilityDenied(
-            f"path {p!r} resolves to {resolved} which is outside project_root/scratch_dir"
+            f"path {p!r} resolves to {resolved} which is outside the allowed roots"
         )
     return resolved
 
 
 def _read_clause(project_root: Path, scratch_dir: Path) -> Any:
-    def _clause(args: dict[str, Any], k: Any, ctx: dict[str, Any]) -> Any:
-        path = _safe_resolve_read(args["path"], project_root, scratch_dir)
+    def _clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> Any:
+        path = _safe_resolve(args["path"], project_root, scratch_dir)
         encoding = args.get("encoding", "utf-8")
         if encoding == "binary":
             data = path.read_bytes()
@@ -63,7 +51,7 @@ def _read_clause(project_root: Path, scratch_dir: Path) -> Any:
 
 
 def _write_clause(scratch_dir: Path) -> Any:
-    def _clause(args: dict[str, Any], k: Any, ctx: dict[str, Any]) -> Any:
+    def _clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> Any:
         path = _safe_resolve(args["path"], scratch_dir)
         content = args["bytes_or_text"]
         mode = args.get("mode", "w")
@@ -86,7 +74,7 @@ def _write_clause(scratch_dir: Path) -> Any:
 
 
 def _glob_clause(project_root: Path) -> Any:
-    def _clause(args: dict[str, Any], k: Any, ctx: dict[str, Any]) -> Any:
+    def _clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> Any:
         root = _safe_resolve(args["root"], project_root)
         pattern = args["pattern"]
         flags = args.get("flags", {})
@@ -99,7 +87,7 @@ def _glob_clause(project_root: Path) -> Any:
 
 
 def _grep_clause(project_root: Path) -> Any:
-    def _clause(args: dict[str, Any], k: Any, ctx: dict[str, Any]) -> Any:
+    def _clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> Any:
         root = _safe_resolve(args["root"], project_root)
         pattern = args["pattern"]
         flags = args.get("flags", {})

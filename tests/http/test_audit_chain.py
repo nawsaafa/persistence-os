@@ -98,6 +98,13 @@ def test_concurrent_emits_serialize_distinct_datoms(app_client):
     """Two rapid emits must produce 2 distinct claim_ids and the audit
     chain head must be valid sha256:... shape for both.
 
+    Phase 2.1c.6 (G8 — R1 BLOCKING 2 fold): post-2.1c.6 this test
+    asserts (a) both heads are valid sha256:<hex>, (b) both heads are
+    present in _canonical_audit_entries, (c) the entries form a valid
+    prev-hash chain (each entry's prev_hash references either nothing
+    -as-genesis or a prior entry's id). This is the regression gate
+    proving concurrent perform doesn't corrupt the chain.
+
     Uses synchronous TestClient in rapid succession (logical concurrency).
     For true OS-thread concurrency, use httpx.AsyncClient + asyncio.gather;
     that is deferred to Phase 2.1c.5 once the async surface stabilises.
@@ -122,11 +129,35 @@ def test_concurrent_emits_serialize_distinct_datoms(app_client):
     id2 = r2.json()["claim_ids"][0]
     assert id1 != id2, "claim_ids should be distinct across emits"
 
-    # audit_chain_head is None in Phase 2.1c (2.1c.6 rescope — wiring deferred)
+    # Phase 2.1c.6: post-fix assertions (G8 R1 BLOCKING 2 fold).
     h1 = r1.json()["audit_chain_head"]
     h2 = r2.json()["audit_chain_head"]
-    assert h1 is None  # TODO 2.1c.6: assert h1.startswith("sha256:")
-    assert h2 is None  # TODO 2.1c.6: assert h2.startswith("sha256:")
+    assert h1.startswith("sha256:") and h2.startswith("sha256:"), (
+        f"both heads must be sha256-prefixed; got {h1!r}, {h2!r}"
+    )
+    assert h1 != h2, f"distinct concurrent emits → distinct heads; got {h1!r} == {h2!r}"
+
+    # Chain integrity: both heads must appear as ids in _canonical_audit_entries
+    # AND form a valid prev-hash chain.
+    substrate = app_client.app.state.substrate
+    entries = list(substrate._canonical_audit_entries)
+    ids = {e.id for e in entries}
+    assert h1 in ids and h2 in ids, (
+        f"both concurrent emit heads must be present in canonical entries: "
+        f"h1={h1!r}, h2={h2!r}, ids={sorted(ids)!r}"
+    )
+
+    # prev-hash chain integrity: every entry except the genesis must reference
+    # a prior entry's id.
+    seen: set[str] = set()
+    for e in entries:
+        if e.prev_hash is not None:
+            assert e.prev_hash in seen, (
+                f"entry {e.id!r} has prev_hash={e.prev_hash!r} which does not "
+                f"reference a prior entry id; chain is corrupt under concurrent "
+                f"perform. Prior ids seen: {sorted(seen)!r}"
+            )
+        seen.add(e.id)
 
     # Verify both claims are retrievable
     q = app_client.get("/v1/claim/query?session_id=concurrent&limit=100")

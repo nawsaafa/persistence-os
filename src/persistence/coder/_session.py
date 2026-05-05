@@ -19,8 +19,9 @@ import datetime as dt
 import json
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
-from persistence.effect.canonical import canonical_dumps
+from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.sdk import Substrate
 
 from ._prompt import EMIT_DECISION_TOOL_SCHEMA, build_messages, parse_text_decision
@@ -179,9 +180,37 @@ class Coder:
         )
 
     def _act(self, decision: LLMDecision) -> None:
-        raise CoderStubNotImplemented(
-            "Phase 2.2a — s.effect.perform on :fs/:shell/:code/:git"
-        )
+        if decision.kind != "act":
+            raise ValueError(f"_act called with kind={decision.kind!r}")
+        op = decision.payload.get("op")
+        args = decision.payload.get("args", {})
+        if not isinstance(op, str) or not op.startswith(":"):
+            raise ValueError(f"malformed act payload: missing/invalid op {op!r}")
+
+        t0 = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
+
+        def _record(result: Any | None, error: str | None) -> None:
+            latency_ms = int((dt.datetime.now(dt.timezone.utc) - t0).total_seconds() * 1000)  # noqa: wall-clock
+            self.substrate.fact.transact([{
+                "e": uuid.uuid4().hex,  # noqa: wall-clock
+                "a": ":act/result",
+                "v": canonical_dumps({
+                    "op": op,
+                    "args_hash": canonical_hash(args),
+                    "result_summary": _summarize_result(result) if result is not None else None,
+                    "error": error,
+                    "latency_ms": latency_ms,
+                }),
+                "valid_from": t0,
+            }])
+
+        try:
+            result = self.substrate.effect.perform(op, args)
+        except Exception as e:
+            _record(None, f"{type(e).__name__}: {e}")
+            raise
+
+        _record(result, None)
 
     # --- Escalation gates — Phase 2.3a/b fill these ------------------
 
@@ -212,3 +241,22 @@ class Coder:
         raise CoderStubNotImplemented(
             "Phase 2.3d — :repl/request datom check + pause/resume"
         )
+
+
+def _summarize_result(r: Any) -> Any:
+    """Truncate large blobs; keep small results intact for prompt re-read.
+
+    Only truncates string values >512 chars inside dict-shaped results.
+    Non-dict results are returned unchanged. If a future op returns a
+    bare string >512 chars it will not be truncated — accepted limitation
+    per Phase 2.2a spec (revisit at 2.4a if prompt sizes become a problem).
+    """
+    if isinstance(r, dict):
+        out = {}
+        for k, v in r.items():
+            if isinstance(v, str) and len(v) > 512:
+                out[k] = v[:256] + "...[truncated]..." + v[-256:]
+            else:
+                out[k] = v
+        return out
+    return r

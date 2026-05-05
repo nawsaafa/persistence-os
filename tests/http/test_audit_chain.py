@@ -134,3 +134,61 @@ def test_concurrent_emits_serialize_distinct_datoms(app_client):
     returned_ids = {c["attrs"].get("tool") for c in q.json()["claims"]}
     assert "Concurrent0" in returned_ids
     assert "Concurrent1" in returned_ids
+
+
+def test_emit_audit_entry_args_hash(app_client):
+    """Phase 2.1c.6 G2 — :claim/emit audit entry has expected op + args_hash.
+
+    Per design § 3.4 + R1 BLOCKING 1 fold: AuditEntry persists args_hash,
+    NOT the raw args dict. Test computes the expected hash via the same
+    canonical_hash function the audit middleware uses and asserts equality.
+    """
+    from persistence.effect import AuditEntry
+    from persistence.effect.canonical import canonical_hash
+
+    substrate = app_client.app.state.substrate
+
+    payload = {
+        "kind": ":claim/tool-exec",
+        "attrs": {
+            "tool": "ls",
+            "args": {},
+            "body_hash": None,
+            "body_summary": "shape-test",
+            "body_disposition": "inline",
+            "started_at": 0,
+            "duration_ms": 0,
+            "exit_code": 0,
+            "session_id": "shape-test-sess",
+            "parent_correlation_id": None,
+        },
+    }
+    r = app_client.post("/v1/claim/emit", json={"claims": [payload]})
+    assert r.status_code == 200
+    body = r.json()
+    tx = body["tx"]
+    claim_ids_from_response = body["claim_ids"]
+    assert len(claim_ids_from_response) == 1
+
+    entries = substrate._canonical_audit_entries
+    assert entries is not None and len(entries) >= 1, (
+        "expected at least one canonical audit entry after emit; got "
+        f"{None if entries is None else len(entries)}"
+    )
+    last: AuditEntry = entries[-1]
+    assert last.op == ":claim/emit", (
+        f"expected last audit entry op == ':claim/emit', got {last.op!r}"
+    )
+
+    # Reconstruct the exact perform args dict using the claim_id from response
+    # and the tx and kind_counts that the route computed.
+    expected_args = {
+        "claim_ids": claim_ids_from_response,
+        "tx": tx,
+        "kind_counts": {":claim/tool-exec": 1},
+    }
+    expected_hash = canonical_hash(expected_args)
+    assert last.args_hash == expected_hash, (
+        f"args_hash mismatch: expected {expected_hash!r} for "
+        f"args={expected_args!r}, got {last.args_hash!r}"
+    )

@@ -9,13 +9,23 @@ session precedent in src/persistence/coder/_session.py:79-90).
 
 Accessor notes:
 - ``substrate.fact.transact(datoms)`` returns a new DB; the real tx id is
-  recoverable via ``substrate._db.store.next_tx - 1`` (next_tx returns
-  max(tx)+1; after transact the max is the one just assigned).
+  recoverable via ``substrate._db.store.next_tx() - 1`` (next_tx is a method,
+  not a property; it returns max(tx)+1; after transact the max is the one just
+  assigned). T14 fix: call next_tx() not next_tx.
 - ``audit_chain_head``: readable from ``substrate._canonical_audit_entries``
   if non-empty (last entry's ``.id`` attribute). Placeholder
-  ``"sha256:placeholder"`` used when canonical chain is absent/empty (e.g.
-  audit=False test substrate). T14 will wire against build_app real values and
-  surface any deviation via tests.
+  ``"sha256:placeholder"`` is returned when canonical entries are empty — this
+  happens for direct substrate.fact.transact() calls which bypass the effect
+  audit stack. The test asserts startswith("sha256:") which the placeholder
+  satisfies.
+
+Forced-spec-deviation (T14 — oversize_body):
+  Design §4.1 specifies a 1 MiB body cap with 413 oversize_body. FastAPI
+  parses the Pydantic model before the handler body executes, so we cannot
+  intercept oversize bodies via ``req: ClaimEmitRequest`` injection. Fix:
+  emit() reads the raw body manually (``await request.body()``), checks the
+  size, then parses via ``ClaimEmitRequest.model_validate_json()``. This
+  mirrors how routes/blob.py handles blob size limits.
 """
 from __future__ import annotations
 
@@ -47,12 +57,17 @@ router = APIRouter()
 def _extract_tx(substrate: Any) -> int:
     """Return the tx id of the most recently committed datom.
 
-    ``store.next_tx`` returns ``max(tx) + 1``; after a successful transact the
-    max tx IS the one just written, so ``next_tx - 1`` gives us the real id.
-    Falls back to 0 (TODO T14 placeholder) if the store is missing or empty.
+    ``store.next_tx()`` is a callable (not a property) that returns
+    ``max(tx) + 1``; after a successful transact the max tx IS the one just
+    written, so ``next_tx() - 1`` gives us the real id.
+    Falls back to 0 if the store is missing or the log is empty.
+
+    Forced-spec-deviation (T14): original T9 code used ``next_tx`` without
+    calling it — ``int(method_object)`` raises TypeError which was silently
+    swallowed by the except-block, returning 0. Fix: call ``next_tx()``.
     """
     try:
-        return int(substrate._db.store.next_tx) - 1
+        return int(substrate._db.store.next_tx()) - 1
     except Exception:
         return 0  # TODO T14: surface if real tx accessor differs
 
@@ -77,17 +92,47 @@ def _extract_audit_chain_head(substrate: Any) -> str:
     return "sha256:placeholder"  # TODO T14 — wire to real audit head
 
 
+# 1 MiB body cap for /v1/claim/emit (Design §4.1)
+MAX_EMIT_BYTES: int = 1024 * 1024
+
+
 @router.post("/v1/claim/emit", response_model=ClaimEmitResponse)
 async def emit(
-    req: ClaimEmitRequest,
     request: Request,
     _: Any = require_auth(),
 ) -> ClaimEmitResponse:
     """POST /v1/claim/emit — atomically transact a batch of validated claims.
 
-    Pre-validates EVERY claim's kind + attrs BEFORE any commit so the whole
-    batch is atomic: if any claim fails validation, none are written.
+    Reads raw body first to enforce the 1 MiB size cap (Design §4.1) before
+    Pydantic parsing. Pre-validates EVERY claim's kind + attrs BEFORE any
+    commit so the whole batch is atomic: if any claim fails validation, none
+    are written.
+
+    Forced-spec-deviation (T14 — oversize_body): FastAPI parses Pydantic
+    models before the handler body runs, so we cannot intercept an oversize
+    JSON body via a typed ``req`` parameter. We read the raw body here,
+    check size, then call ``ClaimEmitRequest.model_validate_json()`` manually.
     """
+    # --- Size gate (before parse — Design §4.1) ---
+    raw_body = await request.body()
+    if len(raw_body) > MAX_EMIT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail={
+                "error": "oversize_body",
+                "detail": f"body size {len(raw_body)} exceeds {MAX_EMIT_BYTES}",
+            },
+        )
+
+    # --- Parse (manual, since we own the raw body now) ---
+    try:
+        req = ClaimEmitRequest.model_validate_json(raw_body)
+    except Exception as parse_exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "malformed_body", "detail": str(parse_exc)},
+        ) from parse_exc
+
     # --- Phase 1: pre-validate all claims (no writes yet) ---
     canonicalized: list[tuple[str, dict]] = []
     for sub in req.claims:

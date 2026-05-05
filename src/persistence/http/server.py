@@ -54,26 +54,31 @@ def build_app() -> FastAPI:
     # Map RequestValidationError (Pydantic at the request boundary) →
     # 422 attrs_validation_failed OR 400 malformed_body — depending on whether
     # the body parsed at all.
+    # Forced-spec-deviation (T14): original heuristic used loc[0]=="body" which
+    # incorrectly mapped JSON parse errors (type=="json_invalid") to 422 because
+    # their loc is ('body', 0) — same leading element as structural field errors.
+    # Fix: check error type directly. "json_invalid" → 400 malformed_body;
+    # all other body-level Pydantic errors → 422 attrs_validation_failed.
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         try:
             errors = exc.errors()
-            looks_attrs = any(e.get("loc", (None,))[0] == "body" for e in errors)
+            is_parse_failure = any(e.get("type") == "json_invalid" for e in errors)
         except Exception:
-            looks_attrs = False
-        if looks_attrs:
+            is_parse_failure = False
+        if is_parse_failure:
             return JSONResponse(
-                status_code=422,
-                content={
-                    "error": "attrs_validation_failed",
-                    "detail": json.dumps(exc.errors()),
-                },
+                status_code=400,
+                content={"error": "malformed_body", "detail": json.dumps(exc.errors())},
             )
         return JSONResponse(
-            status_code=400,
-            content={"error": "malformed_body", "detail": json.dumps(exc.errors())},
+            status_code=422,
+            content={
+                "error": "attrs_validation_failed",
+                "detail": json.dumps(exc.errors()),
+            },
         )
 
     app.include_router(claim_router)

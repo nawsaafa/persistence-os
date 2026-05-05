@@ -9,6 +9,7 @@ import uuid
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import Response
 
 from persistence.claim import validate_attrs
 from persistence.effect.canonical import canonical_dumps
@@ -75,3 +76,33 @@ async def put(
     }])
 
     return BlobPutResponse(hash=h, size_bytes=size, duplicate=duplicate)
+
+
+@router.get("/v1/blob/get/{blob_hash}")
+async def get_blob(
+    blob_hash: str,
+    request: Request,
+    _: Any = require_auth(),
+) -> Response:
+    """GET /v1/blob/get/{blob_hash} — retrieve raw bytes from the CAS by hash.
+
+    Design §4.3 contract:
+    - hash path param must match ^sha256:[0-9a-f]{64}$ → 400 malformed_hash if not.
+    - Returns raw bytes with Content-Type: application/octet-stream on 200.
+    - 404 blob_not_found with uniform JSON envelope if hash is valid but unknown.
+    - 401 bearer_required if auth fails (via require_auth dependency).
+    """
+    blob_store = request.app.state.blob_store
+    try:
+        content = blob_store.get(blob_hash)
+    except ValueError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "malformed_hash", "detail": str(e)},
+        ) from e
+    if content is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "blob_not_found", "detail": f"hash {blob_hash!r} not found"},
+        )
+    return Response(content=content, media_type="application/octet-stream")

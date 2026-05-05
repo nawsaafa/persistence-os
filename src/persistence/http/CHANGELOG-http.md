@@ -37,9 +37,25 @@
   `args_hash == canonical_hash(expected_args)` via
   `from persistence.effect.canonical import canonical_hash`.
 
+### Known limitations (queued for v0.9.x graduation)
+- **`tx` extraction race under truly concurrent HTTP serving** (Impl
+  R1 IMPORTANT 2). `_extract_tx(substrate) = substrate._db.store.next_tx() - 1`
+  reads the store AFTER `substrate.fact.transact(...)`, so two threads
+  racing on transact can each read the OTHER thread's tx into their
+  audit args + response. The audit args and HTTP response are
+  self-consistent within a single request (same return value), so a
+  client never sees a mismatched tx vs their audit head — but client A
+  could see client B's tx attributed in their audit entry. Pre-existing
+  from 2.1c. Requires substrate-API-level fix (`DB.transact` returns
+  the allocated tx, OR audit middleware reads tx from the perform
+  itself). Queued for v0.9.x graduation alongside Phase 2.4a
+  substrate-controlled clock/random work.
+
 ### Refs
 - Design: `docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md`
 - ARIS: R1 PASS-WITH-FIXES (8.14/7.1) → R1.1 fold → R1.1 lite PASS (8.16/7.8)
+- Impl R1: PASS (8.38/8.0) — 2 IMPORTANTs folded as design doc updates +
+  this known-limitations entry; no impl change required for R1 PASS.
 
 ## v0.9.0a1 (unreleased) — Phase 2.1c `persistence.http` module
 

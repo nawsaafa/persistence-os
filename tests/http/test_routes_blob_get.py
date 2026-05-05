@@ -1,7 +1,4 @@
 """Phase 2.1c — GET /v1/blob/get/{hash} (Design §4.3, §10.2)."""
-import os
-
-import pytest
 from fastapi.testclient import TestClient
 
 

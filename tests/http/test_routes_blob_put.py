@@ -1,10 +1,6 @@
 # tests/http/test_routes_blob_put.py
 """Phase 2.1c — POST /v1/blob/put (Design §4.2, §10.2)."""
 import hashlib
-import os
-
-import pytest
-from fastapi.testclient import TestClient
 
 
 # app_client fixture is provided by tests/http/conftest.py (yield + substrate teardown).

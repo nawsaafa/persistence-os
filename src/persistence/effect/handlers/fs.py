@@ -48,7 +48,10 @@ def _read_clause(project_root: Path, scratch_dir: Path) -> Any:
                 "size": len(data),
                 "sha256": hashlib.sha256(data).hexdigest(),
             }
-        text = path.read_text(encoding=encoding)
+        # Use open() with newline="" to disable universal newline translation
+        # (Path.read_text's newline= param only exists in Python ≥3.13).
+        with path.open(encoding=encoding, newline="") as fh:
+            text = fh.read()
         raw = text.encode(encoding)
         return {
             "bytes_or_text": text,
@@ -70,7 +73,7 @@ def _write_clause(scratch_dir: Path) -> Any:
                 bytes_written = f.write(data)
         else:
             data = content.encode("utf-8")
-            with path.open(mode, encoding="utf-8") as f:
+            with path.open(mode, encoding="utf-8", newline="") as f:
                 f.write(content)
                 bytes_written = len(data)
         # sha256_after computed over the FULL file post-write

@@ -6,14 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 
-@pytest.fixture
-def app_client(tmp_path):
-    os.environ["PERSISTENCE_API_KEY"] = "test-token"
-    os.environ["PERSISTENCE_HTTP_LOOPBACK_BYPASS"] = "1"  # tests assume loopback bypass
-    os.environ["PERSISTENCE_BLOB_ROOT"] = str(tmp_path / "blobs")
-    from persistence.http.server import build_app
-    app = build_app()
-    return TestClient(app, client=("127.0.0.1", 9999))
+# app_client fixture is provided by tests/http/conftest.py (yield + substrate teardown).
 
 
 def _valid_claim_payload(**overrides):

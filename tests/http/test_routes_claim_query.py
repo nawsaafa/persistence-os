@@ -11,8 +11,13 @@ def app_client(tmp_path):
     os.environ["PERSISTENCE_HTTP_LOOPBACK_BYPASS"] = "1"
     os.environ["PERSISTENCE_BLOB_ROOT"] = str(tmp_path / "blobs")
     from persistence.http.server import build_app
+
     app = build_app()
-    return TestClient(app, headers={"Authorization": "Bearer test-token"})
+    client = TestClient(app, headers={"Authorization": "Bearer test-token"})
+    try:
+        yield client
+    finally:
+        app.state.substrate.close()
 
 
 def _emit_one(client, session_id="default-session", **attrs_overrides):

@@ -161,3 +161,15 @@ def test_shell_exec_full_path_denial_uses_basename(shell_rt):
             "env_allowlist_subset": [],
             "allowlist_version": ALLOWLIST_VERSION,
         })
+
+
+def test_shell_exec_empty_argv_denied(shell_rt):
+    """Empty argv must raise ShellAllowlistDenied, not IndexError."""
+    cwd, rt = shell_rt
+    with with_runtime(rt) as r, pytest.raises(ShellAllowlistDenied):
+        r.perform(":shell/exec", {
+            "argv": [],
+            "cwd": str(cwd),
+            "env_allowlist_subset": [],
+            "allowlist_version": ALLOWLIST_VERSION,
+        })

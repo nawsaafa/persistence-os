@@ -45,8 +45,16 @@ def _shell_exec_clause(allowlist: frozenset[str], env_passthrough: frozenset[str
         argv = args["argv"]
         if not isinstance(argv, list) or not all(isinstance(s, str) for s in argv):
             raise TypeError(f"argv must be list[str], got {type(argv).__name__}")
+        if not argv:
+            raise ShellAllowlistDenied("argv is empty")
+        # Allowlist is by command stem, not full path. Relative paths like
+        # "./echo" pass the check (basename is "echo"). This is deliberate
+        # per the capability-denial-not-detection threat model — the agent
+        # controlling argv is a trusted component, and absolute-path attacks
+        # like ["/usr/bin/curl", ...] still get denied because their basename
+        # is not in the allowlist.
         stem = os.path.basename(argv[0])
-        if not argv or stem not in allowlist:
+        if stem not in allowlist:
             raise ShellAllowlistDenied(
                 f"argv[0]={argv[0]!r} (stem={stem!r}) not in allowlist (version {current_version})"
             )
@@ -74,6 +82,9 @@ def _shell_exec_clause(allowlist: frozenset[str], env_passthrough: frozenset[str
                 "wall_clock_ms": int((time.monotonic() - t0) * 1000),  # noqa: wall-clock
             }
         except subprocess.TimeoutExpired as e:
+            # NOTE: text=True does NOT guarantee str on TimeoutExpired.stdout —
+            # CPython _check_timeout joins raw byte chunks before decode. The
+            # bytes branch below is empirically live on macOS, not dead code.
             return {
                 "exit": -9,
                 "stdout": (e.stdout or b"").decode("utf-8", errors="replace") if isinstance(e.stdout, bytes) else (e.stdout or ""),

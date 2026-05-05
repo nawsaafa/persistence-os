@@ -45,18 +45,6 @@ def test_mixed_namespace_audit_chain_integrity(app_client):
         assert c["kind"].startswith(":claim/"), f"Fact-namespace leak: {c['kind']}"
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Phase 2.1c R1.1 W3 honest-rescope (ARIS F1 BLOCKING): "
-        "s.fact.transact() bypasses the canonical audit chain — only tx.effect() "
-        "calls populate substrate._canonical_audit_entries. audit_chain_head is "
-        "None for all emits until Phase 2.1c.6 wires fact-level writes through "
-        "the effect audit stack. "
-        "Acceptance signal: this test flips PASS when 2.1c.6 ships. "
-        "Design stub: docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md"
-    ),
-    strict=True,
-)
 def test_audit_chain_head_advances_with_emits(app_client):
     """audit_chain_head must be a valid sha256:<hex> string and must change
     between two consecutive emits.

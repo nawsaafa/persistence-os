@@ -23,7 +23,7 @@ def test_emit_single_claim_happy_path(app_client):
     body = r.json()
     assert body["tx"] > 0
     assert len(body["claim_ids"]) == 1
-    assert body["audit_chain_head"] is None  # None until 2.1c.6 wires audit chain
+    assert body["audit_chain_head"].startswith("sha256:")  # Phase 2.1c.6: wired
     assert body["caller_identity"] is None
 
 

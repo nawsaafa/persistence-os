@@ -192,3 +192,86 @@ def test_emit_audit_entry_args_hash(app_client):
         f"args_hash mismatch: expected {expected_hash!r} for "
         f"args={expected_args!r}, got {last.args_hash!r}"
     )
+
+
+def test_audit_perform_failure_does_not_roll_back_facts(app_client):
+    """Phase 2.1c.6 G4 — fact-write survives audit-perform failure.
+
+    Per design § 5.2: facts go to the log first; if the audit perform
+    raises, the HTTP route returns 500, but the claim datoms ARE in
+    the fact log and the audit chain did NOT advance. This is the
+    'provenance survives audit failure' guarantee that matches the
+    Phase 2.1b :llm/messages-survives-:llm/call-failure pattern.
+    """
+    from persistence.effect.runtime import Handler
+
+    substrate = app_client.app.state.substrate
+    entries_before = len(substrate._canonical_audit_entries)
+    log_before = len(list(substrate._db.log()))
+
+    # Install a top-position handler that raises on :claim/emit.
+    def _raise_on_emit(args, k, ctx):
+        raise RuntimeError("simulated audit perform failure (G4)")
+
+    failing = Handler(
+        name="g4-failing-claim-emit",
+        wraps={":claim/emit"},
+        clauses={":claim/emit": _raise_on_emit},
+    )
+    substrate.effect.install_handler(failing, position="top")
+
+    payload = {
+        "kind": ":claim/tool-exec",
+        "attrs": {
+            "tool": "g4-tool",
+            "args": {},
+            "body_hash": None,
+            "body_summary": "g4 test",
+            "body_disposition": "inline",
+            "started_at": 0,
+            "duration_ms": 0,
+            "exit_code": 0,
+            "session_id": "g4-sess",
+            "parent_correlation_id": None,
+        },
+    }
+
+    # Use raise_server_exceptions=False so the TestClient returns a 500
+    # response instead of re-raising the RuntimeError (Starlette default
+    # is raise_server_exceptions=True).
+    from fastapi.testclient import TestClient
+
+    no_raise_client = TestClient(
+        app_client.app,
+        client=("127.0.0.1", 9999),
+        raise_server_exceptions=False,
+    )
+
+    try:
+        r = no_raise_client.post("/v1/claim/emit", json={"claims": [payload]})
+        # FastAPI default unhandled-exception → 500
+        assert r.status_code == 500, (
+            f"expected 500 from audit-perform failure, got {r.status_code} "
+            f"with body {r.text!r}"
+        )
+
+        # Critical assertion: the fact-write happened BEFORE the perform.
+        log_after = list(substrate._db.log())
+        assert len(log_after) > log_before, (
+            f"fact log did not grow despite fact.transact happening before "
+            f"audit perform: {log_before} → {len(log_after)}"
+        )
+
+        # Audit chain did NOT advance (perform raised before middleware
+        # could append the AuditEntry).
+        entries_after = len(substrate._canonical_audit_entries)
+        assert entries_after == entries_before, (
+            f"audit chain advanced despite perform failure: "
+            f"{entries_before} → {entries_after}"
+        )
+    finally:
+        # Uninstall the failing handler so subsequent tests aren't poisoned.
+        runtime = substrate._runtime
+        runtime.handlers = [
+            h for h in runtime.handlers if h.name != "g4-failing-claim-emit"
+        ]

@@ -16,8 +16,9 @@ is an ARIS-reviewable architectural change, not a refactor.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from persistence.effect.canonical import canonical_dumps
 from persistence.sdk import Substrate
@@ -43,9 +44,15 @@ class Coder:
     model: str = "claude-opus-4-7"             # Phase 2.1b; overridable from CLI --model
     confidence_threshold: float = 0.65          # base § 3.4; tuned at 2.4a
     missing_confidence_default: float = 0.5     # base § 3.4 fail-safe (must be < confidence_threshold)
+    max_iters: int = 20                          # Phase 2.2a LD2; loop ceiling for run()
+    observe_depth: int = 5                       # Phase 2.2a LD3; trailing datom window
+    _session_start_dt: dt.datetime | None = field(init=False, default=None)  # set by run() — T6
+    _iter_count: int = field(init=False, default=0)                          # incremented each loop iter
 
-    # main entry — Phase 2.1b loop body deferred to 2.2a
+    # main entry — Phase 2.1b loop body deferred to 2.2a (T6 widens to while-loop)
     def run(self) -> None:
+        if self._session_start_dt is None:
+            self._session_start_dt = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
         obs = self._observe()
         decision = self._decide(obs)
         if self._should_escalate_branch(decision):
@@ -59,8 +66,20 @@ class Coder:
     # --- ReAct primitives — Phase 2.1b/2.2a fill these ---------------
 
     def _observe(self) -> Observation:
-        raise CoderStubNotImplemented(
-            "Phase 2.2a — substrate read via s.fact.q"
+        view = self.substrate.fact.since(self._session_start_dt)
+        in_tx_order = sorted(view.datoms, key=lambda d: d.tx)
+        decisions = [
+            d for d in in_tx_order
+            if d.a == "llm/decision" and d.op == "assert"  # Datom.__post_init__ strips leading colon
+        ][-self.observe_depth:]
+        actions = [
+            d for d in in_tx_order
+            if d.a == "act/result" and d.op == "assert"    # Datom.__post_init__ strips leading colon
+        ][-self.observe_depth:]
+        return Observation(
+            iter_count=self._iter_count,
+            recent_decisions=tuple(json.loads(d.v) for d in decisions),
+            recent_actions=tuple(json.loads(d.v) for d in actions),
         )
 
     def _decide(self, obs: Observation) -> LLMDecision:

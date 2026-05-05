@@ -34,7 +34,7 @@ def test_llmdecision_kind_typing_branch():
     assert d.kind == "branch"
 
 
-def test_observation_still_empty_in_2_1b():
+def test_observation_has_2_2a_fields():
     obs = Observation()
     fields = {f.name for f in dataclasses.fields(Observation)}
-    assert fields == set()  # Phase 2.2a fills this
+    assert fields == {"iter_count", "recent_decisions", "recent_actions"}  # Phase 2.2a T4

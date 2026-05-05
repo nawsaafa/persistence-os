@@ -19,7 +19,8 @@ def _safe_resolve(p: str | Path, *allowed_roots: Path) -> Path:
     resolved = Path(p).resolve(strict=False)
     if not any(resolved.is_relative_to(root.resolve()) for root in allowed_roots):
         raise FsCapabilityDenied(
-            f"path {p!r} resolves to {resolved} which is outside the allowed roots"
+            f"path {p!r} resolves to {resolved} which is outside allowed roots: "
+            f"{[str(r.resolve()) for r in allowed_roots]}"
         )
     return resolved
 
@@ -73,9 +74,9 @@ def _write_clause(scratch_dir: Path) -> Any:
     return _clause
 
 
-def _glob_clause(project_root: Path) -> Any:
+def _glob_clause(project_root: Path, scratch_dir: Path) -> Any:
     def _clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> Any:
-        root = _safe_resolve(args["root"], project_root)
+        root = _safe_resolve(args["root"], project_root, scratch_dir)
         pattern = args["pattern"]
         flags = args.get("flags", {})
         if flags.get("recursive", True):
@@ -86,9 +87,9 @@ def _glob_clause(project_root: Path) -> Any:
     return _clause
 
 
-def _grep_clause(project_root: Path) -> Any:
+def _grep_clause(project_root: Path, scratch_dir: Path) -> Any:
     def _clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> Any:
-        root = _safe_resolve(args["root"], project_root)
+        root = _safe_resolve(args["root"], project_root, scratch_dir)
         pattern = args["pattern"]
         flags = args.get("flags", {})
         re_flags = re.IGNORECASE if flags.get("ignore_case") else 0
@@ -128,7 +129,7 @@ def make_fs_handler(
         clauses={
             ":fs/read": _read_clause(project_root, scratch_dir),
             ":fs/write": _write_clause(scratch_dir),
-            ":fs/glob": _glob_clause(project_root),
-            ":fs/grep": _grep_clause(project_root),
+            ":fs/glob": _glob_clause(project_root, scratch_dir),
+            ":fs/grep": _grep_clause(project_root, scratch_dir),
         },
     )

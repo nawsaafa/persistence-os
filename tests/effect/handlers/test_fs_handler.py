@@ -41,7 +41,7 @@ def test_fs_read_capability_denial_outside_project_root(fs_runtime, tmp_path):
     outside.write_text("nope")
     with with_runtime(rt) as r, pytest.raises(FsCapabilityDenied) as exc:
         r.perform(":fs/read", {"path": str(outside)})
-    assert "outside the allowed roots" in str(exc.value)
+    assert "outside allowed roots:" in str(exc.value)
 
 
 def test_fs_read_missing_file(fs_runtime):
@@ -156,9 +156,24 @@ def test_fs_write_mode_append(fs_runtime):
     target = scratch_dir / "log.txt"
     target.write_text("first\n")
     with with_runtime(rt) as r:
-        r.perform(":fs/write", {
+        result = r.perform(":fs/write", {
             "path": str(target),
             "bytes_or_text": "second\n",
             "mode": "a",
         })
     assert target.read_text() == "first\nsecond\n"
+    assert result["sha256_after"] == hashlib.sha256(b"first\nsecond\n").hexdigest()
+
+
+def test_fs_glob_scratch_dir_allowed(fs_runtime):
+    """Coder agent must be able to glob its own output files written to scratch_dir."""
+    project_root, scratch_dir, rt = fs_runtime
+    (scratch_dir / "out_a.txt").write_text("a")
+    (scratch_dir / "out_b.txt").write_text("b")
+    with with_runtime(rt) as r:
+        result = r.perform(":fs/glob", {
+            "pattern": "*.txt",
+            "root": str(scratch_dir),
+            "flags": {"recursive": False},
+        })
+    assert len(result["matches"]) == 2

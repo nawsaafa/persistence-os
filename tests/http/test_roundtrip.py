@@ -86,7 +86,7 @@ def test_100_emit_fuzz(app_client):
         }]})
         assert r.status_code == 200
 
-    # Use generous limit to retrieve all
-    q = app_client.get("/v1/claim/query?session_id=fuzz-100&limit=1000")
+    # Use generous limit to retrieve all (max allowed is 500 per design §4.4; old impl had 1000)
+    q = app_client.get("/v1/claim/query?session_id=fuzz-100&limit=500")
     assert q.status_code == 200
     assert len(q.json()["claims"]) == 100

@@ -47,22 +47,31 @@ def test_mixed_namespace_audit_chain_integrity(app_client):
 
 @pytest.mark.xfail(
     reason=(
-        "T9 deviation: _extract_audit_chain_head falls back to 'sha256:placeholder' "
-        "when substrate._canonical_audit_entries is empty (build_app uses "
-        "Substrate.open() without audit=True wiring). The placeholder is a constant "
-        "string and does not advance between emits. Real wiring deferred to ARIS R3 "
-        "or Phase 2.1c.5 when the audit chain is wired against build_app's substrate."
+        "Phase 2.1c R1.1 W3 honest-rescope (ARIS F1 BLOCKING): "
+        "s.fact.transact() bypasses the canonical audit chain — only tx.effect() "
+        "calls populate substrate._canonical_audit_entries. audit_chain_head is "
+        "None for all emits until Phase 2.1c.6 wires fact-level writes through "
+        "the effect audit stack. "
+        "Acceptance signal: this test flips PASS when 2.1c.6 ships. "
+        "Design stub: docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md"
     ),
     strict=True,
 )
 def test_audit_chain_head_advances_with_emits(app_client):
-    """audit_chain_head must change between two consecutive emits.
+    """audit_chain_head must be a valid sha256:<hex> string and must change
+    between two consecutive emits.
 
-    Marked xfail(strict=True): build_app uses Substrate.open() which does NOT
-    wire the canonical audit chain (substrate._canonical_audit_entries stays
-    empty). _extract_audit_chain_head returns the placeholder 'sha256:placeholder'
-    for every emit. This test will pass (and flip to unexpected-pass error)
-    when the audit chain is properly wired — serving as a sentinel for that work.
+    Marked xfail(strict=True) — Phase 2.1c R1.1 W3 honest-rescope:
+    ``s.fact.transact`` bypasses the canonical audit chain, so
+    ``_extract_audit_chain_head`` returns None for all emits.  This test
+    asserts ``h1.startswith("sha256:")`` which raises AttributeError on None,
+    making it a *failing* test that xfail correctly captures.
+
+    This test flips PASS (and strict-xfail becomes an unexpected-pass ERROR)
+    when Phase 2.1c.6 ships proper audit-chain wiring — serving as the
+    falsifiable acceptance signal per the W3 honest-rescope pattern.
+
+    See: docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md
     """
     r1 = app_client.post("/v1/claim/emit", json={"claims": [{
         "kind": ":claim/tool-exec",
@@ -128,11 +137,11 @@ def test_concurrent_emits_serialize_distinct_datoms(app_client):
     id2 = r2.json()["claim_ids"][0]
     assert id1 != id2, "claim_ids should be distinct across emits"
 
-    # Both heads are valid sha256:... strings
+    # audit_chain_head is None in Phase 2.1c (2.1c.6 rescope — wiring deferred)
     h1 = r1.json()["audit_chain_head"]
     h2 = r2.json()["audit_chain_head"]
-    assert h1.startswith("sha256:")
-    assert h2.startswith("sha256:")
+    assert h1 is None  # TODO 2.1c.6: assert h1.startswith("sha256:")
+    assert h2 is None  # TODO 2.1c.6: assert h2.startswith("sha256:")
 
     # Verify both claims are retrievable
     q = app_client.get("/v1/claim/query?session_id=concurrent&limit=100")

@@ -12,12 +12,10 @@ Accessor notes:
   recoverable via ``substrate._db.store.next_tx() - 1`` (next_tx is a method,
   not a property; it returns max(tx)+1; after transact the max is the one just
   assigned). T14 fix: call next_tx() not next_tx.
-- ``audit_chain_head``: readable from ``substrate._canonical_audit_entries``
-  if non-empty (last entry's ``.id`` attribute). Placeholder
-  ``"sha256:placeholder"`` is returned when canonical entries are empty — this
-  happens for direct substrate.fact.transact() calls which bypass the effect
-  audit stack. The test asserts startswith("sha256:") which the placeholder
-  satisfies.
+- ``audit_chain_head``: returns ``None`` in Phase 2.1c — ``s.fact.transact``
+  bypasses the canonical audit chain (effect-level only). Wiring deferred to
+  Phase 2.1c.6 (W3 honest-rescope). T16 strict-xfail is the acceptance signal.
+  See docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md.
 
 Forced-spec-deviation (T14 — oversize_body):
   Design §4.1 specifies a 1 MiB body cap with 413 oversize_body. FastAPI
@@ -60,36 +58,39 @@ def _extract_tx(substrate: Any) -> int:
     ``store.next_tx()`` is a callable (not a property) that returns
     ``max(tx) + 1``; after a successful transact the max tx IS the one just
     written, so ``next_tx() - 1`` gives us the real id.
-    Falls back to 0 if the store is missing or the log is empty.
 
-    Forced-spec-deviation (T14): original T9 code used ``next_tx`` without
-    calling it — ``int(method_object)`` raises TypeError which was silently
-    swallowed by the except-block, returning 0. Fix: call ``next_tx()``.
+    Raises RuntimeError if the store accessor is unavailable — broad silent
+    fallback (except Exception → 0) was removed in Phase 2.1c R1.1 (ARIS
+    finding F3 IMPORTANT) to surface substrate accessor drift loudly.
     """
     try:
         return int(substrate._db.store.next_tx()) - 1
-    except Exception:
-        return 0  # TODO T14: surface if real tx accessor differs
+    except (AttributeError, TypeError) as exc:
+        raise RuntimeError(
+            f"_extract_tx: substrate._db.store.next_tx() is unavailable or returned a "
+            f"non-integer — check substrate accessor contract. Original error: {exc!r}"
+        ) from exc  # TODO T14: surface if real tx accessor differs
 
 
-def _extract_audit_chain_head(substrate: Any) -> str:
-    """Return the current audit-chain head hash.
+def _extract_audit_chain_head(substrate: Any) -> None:
+    """Return the current audit-chain head hash, or None.
 
-    Reads from ``substrate._canonical_audit_entries[-1].id`` when the canonical
-    audit chain is present and non-empty (``Substrate.open(audit=True)`` path).
-    Falls back to ``"sha256:placeholder"`` when audit=False or chain is empty.
-    TODO T14: verify the real head accessor against build_app wiring.
+    Phase 2.1c R1.1 W3 honest-rescope (ARIS finding F1 BLOCKING):
+    ``s.fact.transact(datoms)`` does NOT populate
+    ``substrate._canonical_audit_entries`` — the canonical audit chain is
+    only populated by ``tx.effect(...)`` calls (effect-level), not
+    fact-level writes. The placeholder ``"sha256:placeholder"`` was silently
+    masking this substrate-side gap.
+
+    Returns None unconditionally until Phase 2.1c.6 wires the audit chain
+    properly.  The T16 strict-xfail (``test_audit_chain_head_advances_with_emits``)
+    is the falsifiable acceptance signal — it flips PASS when 2.1c.6 lands.
+
+    TODO 2.1c.6: extend s.fact.transact to write canonical audit entries,
+    OR add an explicit tx.effect(":claim/emit", ...) wrapper in the emit
+    handler. See docs/plans/2026-05-04-phase-2.1c.6-audit-chain-wiring-design.md.
     """
-    try:
-        canonical = substrate._canonical_audit_entries
-        if canonical:
-            last = canonical[-1]
-            head = getattr(last, "id", None)
-            if isinstance(head, str) and head:
-                return head
-    except Exception:
-        pass
-    return "sha256:placeholder"  # TODO T14 — wire to real audit head
+    return None  # substrate gap: s.fact.transact bypasses canonical audit chain  # TODO T14 — wire to real audit head
 
 
 # 1 MiB body cap for /v1/claim/emit (Design §4.1)
@@ -208,7 +209,7 @@ async def query(
     _: Any = require_auth(),
     session_id: Optional[str] = None,
     since: int = 0,
-    limit: int = Query(default=100, ge=1, le=1000),
+    limit: int = Query(default=50, ge=1, le=500),
     kind: Optional[str] = None,
 ) -> ClaimQueryResponse:
     """GET /v1/claim/query — return claim datoms for a session.

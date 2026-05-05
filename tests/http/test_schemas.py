@@ -30,8 +30,13 @@ def test_claim_emit_request_rejects_empty_claims_list():
 
 
 def test_claim_emit_response_shape():
-    r = ClaimEmitResponse(tx=42, claim_ids=["d-1"], audit_chain_head="sha256:x", caller_identity=None)
+    # audit_chain_head is Optional[str] = None since Phase 2.1c R1.1 (W3 rescope to 2.1c.6)
+    r = ClaimEmitResponse(tx=42, claim_ids=["d-1"], caller_identity=None)
     assert r.model_dump()["caller_identity"] is None
+    assert r.model_dump()["audit_chain_head"] is None
+    # Verify it also accepts a string value (for when 2.1c.6 wires audit chain)
+    r2 = ClaimEmitResponse(tx=42, claim_ids=["d-1"], audit_chain_head="sha256:abc", caller_identity=None)
+    assert r2.audit_chain_head == "sha256:abc"
 
 
 def test_error_response_shape_locked():

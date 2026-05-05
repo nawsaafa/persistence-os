@@ -18,7 +18,7 @@ class ClaimEmitRequest(BaseModel):
 class ClaimEmitResponse(BaseModel):
     tx: int
     claim_ids: list[str]
-    audit_chain_head: str
+    audit_chain_head: Optional[str] = None  # None until 2.1c.6 wires audit chain (W3 rescope)
     caller_identity: Optional[str] = None
 
 

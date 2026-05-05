@@ -1,13 +1,8 @@
 """Phase 2.2a G3 — _observe body coverage."""
 from __future__ import annotations
 import datetime as dt
-import json
-
-import pytest
-from hypothesis import given, settings, strategies as st
 
 from persistence.coder._session import Coder
-from persistence.coder._types import Observation
 from persistence.effect.canonical import canonical_dumps
 from persistence.sdk import Substrate
 

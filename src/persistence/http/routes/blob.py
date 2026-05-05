@@ -14,6 +14,7 @@ from fastapi.responses import Response
 from persistence.claim import validate_attrs
 from persistence.effect.canonical import canonical_dumps
 from persistence.http.auth import require_auth
+from persistence.http.routes._audit import extract_audit_chain_head
 from persistence.http.schemas import BlobPutResponse
 
 
@@ -75,7 +76,19 @@ async def put(
         "valid_from": now,
     }])
 
-    return BlobPutResponse(hash=h, size_bytes=size, duplicate=duplicate)
+    # --- Phase 2.1c.6: anchor audit entry on the canonical chain ---
+    # Per design § 3.2 / § 3.4: fact-write happens first; the perform anchors
+    # the AuditEntry on _canonical_audit_entries via the audit middleware
+    # wrapping :blob/put (added to CANONICAL_AUDIT_WRAPPED_OPS in T1).
+    substrate.effect.perform(":blob/put", {
+        "hash": h,
+        "size_bytes": size,
+        "session_id": session_id,
+        "duplicate": duplicate,
+    })
+    audit_chain_head = extract_audit_chain_head(substrate)
+
+    return BlobPutResponse(hash=h, size_bytes=size, duplicate=duplicate, audit_chain_head=audit_chain_head)
 
 
 @router.get("/v1/blob/get/{blob_hash}")

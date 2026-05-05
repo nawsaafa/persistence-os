@@ -44,6 +44,7 @@ from persistence.claim import (
 )
 from persistence.effect.canonical import canonical_dumps
 from persistence.http.auth import require_auth
+from persistence.http.routes._audit import extract_audit_chain_head
 from persistence.http.schemas import (
     ClaimEmitRequest,
     ClaimEmitResponse,
@@ -72,26 +73,6 @@ def _extract_tx(substrate: Any) -> int:
             f"_extract_tx: substrate._db.store.next_tx() is unavailable or returned a "
             f"non-integer — check substrate accessor contract. Original error: {exc!r}"
         ) from exc  # TODO T14: surface if real tx accessor differs
-
-
-def _extract_audit_chain_head(substrate: Any) -> str:
-    """Return the substrate's canonical audit chain head id.
-
-    Phase 2.1c.6: audit chain advances on every :claim/emit perform.
-    Returns the most recent AuditEntry.id from _canonical_audit_entries.
-    """
-    entries = substrate._canonical_audit_entries
-    if entries is None or len(entries) == 0:
-        # Substrate opened with audit=False, or no perform yet — neither
-        # should occur on the production HTTP path (build_app always opens
-        # with audit=True default; the perform happens before this helper
-        # is called). Defensive: surface the gap loud rather than return
-        # a sentinel that masks real bugs.
-        raise RuntimeError(
-            "audit chain head requested but canonical chain is empty; "
-            "indicates a missing :claim/emit perform or audit=False mode"
-        )
-    return entries[-1].id
 
 
 def _kind_counts(canonicalized: list[tuple[str, dict]]) -> dict[str, int]:
@@ -202,7 +183,7 @@ async def emit(
     })
 
     # --- Phase 4: extract response fields ---
-    audit_chain_head = _extract_audit_chain_head(substrate)
+    audit_chain_head = extract_audit_chain_head(substrate)
 
     return ClaimEmitResponse(
         tx=real_tx,

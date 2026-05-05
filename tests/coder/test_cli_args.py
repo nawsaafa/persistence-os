@@ -44,3 +44,19 @@ def test_model_flag_can_be_overridden():
 
     args = build_parser().parse_args(["--task", "t", "--model", "claude-haiku-4-5-20251001"])
     assert args.model == "claude-haiku-4-5-20251001"
+
+
+def test_cli_max_iters_default():
+    """--max-iters defaults to 20."""
+    from persistence.coder._cli import build_parser
+
+    args = build_parser().parse_args(["--task", "task"])
+    assert args.max_iters == 20
+
+
+def test_cli_max_iters_override():
+    """--max-iters N parses correctly."""
+    from persistence.coder._cli import build_parser
+
+    args = build_parser().parse_args(["--task", "task", "--max-iters", "5"])
+    assert args.max_iters == 5

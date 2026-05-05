@@ -40,18 +40,24 @@ EMIT_DECISION_TOOL_SCHEMA: dict[str, Any] = {
 
 
 def build_messages(task: str, obs: Observation) -> list[dict[str, Any]]:
-    """Construct the LLM message list. 2.1b: minimal user message.
+    """Construct the LLM message list.
 
-    Observation fields land in 2.2a; when populated, observation
-    context is appended to the message list (e.g. as a separate
-    'system' message or formatted into the user message body).
+    Appends a 'Recent loop history' section when obs has non-empty
+    decisions or actions; section is omitted entirely on the first iter
+    (zero-prompt-overhead when both tuples are empty).
     """
-    return [
-        {
-            "role": "user",
-            "content": f"Task: {task}\n\nUse emit_decision to respond.",
-        },
-    ]
+    parts = [f"Task: {task}", "", "Use emit_decision to respond."]
+    if obs.recent_decisions or obs.recent_actions:
+        parts.extend(["", f"Recent loop history (iter {obs.iter_count}):"])
+        if obs.recent_decisions:
+            parts.append("Decisions:")
+            for d in obs.recent_decisions[-3:]:  # truncate for prompt cost
+                parts.append(f"  - {json.dumps(d, sort_keys=True)[:200]}")
+        if obs.recent_actions:
+            parts.append("Actions:")
+            for a in obs.recent_actions[-3:]:
+                parts.append(f"  - {json.dumps(a, sort_keys=True)[:200]}")
+    return [{"role": "user", "content": "\n".join(parts)}]
 
 
 _DECISION_ENVELOPE_RE = re.compile(r"<decision>\s*(\{.*?\})\s*</decision>", re.DOTALL)

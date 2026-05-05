@@ -1,10 +1,10 @@
-"""Phase 2.1a — argparse parser for `python -m persistence.coder`.
+"""Phase 2.2a — argparse parser for `python -m persistence.coder`.
 
-Two flags: `--task` (required), `--db-path` (optional, defaults to
-None → in-memory substrate per CP1). `--confidence-threshold` is
-deferred to 2.3b/2.4a per design CP2 (the class attribute exists on
-`Coder` and is constructor-pass-through tested, but no CLI surface
-until behavior consumes it).
+Flags: `--task` (required), `--db-path` (optional, defaults to None →
+in-memory substrate per CP1), `--provider`, `--model`, `--max-iters`.
+`--confidence-threshold` is deferred to 2.3b/2.4a per design CP2 (the
+class attribute exists on `Coder` and is constructor-pass-through
+tested, but no CLI surface until behavior consumes it).
 """
 
 from __future__ import annotations
@@ -16,10 +16,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m persistence.coder",
         description=(
-            "persistence-coder MVP — agent built on the persistence-os "
-            "substrate. v0.9.0a1 (Phase 2.1b): _decide body lights up, "
-            "first :llm/messages + :llm/decision datoms emit. Run still "
-            "raises CoderStubNotImplemented on _observe (Phase 2.2a)."
+            "persistence-coder skeleton (Phase 2.2a): _observe + _act "
+            "+ run() loop + _should_escalate_* gates filled. "
+            "Plan/branch escalation bodies stub to Phase 2.3a/2.3b."
         ),
     )
     parser.add_argument(
@@ -49,5 +48,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--model",
         default="claude-opus-4-7",
         help="Model identifier passed to the provider. Default: claude-opus-4-7.",
+    )
+    parser.add_argument(
+        "--max-iters",
+        type=int,
+        default=20,
+        help="Loop iteration cap (default 20). Tuning deferred to 2.4a CP2.",
     )
     return parser

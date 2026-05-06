@@ -471,6 +471,32 @@ class _PlanNamespace:
         return _execute(*args, **kwargs)
 
     # ------------------------------------------------------------------
+    # Dispatcher factory (Phase 2.3a)
+    # ------------------------------------------------------------------
+    @experimental(
+        reason=(
+            "Phase 2.3a #147 extension: curated factory for "
+            "persistence.plan.Dispatcher. Returns a fresh empty "
+            "instance per call. Surface may evolve in v0.9 once "
+            "Phase-2 dogfooding identifies whether this is the load-"
+            "bearing shape. Adapter authors who depend on it should "
+            "not pin against @stable('v0.8') semantics."
+        )
+    )
+    def new_dispatcher(self):
+        """Return a fresh :class:`persistence.plan.Dispatcher` instance.
+
+        Used by adapters (e.g. persistence-coder's `_escalate_plan`) to
+        construct a per-call handler registry without importing the
+        `Dispatcher` type from `persistence.plan` directly. Type
+        vocabulary stays in `persistence.plan` per the
+        ``_PlanNamespace`` re-export rule (functions only).
+        """
+        from persistence.plan import Dispatcher
+
+        return Dispatcher()
+
+    # ------------------------------------------------------------------
     # Edit (Phase 2.0a) — re-export only
     # ------------------------------------------------------------------
     @experimental(

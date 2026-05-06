@@ -148,3 +148,24 @@ def test_reject_empty_seq_body(s_with_spy):
     assert exc_info.value.field == "plan_body"
     assert "empty" in exc_info.value.reason.lower()
     s_with_spy.effect.perform.assert_not_called()
+
+
+def test_reject_nested_empty_seq(s_with_spy):
+    """T6 IMPORTANT (coderabbit): nested empty [:seq {}] must raise
+    field='plan_body' (same defect class as root empty), NOT field='leaf_tag'
+    saying ':seq is unregistered'.
+
+    Without the leaf-branch :seq pre-check, validate_plan_for_2_3a would
+    pass the root-:seq Constraint 2 short-circuit (root has 1 child) then
+    descend into the nested empty :seq via _check_nodes_recursive's leaf
+    branch, where :seq is not in REGISTERED_LEAF_TAGS — the wrong defect
+    class. This test pins field='plan_body' as the contract."""
+    coder = _make_coder_stub(s_with_spy)
+    with pytest.raises(PlanPayloadValidation) as exc_info:
+        _escalate_plan_body(coder, _decision('[:seq {} [:seq {}]]'))
+    assert exc_info.value.field == "plan_body", (
+        f"nested empty :seq mis-classified: field={exc_info.value.field!r}, "
+        f"reason={exc_info.value.reason!r}"
+    )
+    assert "empty" in exc_info.value.reason.lower()
+    s_with_spy.effect.perform.assert_not_called()

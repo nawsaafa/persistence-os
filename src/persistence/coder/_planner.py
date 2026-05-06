@@ -229,11 +229,23 @@ def _check_nodes_recursive(node: Node, *, is_root: bool = False) -> None:
       (a) Interior unregistered tags: [:seq {} [:par {} [:fs/read {}]]] was
           previously accepted — :par is interior so leaves-only walk skipped it.
           Now raises field="interior_tag".
-      (b) Empty [:seq {}]: caught by Constraint 2 before this function runs;
-          no change in this function needed.
+      (b) Empty [:seq {}]: caught at TWO sites — root case via Constraint 2
+          short-circuit in validate_plan_for_2_3a, and nested case (e.g.
+          [:seq {} [:seq {}]]) via the leaf-branch :seq pre-check below.
+          Both raise field="plan_body" so the defect class is coherent.
     """
     if not is_root:
         if not node.children:
+            # T6 IMPORTANT (coderabbit): a nested empty :seq is the SAME
+            # defect class as a root empty :seq — not an "unregistered leaf
+            # tag" problem. Pre-check :seq before the leaf-tag rules so we
+            # raise field="plan_body" with the correct reason. (`:seq` is
+            # never in REGISTERED_LEAF_TAGS by design — it's structural.)
+            if node.tag == ":seq":
+                raise PlanPayloadValidation(
+                    field="plan_body",
+                    reason="empty :seq has no leaves to execute (nested at non-root position)",
+                )
             # Leaf node — check banned first (walk crashes on these).
             if node.tag in _BANNED_LEAF_TAGS:
                 raise PlanPayloadValidation(

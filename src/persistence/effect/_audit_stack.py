@@ -96,6 +96,17 @@ CANONICAL_AUDIT_WRAPPED_OPS: tuple[str, ...] = (
     ":fs/glob",
     ":fs/grep",
     ":shell/exec",
+    # Phase 2.2b — :code/run substantive-return + :git/* thin-wrapper-over-shell.
+    # All five WRAPPED only (substantive return; bottom-of-stack handlers
+    # installed separately via s.effect.install_handler at position="bottom").
+    # :git/* clauses internally call runtime.perform(":shell/exec", ...) wrapped
+    # in with mask(audit_handler_name) so ONE outer :git/<sub> AuditEntry emits
+    # per op call. See docs/plans/2026-05-06-phase-2.2b-git-code-exec-design.md § 2 LD2.
+    ":code/run",
+    ":git/diff",
+    ":git/status",
+    ":git/log",
+    ":git/commit",
 )
 
 

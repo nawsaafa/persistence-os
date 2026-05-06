@@ -38,9 +38,10 @@ def test_canonical_audit_raw_ops_includes_2_1c_6_ops():
 
 
 def test_canonical_audit_stack_covers_phase_2_ops():
-    """Drift-pin: every wrapped audit op shipped through Phase 2.0a-2.2a is here.
+    """Drift-pin: every wrapped audit op shipped through Phase 2.0a-2.2b is here.
 
     Phase 2.2a additions: :fs/read, :fs/write, :fs/glob, :fs/grep, :shell/exec.
+    Phase 2.2b additions: :code/run, :git/diff, :git/status, :git/log, :git/commit.
     These are substantive-return ops — wrapped by audit middleware but NOT in
     CANONICAL_AUDIT_RAW_OPS (their bottom-of-stack handler IS the substantive
     handler installed via s.effect.install_handler at position="bottom").
@@ -58,6 +59,8 @@ def test_canonical_audit_stack_covers_phase_2_ops():
         ":claim/emit", ":blob/put",
         # Phase 2.2a additions:
         ":fs/read", ":fs/write", ":fs/glob", ":fs/grep", ":shell/exec",
+        # Phase 2.2b additions:
+        ":code/run", ":git/diff", ":git/status", ":git/log", ":git/commit",
     }
     assert set(CANONICAL_AUDIT_WRAPPED_OPS) == expected_wrapped
 
@@ -65,3 +68,11 @@ def test_canonical_audit_stack_covers_phase_2_ops():
     new_ops = {":fs/read", ":fs/write", ":fs/glob", ":fs/grep", ":shell/exec"}
     assert not (new_ops & set(CANONICAL_AUDIT_RAW_OPS)), \
         "fs/shell ops MUST NOT be in CANONICAL_AUDIT_RAW_OPS"
+
+    # The 2.2b :code/run + :git/* ops are NOT in RAW_OPS either — :code/run
+    # returns a CodeRunResult, and :git/* clauses internally dispatch through
+    # :shell/exec (substantive return). Bottom-of-stack handlers are installed
+    # separately via s.effect.install_handler(..., position="bottom").
+    new_ops_2_2b = {":code/run", ":git/diff", ":git/status", ":git/log", ":git/commit"}
+    assert not (new_ops_2_2b & set(CANONICAL_AUDIT_RAW_OPS)), \
+        ":code/run and :git/* ops MUST NOT be in CANONICAL_AUDIT_RAW_OPS"

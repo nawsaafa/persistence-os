@@ -383,7 +383,7 @@ def _sha256_bytes(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _output_hash(stdout: str, stderr: str, exit_code: int) -> str:
+def output_hash(stdout: str, stderr: str, exit_code: int) -> str:
     """Canonical-JSON hash of the captured output triple.
 
     Excludes ``wall_clock_ms`` — wall-clock IS expected to vary
@@ -875,7 +875,7 @@ def _parse_forbidden_import(stderr: str) -> str | None:
     return "".join(name_chars) or None
 
 
-def _run_subprocess(
+def run_subprocess(
     source: str,
     stdin: str,
     timeout_seconds: float,
@@ -1093,7 +1093,7 @@ def exec_code(
     stdin_hash = _sha256_bytes(stdin.encode("utf-8"))
 
     try:
-        stdout, stderr, exit_code, wall_clock_ms = _run_subprocess(
+        stdout, stderr, exit_code, wall_clock_ms = run_subprocess(
             source=source,
             stdin=stdin,
             timeout_seconds=timeout_seconds,
@@ -1108,7 +1108,7 @@ def exec_code(
         # -1 sentinel + empty stderr (we did not capture it on the kill
         # path) — adequate for replay byte-identity since replay-mode
         # detects timeout via the sentinel exit and does not re-run.
-        partial_output_hash = _output_hash(
+        partial_output_hash = output_hash(
             timeout_exc.partial_stdout, "", -1
         )
         _emit_code_exec_datom(
@@ -1130,13 +1130,13 @@ def exec_code(
     if exit_code != 0:
         forbidden = _parse_forbidden_import(stderr)
 
-    output_hash = _output_hash(stdout, stderr, exit_code)
+    output_hash_value = output_hash(stdout, stderr, exit_code)
 
     _emit_code_exec_datom(
         tx=tx,
         source_hash=source_hash,
         stdin_hash=stdin_hash,
-        output_hash=output_hash,
+        output_hash=output_hash_value,
         exit_code=exit_code,
         wall_clock_ms=wall_clock_ms,
         timeout_seconds=timeout_seconds,
@@ -1147,10 +1147,10 @@ def exec_code(
         raise CodeExecForbiddenImport(forbidden)
 
     if replay_mode == "re-execute":
-        if output_hash != expected_output_hash:
+        if output_hash_value != expected_output_hash:
             raise CodeExecReplayMismatch(
                 expected_hash=str(expected_output_hash),
-                actual_hash=output_hash,
+                actual_hash=output_hash_value,
             )
 
     return CodeExecResult(
@@ -1158,7 +1158,7 @@ def exec_code(
         stderr=stderr,
         exit_code=exit_code,
         wall_clock_ms=wall_clock_ms,
-        output_hash=output_hash,
+        output_hash=output_hash_value,
     )
 
 
@@ -1201,4 +1201,6 @@ __all__ = [
     "CodeExecTimeout",
     "exec_code",
     "make_code_exec_handler",
+    "output_hash",
+    "run_subprocess",
 ]

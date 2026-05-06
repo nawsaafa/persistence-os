@@ -52,7 +52,7 @@ def test_reject_branch_root(s_with_spy):
     coder = _make_coder_stub(s_with_spy)
     with pytest.raises(PlanPayloadValidation) as exc_info:
         _escalate_plan_body(coder, _decision('[:branch {} [:fs/read {}]]'))
-    assert exc_info.value.field in ("root_tag", "leaf_tag")
+    assert exc_info.value.field == "root_tag"
     s_with_spy.effect.perform.assert_not_called()
 
 

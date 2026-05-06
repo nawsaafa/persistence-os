@@ -10,8 +10,6 @@ Two exception classes for the plan-bridge module:
 """
 from __future__ import annotations
 
-import pytest
-
 from persistence.coder._planner_errors import (
     PlanExecutionFailed,
     PlanPayloadValidation,

@@ -1,6 +1,6 @@
 """T2/G1 — `_build_plan_from_payload`: Stage 1 (byte budget) + Stage 2 (parse).
 
-Pipeline: payload["plan_edn"] str → byte-budget check → s.plan.parse(strict=True)
+Pipeline: payload["plan_edn"] str → byte-budget check → s.plan.parse(strict=False (FD2: plan-spec enum at _parse.py:211 excludes coder ops))
 → Node. Malformed EDN wraps as PlanPayloadValidation, NOT bare ParseError.
 
 Forced spec deviation vs impl plan line 398:

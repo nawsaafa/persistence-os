@@ -113,8 +113,6 @@ def test_escalate_plan_raises_plan_execution_failed_on_handler_raise(s):
     The raised exception must carry FailureInfo with the correct failed_tag
     (keyword-form per FD1) and a non-empty error_repr.
     """
-    session_start = dt.datetime.now(dt.timezone.utc)
-
     s.effect.perform = _make_perform_with_failure(  # type: ignore[method-assign]
         ":code/run", RuntimeError("BOOM_G5_TEST1")
     )

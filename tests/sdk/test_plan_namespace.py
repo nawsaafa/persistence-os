@@ -224,20 +224,23 @@ _CURATED_METHODS_2_0C_PRIME: tuple[str, ...] = (
 
 _CURATED_METHODS_2_0F: tuple[str, ...] = ("judge",)
 
-# Combined inventory — 24 (2.0c-prime) + 1 (2.0f) = 25 curated methods.
+_CURATED_METHODS_2_3A: tuple[str, ...] = ("new_dispatcher",)
+
+# Combined inventory — 24 (2.0c-prime) + 1 (2.0f) + 1 (2.3a) = 26 curated methods.
 _CURATED_METHODS: tuple[str, ...] = (
-    _CURATED_METHODS_2_0C_PRIME + _CURATED_METHODS_2_0F
+    _CURATED_METHODS_2_0C_PRIME + _CURATED_METHODS_2_0F + _CURATED_METHODS_2_3A
 )
 
 
-def test_curated_method_count_is_25() -> None:
-    """Phase 2.0f raises the curated-method count from 24 → 25 by
-    adding ``judge``. This guard pins the count so a future expansion
-    has to consciously update it (mirrors the 2.0c-prime ``dir(s)``
-    9 → 10 migration-note pattern)."""
+def test_curated_method_count_is_26() -> None:
+    """Phase 2.3a raises the curated-method count from 25 → 26 by
+    adding ``new_dispatcher``. This guard pins the count so a future
+    expansion has to consciously update it (mirrors the 2.0c-prime
+    ``dir(s)`` 9 → 10 migration-note pattern)."""
     assert len(_CURATED_METHODS_2_0C_PRIME) == 24
     assert len(_CURATED_METHODS_2_0F) == 1
-    assert len(_CURATED_METHODS) == 25
+    assert len(_CURATED_METHODS_2_3A) == 1
+    assert len(_CURATED_METHODS) == 26
 
 
 @pytest.mark.parametrize("method_name", _CURATED_METHODS)
@@ -245,9 +248,10 @@ def test_plan_namespace_methods_are_experimental(method_name: str):
     """Each curated s.plan.<method> carries @experimental metadata.
     Phase markers are checked per-method:
 
-    * 24 of 25 (the 2.0c-prime cohort) carry ``"Phase 2.0c-prime"`` or
+    * 24 of 26 (the 2.0c-prime cohort) carry ``"Phase 2.0c-prime"`` or
       ``"#147"`` in the reason string.
     * ``judge`` (Phase 2.0f) carries ``"Phase 2.0f"``.
+    * ``new_dispatcher`` (Phase 2.3a) carries ``"Phase 2.3a"``.
 
     The dual-marker check mirrors the s.txn.fork / s.txn.fold_into
     precedent (each phase's curated methods carry their own tag).
@@ -265,7 +269,12 @@ def test_plan_namespace_methods_are_experimental(method_name: str):
             f"{metadata.get('level')!r}, expected 'experimental'"
         )
         reason = metadata.get("reason") or ""
-        if method_name in _CURATED_METHODS_2_0F:
+        if method_name in _CURATED_METHODS_2_3A:
+            assert "Phase 2.3a" in reason, (
+                f"s.plan.{method_name} (Phase 2.3a cohort) reason "
+                f"string does not carry the phase tag; got: {reason!r}"
+            )
+        elif method_name in _CURATED_METHODS_2_0F:
             assert "Phase 2.0f" in reason, (
                 f"s.plan.{method_name} (Phase 2.0f cohort) reason "
                 f"string does not carry the phase tag; got: {reason!r}"

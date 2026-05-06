@@ -483,7 +483,7 @@ class _PlanNamespace:
             "not pin against @stable('v0.8') semantics."
         )
     )
-    def new_dispatcher(self):
+    def new_dispatcher(self) -> "Dispatcher":
         """Return a fresh :class:`persistence.plan.Dispatcher` instance.
 
         Used by adapters (e.g. persistence-coder's `_escalate_plan`) to
@@ -492,9 +492,9 @@ class _PlanNamespace:
         vocabulary stays in `persistence.plan` per the
         ``_PlanNamespace`` re-export rule (functions only).
         """
-        from persistence.plan import Dispatcher
+        from persistence.plan import Dispatcher as _Dispatcher
 
-        return Dispatcher()
+        return _Dispatcher()
 
     # ------------------------------------------------------------------
     # Edit (Phase 2.0a) — re-export only

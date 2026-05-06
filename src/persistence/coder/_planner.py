@@ -37,19 +37,21 @@ Forced spec deviations vs impl plan:
   FD3: walk() returns list[str] (list of node `:id` strings), NOT
        list[Node] or Iterator[Node]. Use visitor callback to collect
        nodes; use _depth() recursive helper for depth check.
-  FD4: ParseError is at persistence.plan._errors (also re-exported
-       from persistence.plan directly) — import from ._errors directly
-       for clarity.
+  FD4: banned-tag check pre-screens leaves BEFORE walk() because
+       walk() raises UnimplementedNodeKindError for `:branch`/`:code`
+       per `_walk.py:49`. ParseError imported from persistence.plan._errors
+       directly for clarity (also re-exported from persistence.plan).
 """
 from __future__ import annotations
 
 import uuid
 import datetime as dt
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from persistence.coder._planner_errors import PlanPayloadValidation
+from persistence.coder._planner_errors import PlanExecutionFailed, PlanPayloadValidation
 from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.plan import Dispatcher, Node, parse, walk
+from persistence.plan._dispatch import Handler
 from persistence.plan._errors import ParseError
 from persistence.plan._execute import _DEFAULT_HANDLER_ID
 from persistence.sdk import Substrate
@@ -161,10 +163,15 @@ def validate_plan_for_2_3a(plan: Node) -> None:
 
     Constraints:
         1. Root tag is `:seq` (keyword-form; FD1 — impl plan used bare "seq").
-        2. Empty plan body is rejected (root :seq with no children).
+        2. Empty plan body is rejected at TWO sites (field="plan_body"):
+           - Root `:seq` with no children (short-circuit here).
+           - Nested empty `:seq` (caught in _check_nodes_recursive before
+             leaf-tag rules so the defect class stays coherent).
         3. Total node count ≤ MAX_PLAN_NODES.
         4. Max depth ≤ MAX_PLAN_DEPTH.
         5. No `:branch` or `:code` leaves (would crash walk() per _walk.py:49).
+           FD4: banned-tag check pre-screens leaves BEFORE walk() — walk()
+           raises UnimplementedNodeKindError for these tags.
         6. Every non-root non-`:seq` node must be a leaf in REGISTERED_LEAF_TAGS.
            Interior nodes (with children) must be `:seq` only — other interior
            tags (e.g. `:par`, `:choice`, `:loop`) are not supported in 2.3a
@@ -282,14 +289,15 @@ def _check_nodes_recursive(node: Node, *, is_root: bool = False) -> None:
         _check_nodes_recursive(child, is_root=False)
 
 
-def _make_adapter(substrate: Substrate, tag: str):
+def _make_adapter(substrate: Substrate, tag: str) -> Handler:
     """Bind one substrate-op adapter for the given keyword-form tag.
 
     Adapter shape: (node, env) -> Any. Calls substrate.effect.perform
     with the same keyword-form tag and a dict-copy of node.attrs.
+    Return type is Handler (= Callable[[Node, dict], Any]) per _dispatch.py:21.
     """
 
-    def adapter(node: Node, env: dict[str, Any]) -> Any:
+    def adapter(node: Node, env: dict) -> Any:
         # FD3-T3: dict() coerces frozen Mapping -> plain dict for
         # substrate.effect.perform's args param.
         return substrate.effect.perform(tag, dict(node.attrs))
@@ -471,8 +479,6 @@ def _escalate_plan_body(coder: Any, decision: "LLMDecision") -> None:
       Plan leaves report latency_ms=0 at 2.3a. Per-leaf wall-clock
       tracking deferred to 2.4a (:sys/now / :clock/now route).
     """
-    from persistence.coder._planner_errors import PlanExecutionFailed
-
     substrate = coder.substrate
     valid_from = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
 
@@ -548,7 +554,7 @@ def _escalate_plan_body(coder: Any, decision: "LLMDecision") -> None:
             substrate=substrate,
             valid_from=valid_from,
             op=":plan/execute",
-            args_hash=canonical_hash({"plan_id": plan.id}),
+            args_hash=canonical_hash(plan.id),
             result_summary={"plan_id": plan.id},
             error=result.failure.error_repr,
             latency_ms=0,

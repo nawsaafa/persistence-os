@@ -161,11 +161,14 @@ def validate_plan_for_2_3a(plan: Node) -> None:
 
     Constraints:
         1. Root tag is `:seq` (keyword-form; FD1 — impl plan used bare "seq").
-        2. Total node count ≤ MAX_PLAN_NODES.
-        3. Max depth ≤ MAX_PLAN_DEPTH.
-        4. No `:branch` or `:code` leaves (would crash walk() per _walk.py:49).
-        5. Every leaf tag is in REGISTERED_LEAF_TAGS (Dispatcher silently
-           skips unregistered tags per _dispatch.py:73-80).
+        2. Empty plan body is rejected (root :seq with no children).
+        3. Total node count ≤ MAX_PLAN_NODES.
+        4. Max depth ≤ MAX_PLAN_DEPTH.
+        5. No `:branch` or `:code` leaves (would crash walk() per _walk.py:49).
+        6. Every non-root non-`:seq` node must be a leaf in REGISTERED_LEAF_TAGS.
+           Interior nodes (with children) must be `:seq` only — other interior
+           tags (e.g. `:par`, `:choice`, `:loop`) are not supported in 2.3a
+           and would be silently skipped by Dispatcher (per _dispatch.py:73-80).
     """
     # Constraint 1: root tag check (keyword-form per FD1).
     if plan.tag != ":seq":
@@ -174,13 +177,24 @@ def validate_plan_for_2_3a(plan: Node) -> None:
             reason=f"root must be ':seq', got '{plan.tag}'",
         )
 
-    # Constraint 4 (banned leaves) + Constraint 5 (registered leaves):
-    # Check BEFORE calling walk() — walk raises UnimplementedNodeKindError
-    # for :branch/:code leaves, so we must catch them here first.
-    # Tightened to all descendants (not just direct children) via recursion.
-    _check_leaves_recursive(plan)
+    # Constraint 2: empty plan body short-circuit.
+    if not plan.children:
+        raise PlanPayloadValidation(
+            field="plan_body",
+            reason="empty :seq has no leaves to execute",
+        )
 
-    # Constraint 2: node count — use visitor to collect all nodes post-ban-check.
+    # Constraints 5+6: walk all non-root nodes. Every non-root node must be:
+    #   - a leaf (no children) with tag in REGISTERED_LEAF_TAGS (banned tags
+    #     caught explicitly first), OR
+    #   - an interior node (has children) with tag == ":seq".
+    # This closes two T2 IMPORTANT residuals (coderabbit):
+    #   (a) Interior unregistered tags (e.g. :par) now rejected.
+    #   (b) Enforced before walk() — walk raises UnimplementedNodeKindError
+    #       for :branch/:code, so banned checks MUST precede _collect_all_nodes.
+    _check_nodes_recursive(plan, is_root=True)
+
+    # Constraint 3: node count — collect all nodes post-ban-check.
     all_nodes = _collect_all_nodes(plan)
     node_count = len(all_nodes)
     if node_count > MAX_PLAN_NODES:
@@ -189,7 +203,7 @@ def validate_plan_for_2_3a(plan: Node) -> None:
             reason=f"node count {node_count} exceeds budget {MAX_PLAN_NODES}",
         )
 
-    # Constraint 3: depth.
+    # Constraint 4: depth.
     depth = _depth(plan)
     if depth > MAX_PLAN_DEPTH:
         raise PlanPayloadValidation(
@@ -198,39 +212,62 @@ def validate_plan_for_2_3a(plan: Node) -> None:
         )
 
 
-def _check_leaves_recursive(node: Node) -> None:
-    """Recursively validate leaf nodes against banned + registered sets.
+def _check_nodes_recursive(node: Node, *, is_root: bool = False) -> None:
+    """Recursively validate every non-root node in the plan tree.
 
-    A leaf is any node with no children. Raises PlanPayloadValidation for:
-    - `:branch` or `:code` leaves (would crash walk per _execute.py:166-170)
-    - Any leaf tag not in REGISTERED_LEAF_TAGS
+    Rules enforced:
+    - Leaf node (no children): tag must NOT be in _BANNED_LEAF_TAGS and
+      MUST be in REGISTERED_LEAF_TAGS.
+    - Interior node (has children, non-root): tag MUST be ":seq". Other
+      interior tags (e.g. :par, :choice, :loop) are not supported in 2.3a
+      and would be silently skipped by Dispatcher per _dispatch.py:73-80.
 
-    Note: the root `:seq` node itself is not a leaf (it has children),
-    so it doesn't need to be in REGISTERED_LEAF_TAGS.
+    The root node is skipped (validated separately in validate_plan_for_2_3a
+    as Constraint 1 + Constraint 2).
+
+    Closes T2 IMPORTANT residuals (coderabbit):
+      (a) Interior unregistered tags: [:seq {} [:par {} [:fs/read {}]]] was
+          previously accepted — :par is interior so leaves-only walk skipped it.
+          Now raises field="interior_tag".
+      (b) Empty [:seq {}]: caught by Constraint 2 before this function runs;
+          no change in this function needed.
     """
-    if not node.children:
-        # This is a leaf node.
-        if node.tag in _BANNED_LEAF_TAGS:
-            raise PlanPayloadValidation(
-                field="leaf_tag",
-                reason=(
-                    f"leaf '{node.tag}' is banned (would crash walk "
-                    f"with UnimplementedNodeKindError per _walk.py:49)"
-                ),
-            )
-        if node.tag not in REGISTERED_LEAF_TAGS:
-            raise PlanPayloadValidation(
-                field="leaf_tag",
-                reason=(
-                    f"leaf tag '{node.tag}' is unregistered; "
-                    f"Dispatcher would silently skip it. Allowed: "
-                    f"{sorted(REGISTERED_LEAF_TAGS)}"
-                ),
-            )
-    else:
-        # Non-leaf: recurse into children.
-        for child in node.children:
-            _check_leaves_recursive(child)
+    if not is_root:
+        if not node.children:
+            # Leaf node — check banned first (walk crashes on these).
+            if node.tag in _BANNED_LEAF_TAGS:
+                raise PlanPayloadValidation(
+                    field="leaf_tag",
+                    reason=(
+                        f"leaf '{node.tag}' is banned (would crash walk "
+                        f"with UnimplementedNodeKindError per _walk.py:49)"
+                    ),
+                )
+            if node.tag not in REGISTERED_LEAF_TAGS:
+                raise PlanPayloadValidation(
+                    field="leaf_tag",
+                    reason=(
+                        f"leaf tag '{node.tag}' is unregistered; "
+                        f"Dispatcher would silently skip it. Allowed: "
+                        f"{sorted(REGISTERED_LEAF_TAGS)}"
+                    ),
+                )
+        else:
+            # Interior non-root node — must be :seq only.
+            if node.tag != ":seq":
+                raise PlanPayloadValidation(
+                    field="interior_tag",
+                    reason=(
+                        f"interior tag '{node.tag}' is not allowed at 2.3a; "
+                        f"only ':seq' is supported as interior structural tag. "
+                        f"Dispatcher would silently skip '{node.tag}' per "
+                        f"_dispatch.py:73-80."
+                    ),
+                )
+
+    # Recurse into children regardless (root also needs its children checked).
+    for child in node.children:
+        _check_nodes_recursive(child, is_root=False)
 
 
 def _make_adapter(substrate: Substrate, tag: str):

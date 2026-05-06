@@ -51,6 +51,7 @@ from persistence.coder._planner_errors import PlanPayloadValidation
 from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.plan import Dispatcher, Node, parse, walk
 from persistence.plan._errors import ParseError
+from persistence.plan._execute import _DEFAULT_HANDLER_ID
 from persistence.sdk import Substrate
 
 if TYPE_CHECKING:
@@ -472,7 +473,12 @@ def _escalate_plan_body(coder: Any, decision: "LLMDecision") -> None:
         #    (R0-fold B1 resolution: the failing leaf is NOT in
         #    result.leaf_results so we cannot get its context from there).
         failed_node = id_to_node[result.failure.failed_node_id]
-        failed_handler_id = failed_node.attrs.get("handler-id", "<default>")
+        # Source the sentinel from `_execute.py`'s canonical constant
+        # (private name, but contractually load-bearing — failure-leaf
+        # handler_id MUST mirror what success-leaf LeafResult.handler_id
+        # receives at `_execute.py:206`). If `_execute.py` ever flips
+        # its sentinel, both paths track together.
+        failed_handler_id = failed_node.attrs.get("handler-id", _DEFAULT_HANDLER_ID)
         _emit_act_result(
             substrate=substrate,
             valid_from=valid_from,

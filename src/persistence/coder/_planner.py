@@ -43,9 +43,12 @@ Forced spec deviations vs impl plan:
 """
 from __future__ import annotations
 
+import uuid
+import datetime as dt
 from typing import Any, Mapping
 
 from persistence.coder._planner_errors import PlanPayloadValidation
+from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.plan import Dispatcher, Node, parse, walk
 from persistence.plan._errors import ParseError
 from persistence.sdk import Substrate
@@ -56,6 +59,7 @@ __all__ = [
     "MAX_PLAN_NODES",
     "REGISTERED_LEAF_TAGS",
     "_build_plan_from_payload",
+    "_escalate_plan_body",
     "_register_substrate_handlers",
     "validate_plan_for_2_3a",
 ]
@@ -254,3 +258,182 @@ def _register_substrate_handlers(
     """
     for tag in sorted(REGISTERED_LEAF_TAGS):
         dispatcher.register(tag, _make_adapter(substrate, tag))
+
+
+# ---------------------------------------------------------------------------
+# T4 helpers — :act/result emission + :plan/done provenance
+# ---------------------------------------------------------------------------
+
+def _summarize_leaf_result(
+    handler_result: Any,
+    *,
+    plan_id: str,
+    node_id: str,
+    tag: str,
+    handler_id: str,
+) -> dict[str, Any]:
+    """Build the LD3 result_summary dict for a plan leaf's :act/result.
+
+    Extends the 2.2a {op,args_hash,result_summary,error,latency_ms}
+    envelope by packing plan-context keys {plan_id,node_id,tag,handler_id}
+    INSIDE the result_summary field alongside the handler's own result.
+    Single :act/result shape preserved so 2.2b LD3 _render_latest_action
+    works without branching.
+
+    LD3 contract: result_summary is a dict (not a bare value) so that
+    plan-context keys and the handler's return value coexist. If the
+    handler returned a dict, its items are merged at top level; otherwise
+    the raw result is stored under key "result".
+    """
+    summary: dict[str, Any] = {
+        "plan_id": plan_id,
+        "node_id": node_id,
+        "tag": tag,
+        "handler_id": handler_id,
+    }
+    if handler_result is None:
+        pass  # context keys only — no result key
+    elif isinstance(handler_result, dict):
+        # Merge handler dict items; plan-context keys take precedence
+        # (plan_id / node_id / tag / handler_id never collide with op
+        # results in practice — ops return domain-specific keys like
+        # "content", "stdout", "diff", etc.)
+        summary.update(handler_result)
+    else:
+        summary["result"] = handler_result
+    return summary
+
+
+def _emit_act_result(
+    *,
+    substrate: Substrate,
+    valid_from: dt.datetime,
+    op: str,
+    args_hash: str,
+    result_summary: Any,
+    error: str | None,
+    latency_ms: int,
+) -> None:
+    """Emit one :act/result datom via s.fact.transact.
+
+    Mirrors the shape emitted by Coder._act in _session.py — same
+    {op, args_hash, result_summary, error, latency_ms} envelope —
+    so 2.2b LD3 _render_latest_action works without branching.
+    """
+    substrate.fact.transact([{
+        "e": uuid.uuid4().hex,   # noqa: wall-clock — entity-id (txn precedent)
+        "a": ":act/result",
+        "v": canonical_dumps({
+            "op": op,
+            "args_hash": args_hash,
+            "result_summary": result_summary,
+            "error": error,
+            "latency_ms": latency_ms,
+        }),
+        "valid_from": valid_from,
+    }])
+
+
+def _emit_plan_done(
+    *,
+    substrate: Substrate,
+    valid_from: dt.datetime,
+    plan_id: str,
+    leaf_count: int,
+) -> None:
+    """Emit the :plan/done provenance datom via s.fact.transact.
+
+    LD2: :plan/done is a provenance datom, NOT an audit op — it is NOT
+    in CANONICAL_AUDIT_WRAPPED_OPS. The drift-pin / G7 are unaffected.
+    Shape: {plan_id, status, leaf_count}.
+    """
+    substrate.fact.transact([{
+        "e": uuid.uuid4().hex,   # noqa: wall-clock — entity-id (txn precedent)
+        "a": ":plan/done",
+        "v": canonical_dumps({
+            "plan_id": plan_id,
+            "status": "ok",
+            "leaf_count": leaf_count,
+        }),
+        "valid_from": valid_from,
+    }])
+
+
+# ---------------------------------------------------------------------------
+# T4 — _escalate_plan_body happy path (LD0+LD2+LD3+LD5)
+# ---------------------------------------------------------------------------
+
+def _escalate_plan_body(
+    plan: Node,
+    dispatcher: Dispatcher,
+    *,
+    substrate: Substrate,
+) -> None:
+    """Happy-path plan execution pipeline (T4 — LD0+LD2+LD3+LD5).
+
+    Pipeline:
+      1. Pre-walk: build id→Node map for leaf attribution.
+      2. Register 10 substrate-op handlers on the fresh dispatcher.
+      3. Execute: substrate.plan.execute(plan, dispatcher).
+      4. Emit per-leaf :act/result datoms in walk order (LD3 shape).
+      5. Emit :plan/done provenance datom (LD2 — NOT audit op).
+      6. Return None (LD0: terminal mode-switch — Coder.run() exits
+         naturally via the post-escalation early-return at _session.py:79).
+
+    Failure path (status="failed") is NOT handled here — delegated to T5.
+    This function only processes ExecutionResult.status == "ok".
+
+    Forced spec deviation — T2 FD1 cascade:
+      leaf.tag is ALREADY keyword-form (":fs/read" etc.) after execution.
+      MUST use leaf.tag directly — NOT f":{leaf.tag}" (would produce
+      "::fs/read"). Same for result_summary.tag.
+
+    Forced spec deviation — latency_ms:
+      Plan leaves report latency_ms=0 at 2.3a. Per-leaf wall-clock
+      tracking deferred to 2.4a (:sys/now / :clock/now route).
+    """
+    from persistence.plan import execute as _plan_execute
+
+    valid_from = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
+
+    # Step 1: pre-walk — build id→Node map for leaf attribution.
+    # FD3: walk() returns list[str] (node IDs), not list[Node].
+    # Use _collect_all_nodes (visitor-based) to get Node references.
+    all_nodes = _collect_all_nodes(plan)
+    id_to_node: dict[str, Node] = {n.id: n for n in all_nodes}
+
+    # Step 2: register handlers.
+    _register_substrate_handlers(dispatcher, substrate)
+
+    # Step 3: execute.
+    result = _plan_execute(plan, dispatcher)
+
+    # Step 4: emit per-leaf :act/result datoms in walk order.
+    for leaf in result.leaf_results:
+        node = id_to_node[leaf.node_id]
+        _emit_act_result(
+            substrate=substrate,
+            valid_from=valid_from,
+            op=leaf.tag,                                   # FD1: keyword-form direct, NOT f":{leaf.tag}"
+            args_hash=canonical_hash(dict(node.attrs)),
+            result_summary=_summarize_leaf_result(
+                leaf.result,
+                plan_id=plan.id,
+                node_id=leaf.node_id,
+                tag=leaf.tag,                              # FD1: keyword-form direct
+                handler_id=leaf.handler_id,
+            ),
+            error=None,
+            latency_ms=0,                                  # deferred to 2.4a
+        )
+
+    # Step 5: emit :plan/done provenance datom.
+    _emit_plan_done(
+        substrate=substrate,
+        valid_from=valid_from,
+        plan_id=plan.id,
+        leaf_count=len(result.leaf_results),
+    )
+
+    # Step 6: return None — terminal mode-switch (LD0).
+    return None

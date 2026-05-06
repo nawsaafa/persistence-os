@@ -13,6 +13,8 @@ from persistence.effect.handlers.shell import (  # noqa: F401
     ShellAllowlistDenied, ShellAllowlistVersionMismatch,
     make_shell_handler,
 )
+from persistence.effect.handlers.code import make_code_run_dispatch_handler  # noqa: F401
+from persistence.effect.handlers.git import make_git_handler, GitArgValidation  # noqa: F401
 
 __all__ = [
     "make_callable_llm_handler",
@@ -26,4 +28,7 @@ __all__ = [
     "ShellAllowlistDenied",
     "ShellAllowlistVersionMismatch",
     "make_shell_handler",
+    "make_code_run_dispatch_handler",
+    "make_git_handler",
+    "GitArgValidation",
 ]

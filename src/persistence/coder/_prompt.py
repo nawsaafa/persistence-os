@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from ._types import Observation
 
@@ -39,6 +39,42 @@ EMIT_DECISION_TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
+def _render_latest_action(action: Mapping[str, Any]) -> list[str]:
+    """LD3 — render the most-recent action with explicit field formatting.
+
+    Bypasses build_messages' [:200] truncation for the LATEST action only;
+    older history entries (in 'Recent loop history' block) keep the cap.
+
+    Fields:
+      op: dispatched op name
+      error: error string (or 'none' when None)
+      result_summary: dict — render each (key, value) explicitly:
+        - str values: render with `|\\n    <value>` (block-string indented).
+          The upstream _summarize_result already truncates strings >512 chars.
+        - list values: collapse to `count=N, first_3=<repr of first 3>`.
+        - other: repr() truncated at 200 chars.
+      result_summary=None: render placeholder '(no result_summary — exception path)'.
+    """
+    parts = ["Latest action output:"]
+    parts.append(f"  op: {action.get('op', '?')}")
+    parts.append(f"  error: {action.get('error') or 'none'}")
+    rs = action.get("result_summary")
+    if rs is None:
+        parts.append("  (no result_summary — exception path)")
+    elif isinstance(rs, dict):
+        for k, v in rs.items():
+            if isinstance(v, str):
+                # _summarize_result already capped at 512; render verbatim.
+                parts.append(f"  {k}: |\n    {v}")
+            elif isinstance(v, list):
+                parts.append(f"  {k}: count={len(v)}, first_3={v[:3]!r}")
+            else:
+                parts.append(f"  {k}: {v!r}"[:202])
+    else:
+        parts.append(f"  result_summary: {rs!r}"[:202])
+    return parts
+
+
 def build_messages(task: str, obs: Observation) -> list[dict[str, Any]]:
     """Construct the LLM message list.
 
@@ -47,6 +83,12 @@ def build_messages(task: str, obs: Observation) -> list[dict[str, Any]]:
     (zero-prompt-overhead when both tuples are empty).
     """
     parts = [f"Task: {task}", "", "Use emit_decision to respond."]
+    # Phase 2.2b LD3 — render latest action verbatim BEFORE the
+    # truncated history block, so stdout/stderr/traceback content
+    # reaches the LLM without the [:200] cap eating sentinels.
+    if obs.recent_actions:
+        parts.append("")
+        parts.extend(_render_latest_action(obs.recent_actions[-1]))
     if obs.recent_decisions or obs.recent_actions:
         parts.extend(["", f"Recent loop history (iter {obs.iter_count}):"])
         if obs.recent_decisions:

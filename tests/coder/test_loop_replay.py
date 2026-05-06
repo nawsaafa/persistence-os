@@ -337,3 +337,238 @@ def test_coder_loop_audit_replay_clock_skew_mismatch(tmp_path: Path) -> None:
         "→ different entry.id → diverging Merkle chains.\n"
         f"TS_A={_FIXED_TS_A}, TS_B={_FIXED_TS_B}."
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.2b T7 — G6 deterministic-invariants tests for :code/run + :git/*
+# ---------------------------------------------------------------------------
+#
+# Per design § 4 G6 (R0-fold of B1):
+#   "deterministic invariants only — args_hash stability + output_hash for
+#    :code/run + argv-determinism for :git/* (NOT full AuditEntry byte-identity,
+#    which is impossible because result_hash includes wall_clock_ms)."
+#
+# The 3 existing tests above CAN do full byte-identity for :fs/* because those
+# ops return result dicts WITHOUT wall_clock_ms. But:
+#   - :code/run returns {stdout, stderr, exit_code, wall_clock_ms, output_hash}
+#     — wall_clock_ms varies per run; output_hash is sha256 over the
+#     deterministic subset {stdout, stderr, exit_code}.
+#   - :git/diff/status/log/commit delegate to :shell/exec which returns
+#     {exit, stdout, stderr, wall_clock_ms} — wall_clock_ms varies.
+#
+# So G6 tests assert the DETERMINISTIC parts only:
+#   - :code/run: output_hash equality across runs of same source AND
+#                args_hash equality on the audit middleware entry.
+#   - :git/*  : argv construction is pure(args) (sorted paths, fixed flags) —
+#                same args produce same argv across two CLEAN handler
+#                instantiations (proves no module-level state leak); audit
+#                args_hash is canonical_hash over the LLM-emitted args.
+
+
+def test_code_run_output_hash_byte_identity_g6() -> None:
+    """G6 — :code/run two runs of same source produce byte-identical
+    output_hash AND byte-identical audit args_hash. NOT full result_hash
+    byte-identity (would fail because wall_clock_ms is non-deterministic).
+
+    Design § 4 G6: 'deterministic invariants only'. wall_clock_ms is
+    excluded from output_hash by design (output_hash is a pure function
+    of stdout, stderr, exit_code). args_hash is over the LLM-emitted
+    op args, which the substrate transports byte-for-byte.
+    """
+    from persistence.effect.canonical import canonical_hash
+    from persistence.effect.handlers.code import make_code_run_dispatch_handler
+
+    source = "print('deterministic')"
+    args = {"source": source}
+
+    def _run() -> tuple[dict, list[AuditEntry]]:
+        entries: list[AuditEntry] = []
+        s = Substrate.open("memory", audit=False)
+        try:
+            raw = _make_canonical_raw_terminator()
+            clock = make_fixed_clock_handler(ts=_FIXED_TS_A)
+            code = make_code_run_dispatch_handler()
+            audit = make_audit_handler(entries, wraps=set(CANONICAL_AUDIT_WRAPPED_OPS))
+            s.effect.install_handler(raw, position="bottom")
+            s.effect.install_handler(clock, position="bottom")
+            s.effect.install_handler(code, position="bottom")
+            s.effect.install_handler(audit, position="top")
+            with with_runtime(s._runtime):
+                result = s.effect.perform(":code/run", args)
+        finally:
+            s.close()
+        return result, entries
+
+    result_a, entries_a = _run()
+    result_b, entries_b = _run()
+
+    # Sanity: the source actually ran successfully.
+    assert result_a["exit_code"] == 0, (
+        f"Run A failed: stderr={result_a['stderr']!r}"
+    )
+    assert result_b["exit_code"] == 0, (
+        f"Run B failed: stderr={result_b['stderr']!r}"
+    )
+
+    # Deterministic invariant #1: output_hash is pure(stdout, stderr, exit_code).
+    assert result_a["output_hash"] == result_b["output_hash"], (
+        f"output_hash diverged across runs of same source.\n"
+        f"  run A: {result_a['output_hash']!r}\n"
+        f"  run B: {result_b['output_hash']!r}\n"
+        f"Possible cause: output_hash erroneously incorporates wall_clock_ms."
+    )
+
+    # Deterministic invariant #2: audit args_hash is canonical_hash(args).
+    assert len(entries_a) >= 1 and len(entries_b) >= 1, (
+        f"Expected at least 1 audit entry per run; got "
+        f"a={len(entries_a)} b={len(entries_b)}."
+    )
+    assert entries_a[0].args_hash == entries_b[0].args_hash, (
+        f"args_hash diverged across runs of same args.\n"
+        f"  run A: {entries_a[0].args_hash!r}\n"
+        f"  run B: {entries_b[0].args_hash!r}"
+    )
+    assert entries_a[0].args_hash == canonical_hash(args), (
+        f"args_hash != canonical_hash(args).\n"
+        f"  args_hash:        {entries_a[0].args_hash!r}\n"
+        f"  canonical_hash:   {canonical_hash(args)!r}"
+    )
+
+    # NOT asserted: entries_a[0].id == entries_b[0].id  (would fail —
+    # result_hash includes wall_clock_ms which differs across runs).
+
+
+def test_git_diff_args_hash_and_argv_determinism_g6(tmp_path: Path) -> None:
+    """G6 — :git/diff two runs of same args produce same constructed argv
+    (via :shell/exec spy) AND same audit args_hash. NOT full result_hash
+    byte-identity (would fail because :shell/exec's wall_clock_ms varies).
+
+    The spy IS the argv-determinism contract since none of argv/cwd/
+    allowlist_version/env_allowlist_subset/timeout_s reach the audit
+    args_hash (audit hashes the pre-clause LLM args).
+    """
+    from persistence.effect.canonical import canonical_hash
+    from persistence.effect.handlers.git import make_git_handler
+    from persistence.effect.runtime import Handler
+
+    project_root = tmp_path / "p"
+    project_root.mkdir(parents=True, exist_ok=True)
+    args = {"cwd": str(project_root), "ref": "HEAD"}
+
+    def _run() -> tuple[list[str], list[AuditEntry]]:
+        captured: list[dict] = []
+
+        def spy_clause(call_args, _k, _ctx):
+            captured.append(dict(call_args))
+            return {"exit": 0, "stdout": "", "stderr": "", "wall_clock_ms": 1}
+
+        spy_handler = Handler(
+            name="shell-spy",
+            wraps={":shell/exec"},
+            clauses={":shell/exec": spy_clause},
+        )
+        entries: list[AuditEntry] = []
+        s = Substrate.open("memory", audit=False)
+        try:
+            raw = _make_canonical_raw_terminator()
+            clock = make_fixed_clock_handler(ts=_FIXED_TS_A)
+            git = make_git_handler(project_root=project_root)
+            audit = make_audit_handler(entries, wraps=set(CANONICAL_AUDIT_WRAPPED_OPS))
+            s.effect.install_handler(raw, position="bottom")
+            s.effect.install_handler(clock, position="bottom")
+            s.effect.install_handler(spy_handler, position="bottom")
+            s.effect.install_handler(git, position="bottom")
+            s.effect.install_handler(audit, position="top")
+            with with_runtime(s._runtime):
+                s.effect.perform(":git/diff", args)
+        finally:
+            s.close()
+        assert len(captured) == 1, (
+            f":shell/exec spy expected exactly 1 call; got {len(captured)}."
+        )
+        return captured[0]["argv"], entries
+
+    argv_a, entries_a = _run()
+    argv_b, entries_b = _run()
+
+    # Deterministic invariant #1: argv is pure(args) — same across runs.
+    assert argv_a == argv_b, (
+        f"argv diverged across runs of same :git/diff args.\n"
+        f"  run A: {argv_a!r}\n"
+        f"  run B: {argv_b!r}"
+    )
+
+    # Deterministic invariant #2: audit args_hash is canonical_hash(args).
+    assert len(entries_a) >= 1 and len(entries_b) >= 1
+    assert entries_a[0].args_hash == entries_b[0].args_hash, (
+        f"args_hash diverged across runs of same :git/diff args.\n"
+        f"  run A: {entries_a[0].args_hash!r}\n"
+        f"  run B: {entries_b[0].args_hash!r}"
+    )
+    assert entries_a[0].args_hash == canonical_hash(args), (
+        f":git/diff args_hash != canonical_hash(LLM args).\n"
+        f"  args_hash:      {entries_a[0].args_hash!r}\n"
+        f"  canonical_hash: {canonical_hash(args)!r}"
+    )
+
+
+def test_git_log_argv_determinism_across_handler_instances_g6(tmp_path: Path) -> None:
+    """G6 — argv-determinism property. Same :git/log args produce same
+    argv across two CLEAN handler instantiations (independent
+    make_git_handler calls, independent substrates). Pins the
+    argv-construction logic to be pure(args) — no module-level state
+    leakage.
+    """
+    from persistence.effect.handlers.git import make_git_handler
+    from persistence.effect.runtime import Handler
+
+    project_root = tmp_path / "p"
+    project_root.mkdir(parents=True, exist_ok=True)
+    args = {
+        "cwd": str(project_root),
+        "n": 5,
+        "format": "short",
+        "paths": ["b.txt", "a.txt"],
+    }
+
+    def _capture_argv() -> list[str]:
+        captured: list[dict] = []
+
+        def spy_clause(call_args, _k, _ctx):
+            captured.append(dict(call_args))
+            return {"exit": 0, "stdout": "", "stderr": "", "wall_clock_ms": 1}
+
+        spy = Handler(
+            name="shell-spy",
+            wraps={":shell/exec"},
+            clauses={":shell/exec": spy_clause},
+        )
+        s = Substrate.open("memory", audit=False)
+        try:
+            # Fresh make_git_handler call each invocation — proves the
+            # argv-construction closure carries no module-level state.
+            git = make_git_handler(project_root=project_root)
+            s.effect.install_handler(spy, position="bottom")
+            s.effect.install_handler(git, position="bottom")
+            with with_runtime(s._runtime):
+                s.effect.perform(":git/log", args)
+        finally:
+            s.close()
+        assert len(captured) == 1, (
+            f":shell/exec spy expected exactly 1 call; got {len(captured)}."
+        )
+        return captured[0]["argv"]
+
+    argv_first = _capture_argv()
+    argv_second = _capture_argv()
+    assert argv_first == argv_second, (
+        f"argv diverged across CLEAN make_git_handler instantiations — "
+        f"argv-construction closure is leaking module-level state.\n"
+        f"  first:  {argv_first!r}\n"
+        f"  second: {argv_second!r}"
+    )
+
+    # Sanity: argv ends with sorted paths (b.txt sorts AFTER a.txt).
+    assert argv_first[-2:] == ["a.txt", "b.txt"], (
+        f"Expected sorted paths at argv tail; got {argv_first[-2:]!r}."
+    )

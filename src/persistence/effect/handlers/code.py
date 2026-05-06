@@ -383,7 +383,7 @@ def _sha256_bytes(payload: bytes) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _output_hash(stdout: str, stderr: str, exit_code: int) -> str:
+def output_hash(stdout: str, stderr: str, exit_code: int) -> str:
     """Canonical-JSON hash of the captured output triple.
 
     Excludes ``wall_clock_ms`` — wall-clock IS expected to vary
@@ -875,7 +875,7 @@ def _parse_forbidden_import(stderr: str) -> str | None:
     return "".join(name_chars) or None
 
 
-def _run_subprocess(
+def run_subprocess(
     source: str,
     stdin: str,
     timeout_seconds: float,
@@ -1093,7 +1093,7 @@ def exec_code(
     stdin_hash = _sha256_bytes(stdin.encode("utf-8"))
 
     try:
-        stdout, stderr, exit_code, wall_clock_ms = _run_subprocess(
+        stdout, stderr, exit_code, wall_clock_ms = run_subprocess(
             source=source,
             stdin=stdin,
             timeout_seconds=timeout_seconds,
@@ -1108,7 +1108,7 @@ def exec_code(
         # -1 sentinel + empty stderr (we did not capture it on the kill
         # path) — adequate for replay byte-identity since replay-mode
         # detects timeout via the sentinel exit and does not re-run.
-        partial_output_hash = _output_hash(
+        partial_output_hash = output_hash(
             timeout_exc.partial_stdout, "", -1
         )
         _emit_code_exec_datom(
@@ -1130,13 +1130,13 @@ def exec_code(
     if exit_code != 0:
         forbidden = _parse_forbidden_import(stderr)
 
-    output_hash = _output_hash(stdout, stderr, exit_code)
+    output_hash_value = output_hash(stdout, stderr, exit_code)
 
     _emit_code_exec_datom(
         tx=tx,
         source_hash=source_hash,
         stdin_hash=stdin_hash,
-        output_hash=output_hash,
+        output_hash=output_hash_value,
         exit_code=exit_code,
         wall_clock_ms=wall_clock_ms,
         timeout_seconds=timeout_seconds,
@@ -1147,10 +1147,10 @@ def exec_code(
         raise CodeExecForbiddenImport(forbidden)
 
     if replay_mode == "re-execute":
-        if output_hash != expected_output_hash:
+        if output_hash_value != expected_output_hash:
             raise CodeExecReplayMismatch(
                 expected_hash=str(expected_output_hash),
-                actual_hash=output_hash,
+                actual_hash=output_hash_value,
             )
 
     return CodeExecResult(
@@ -1158,7 +1158,7 @@ def exec_code(
         stderr=stderr,
         exit_code=exit_code,
         wall_clock_ms=wall_clock_ms,
-        output_hash=output_hash,
+        output_hash=output_hash_value,
     )
 
 
@@ -1191,6 +1191,95 @@ def make_code_exec_handler() -> Handler:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 2.2b — :code/run substantive-return handler
+# ---------------------------------------------------------------------------
+
+
+def _code_run_clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> dict[str, Any]:
+    """Phase 2.2b T2 — substantive-return clause for ``:code/run``.
+
+    Reuses :func:`run_subprocess` and :func:`output_hash` (extracted in
+    T1). Distinct from legacy :code/exec on three axes:
+
+    1. Audit ``args_hash`` is over the LLM-emitted source-shape args
+       (the dict passed to ``runtime.perform(":code/run", args)``), NOT
+       the hash-shape args dict that :func:`exec_code` passes to
+       ``tx.effect(":code/exec", source_hash=..., stdin_hash=..., ...)``.
+    2. Returns a result dict; does NOT raise on timeout, forbidden-import,
+       or non-zero exit. The caller (agent) reads ``stderr`` /
+       ``exit_code`` and decides what to do. This is the load-bearing
+       difference from the typed-exception API at :func:`exec_code`.
+    3. Timeout converts to ``exit_code=-1`` + partial output (matches the
+       legacy :func:`exec_code` timeout-audit-datom shape at line 1119).
+
+    Forced spec deviations (vs design § 3):
+
+    - **Factory signature** is ``(*, name="code-run")``. Design § 3
+      originally specified ``(project_root, scratch_dir)`` but neither
+      is referenced inside the clause — :func:`run_subprocess` runs in
+      :func:`tempfile.mkdtemp`. YAGNI-correct.
+    - **CodeExecTimeout catch** — the plan's pseudocode for the clause
+      showed :func:`run_subprocess` returning a tuple on every path.
+      In fact :func:`run_subprocess` RAISES :class:`CodeExecTimeout` on
+      timeout (line 946). Without this catch, G2 test #5 (timeout-
+      returns-partial-output) would surface the exception instead of
+      a result dict. We convert here.
+
+    The forbidden-import path is NOT caught: :func:`run_subprocess`
+    itself does not raise :class:`CodeExecForbiddenImport` (only
+    :func:`exec_code` does, after parsing the stderr sentinel). The
+    non-zero exit + stderr-with-sentinel flows through to the result
+    dict; the agent reads stderr and decides.
+    """
+    source = args["source"]
+    stdin = args.get("stdin", "")
+    timeout_seconds = args.get("timeout_seconds", 5.0)
+    memory_mb = args.get("memory_mb", 128)
+    env = args.get("env")
+
+    try:
+        stdout, stderr, exit_code, wall_clock_ms = run_subprocess(
+            source=source,
+            stdin=stdin,
+            timeout_seconds=timeout_seconds,
+            memory_mb=memory_mb,
+            env=env,
+        )
+    except CodeExecTimeout as timeout_exc:
+        stdout = timeout_exc.partial_stdout
+        stderr = timeout_exc.partial_stderr
+        exit_code = -1  # sentinel matching legacy exec_code line 1119
+        # NOTE: timeout path reports the CONFIGURED timeout, not measured
+        # kill-and-drain wall-clock. Matches legacy :code/exec timeout-datom
+        # semantics (code.py:1119-1120). Agents discriminate via exit_code=-1.
+        wall_clock_ms = int(timeout_seconds * 1000)
+
+    return {
+        "stdout": stdout,
+        "stderr": stderr,
+        "exit_code": exit_code,
+        "wall_clock_ms": wall_clock_ms,
+        "output_hash": output_hash(stdout, stderr, exit_code),
+    }
+
+
+def make_code_run_dispatch_handler(*, name: str = "code-run") -> Handler:
+    """Phase 2.2b T2 — bottom-of-stack handler for ``:code/run``.
+
+    Install via ``s.effect.install_handler(handler, position="bottom")``.
+    The audit middleware (registered for ``:code/run`` in
+    :data:`persistence.effect.CANONICAL_AUDIT_WRAPPED_OPS` in T1) wraps
+    each invocation with a ``:code/run`` :class:`AuditEntry` carrying
+    ``args_hash`` over the source-shape args dict.
+    """
+    return Handler(
+        name=name,
+        wraps={":code/run"},
+        clauses={":code/run": _code_run_clause},
+    )
+
+
 __all__ = [
     "CodeExecError",
     "CodeExecForbiddenImport",
@@ -1201,4 +1290,7 @@ __all__ = [
     "CodeExecTimeout",
     "exec_code",
     "make_code_exec_handler",
+    "make_code_run_dispatch_handler",
+    "output_hash",
+    "run_subprocess",
 ]

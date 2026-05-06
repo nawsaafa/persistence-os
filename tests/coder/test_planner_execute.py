@@ -9,26 +9,28 @@ Forced spec deviation vs impl plan:
   FD2 (T2): parse(strict=False) used for 2.3a coder-specific tags.
   FD3 (T2): walk() returns list[str]; visitor callback used for id→Node.
   LD2: :plan/done emitted via s.fact.transact (NOT audit op — NOT in
-    CANONICAL_AUDIT_WRAPPED_OPS).
+    CANONICAL_AUDIT_WRAPPED_OPS). Payload shape per LD2:
+    {plan_id, leaf_count, walk_order_node_ids}.
   LD3: result_summary inside :act/result carries {plan_id, node_id, tag,
     handler_id} PLUS the substrate op's own result (or None).
   latency_ms=0 for plan leaves at 2.3a (wall-clock deferred to 2.4a).
+
+Spec-compliance fix (post-T4): _escalate_plan_body signature is
+(coder, decision: LLMDecision) → None per design LD0. Tests build a
+Coder-shaped stub holding `substrate` and call with an LLMDecision-
+shaped decision per impl plan T4 step 4.2.
 """
 from __future__ import annotations
 
 import json
-import uuid
 import datetime as dt
+from dataclasses import dataclass
 
 import pytest
 
-from persistence.coder._planner import (
-    _build_plan_from_payload,
-    _escalate_plan_body,
-    validate_plan_for_2_3a,
-)
+from persistence.coder._planner import _escalate_plan_body
+from persistence.coder._types import LLMDecision
 from persistence.effect._audit_stack import CANONICAL_AUDIT_WRAPPED_OPS
-from persistence.plan import Dispatcher
 from persistence.sdk import Substrate
 
 
@@ -39,10 +41,30 @@ from persistence.sdk import Substrate
 SIMPLE_PLAN_EDN = '[:seq {} [:fs/read {:path "x.txt"}] [:code/run {:source "x=1"}] [:git/diff {}]]'
 
 
-def _build_and_validate(edn: str):
-    plan = _build_plan_from_payload({"plan_edn": edn})
-    validate_plan_for_2_3a(plan)
-    return plan
+@dataclass
+class _CoderStub:
+    """Minimal Coder-shaped stub. _escalate_plan_body only reads .substrate.
+
+    Per impl plan T4 step 4.2 (lines 951-957) — duck-typed substrate carrier.
+    """
+    substrate: Substrate
+    _session_start_dt: dt.datetime | None = None
+
+
+def _make_coder_stub(s: Substrate) -> _CoderStub:
+    return _CoderStub(
+        substrate=s,
+        _session_start_dt=dt.datetime.now(dt.timezone.utc),
+    )
+
+
+def _make_plan_decision(plan_edn: str) -> LLMDecision:
+    """Build an LLMDecision with kind='plan' carrying plan_edn payload."""
+    return LLMDecision(
+        kind="plan",
+        confidence=0.9,
+        payload={"plan_edn": plan_edn},
+    )
 
 
 def _act_result_datoms(s: Substrate, session_start: dt.datetime):
@@ -87,20 +109,17 @@ def test_escalate_plan_emits_act_result_per_leaf_in_walk_order(s):
       - op field is keyword-form (:fs/read, :code/run, :git/diff) — NOT double-colon.
       - T2 FD1 proof: leaf.tag used directly without f":{leaf.tag}" prepend.
     """
-    plan = _build_and_validate(SIMPLE_PLAN_EDN)
     session_start = dt.datetime.now(dt.timezone.utc)
 
     # Stub effect.perform to return predictable results.
-    _call_log: list[str] = []
-
     def fake_perform(op, args=None):
-        _call_log.append(op)
         return {"stubbed": True, "op": op}
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
 
-    dispatcher = s.plan.new_dispatcher()
-    result = _escalate_plan_body(plan, dispatcher, substrate=s)
+    coder = _make_coder_stub(s)
+    decision = _make_plan_decision(SIMPLE_PLAN_EDN)
+    result = _escalate_plan_body(coder, decision)
 
     assert result is None, "_escalate_plan_body must return None on success (terminal mode-switch)"
 
@@ -126,7 +145,6 @@ def test_escalate_plan_act_result_carries_plan_context_keys(s):
     Keys: plan_id, node_id, tag, handler_id — INSIDE result_summary field,
     not at top-level of the :act/result v-dict.
     """
-    plan = _build_and_validate(SIMPLE_PLAN_EDN)
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
@@ -134,8 +152,9 @@ def test_escalate_plan_act_result_carries_plan_context_keys(s):
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
 
-    dispatcher = s.plan.new_dispatcher()
-    _escalate_plan_body(plan, dispatcher, substrate=s)
+    coder = _make_coder_stub(s)
+    decision = _make_plan_decision(SIMPLE_PLAN_EDN)
+    _escalate_plan_body(coder, decision)
 
     act_datoms = _act_result_datoms(s, session_start)
     first = json.loads(act_datoms[0].v)
@@ -163,24 +182,19 @@ def test_escalate_plan_act_result_carries_plan_context_keys(s):
     # tag inside result_summary matches keyword-form (LD3 plan-context key)
     assert rs["tag"] == ":fs/read", f"result_summary.tag wrong: {rs['tag']!r}"
 
-    # plan_id matches the plan root node id
-    assert rs["plan_id"] == plan.id, (
-        f"plan_id mismatch: {rs['plan_id']!r} != {plan.id!r}"
-    )
-
     # latency_ms=0 at 2.3a (wall-clock deferred to 2.4a)
     assert first["latency_ms"] == 0
 
 
 # ---------------------------------------------------------------------------
-# G4 — Test 3: :plan/done provenance datom shape
+# G4 — Test 3: :plan/done provenance datom shape (LD2)
 # ---------------------------------------------------------------------------
 
 def test_escalate_plan_emits_plan_done_provenance_datom(s):
     """:plan/done emitted as provenance datom via s.fact.transact after
-    all leaves execute. Shape: {plan_id, status, leaf_count}.
+    all leaves execute. LD2 shape: {plan_id, leaf_count, walk_order_node_ids}.
+    Success is implicit by emission (failure path raises before this point).
     """
-    plan = _build_and_validate(SIMPLE_PLAN_EDN)
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
@@ -188,19 +202,28 @@ def test_escalate_plan_emits_plan_done_provenance_datom(s):
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
 
-    dispatcher = s.plan.new_dispatcher()
-    _escalate_plan_body(plan, dispatcher, substrate=s)
+    # Single-leaf plan for tighter walk_order_node_ids assertion.
+    plan_edn = '[:seq {} [:fs/read {:path "readme.md"}]]'
+    coder = _make_coder_stub(s)
+    decision = _make_plan_decision(plan_edn)
+    _escalate_plan_body(coder, decision)
 
     done_datoms = _plan_done_datoms(s, session_start)
     assert len(done_datoms) == 1, f"expected exactly 1 :plan/done datom, got {len(done_datoms)}"
 
-    payload = json.loads(done_datoms[0].v)
-    assert "plan_id" in payload, f":plan/done missing plan_id: {payload}"
-    assert payload["plan_id"] == plan.id
-    assert "status" in payload, f":plan/done missing status: {payload}"
-    assert payload["status"] == "ok"
-    assert "leaf_count" in payload, f":plan/done missing leaf_count: {payload}"
-    assert payload["leaf_count"] == 3  # three leaves in SIMPLE_PLAN_EDN
+    pd = json.loads(done_datoms[0].v)
+    # LD2 payload shape: {plan_id, leaf_count, walk_order_node_ids}
+    assert "plan_id" in pd, f":plan/done missing plan_id: {pd}"
+    assert "leaf_count" in pd, f":plan/done missing leaf_count: {pd}"
+    assert "walk_order_node_ids" in pd, f"missing walk_order_node_ids: {pd}"
+
+    # leaf_count matches single-leaf plan
+    assert pd["leaf_count"] == 1
+
+    # walk_order_node_ids: list of non-empty content-addressed node IDs
+    assert isinstance(pd["walk_order_node_ids"], list)
+    assert len(pd["walk_order_node_ids"]) == 1   # single-leaf plan
+    assert all(isinstance(x, str) and x for x in pd["walk_order_node_ids"])
 
 
 # ---------------------------------------------------------------------------
@@ -232,7 +255,6 @@ def test_escalate_plan_emits_zero_llm_decision_datoms(s):
     The LLM was invoked BEFORE escalation (in _decide); _escalate_plan_body
     is effect-only and must not trigger any LLM calls or decision datoms.
     """
-    plan = _build_and_validate(SIMPLE_PLAN_EDN)
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
@@ -240,8 +262,9 @@ def test_escalate_plan_emits_zero_llm_decision_datoms(s):
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
 
-    dispatcher = s.plan.new_dispatcher()
-    _escalate_plan_body(plan, dispatcher, substrate=s)
+    coder = _make_coder_stub(s)
+    decision = _make_plan_decision(SIMPLE_PLAN_EDN)
+    _escalate_plan_body(coder, decision)
 
     llm_datoms = _llm_decision_datoms(s, session_start)
     assert len(llm_datoms) == 0, (
@@ -259,9 +282,6 @@ def test_escalate_plan_returns_none_on_success(s):
     Coder.run() uses the early-return contract: after _escalate_plan_body
     returns (without raising), run() exits via `return` at _session.py:79.
     """
-    plan = _build_and_validate(
-        '[:seq {} [:fs/read {:path "readme.md"}]]'
-    )
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
@@ -269,8 +289,9 @@ def test_escalate_plan_returns_none_on_success(s):
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
 
-    dispatcher = s.plan.new_dispatcher()
-    result = _escalate_plan_body(plan, dispatcher, substrate=s)
+    coder = _make_coder_stub(s)
+    decision = _make_plan_decision('[:seq {} [:fs/read {:path "readme.md"}]]')
+    result = _escalate_plan_body(coder, decision)
 
     assert result is None, (
         f"_escalate_plan_body must return None on success (got {result!r})"

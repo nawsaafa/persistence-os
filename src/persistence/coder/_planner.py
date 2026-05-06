@@ -45,13 +45,16 @@ from __future__ import annotations
 
 import uuid
 import datetime as dt
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from persistence.coder._planner_errors import PlanPayloadValidation
 from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.plan import Dispatcher, Node, parse, walk
 from persistence.plan._errors import ParseError
 from persistence.sdk import Substrate
+
+if TYPE_CHECKING:
+    from persistence.coder._types import LLMDecision
 
 __all__ = [
     "MAX_PLAN_DEPTH",
@@ -340,20 +343,23 @@ def _emit_plan_done(
     valid_from: dt.datetime,
     plan_id: str,
     leaf_count: int,
+    walk_order_node_ids: list[str],
 ) -> None:
     """Emit the :plan/done provenance datom via s.fact.transact.
 
     LD2: :plan/done is a provenance datom, NOT an audit op — it is NOT
     in CANONICAL_AUDIT_WRAPPED_OPS. The drift-pin / G7 are unaffected.
-    Shape: {plan_id, status, leaf_count}.
+    Shape per LD2: {plan_id, leaf_count, walk_order_node_ids}. Success
+    is implicit by emission — failure-path raises PlanExecutionFailed
+    BEFORE this datom is written, so a present :plan/done means status=ok.
     """
     substrate.fact.transact([{
         "e": uuid.uuid4().hex,   # noqa: wall-clock — entity-id (txn precedent)
         "a": ":plan/done",
         "v": canonical_dumps({
             "plan_id": plan_id,
-            "status": "ok",
             "leaf_count": leaf_count,
+            "walk_order_node_ids": walk_order_node_ids,
         }),
         "valid_from": valid_from,
     }])
@@ -363,25 +369,34 @@ def _emit_plan_done(
 # T4 — _escalate_plan_body happy path (LD0+LD2+LD3+LD5)
 # ---------------------------------------------------------------------------
 
-def _escalate_plan_body(
-    plan: Node,
-    dispatcher: Dispatcher,
-    *,
-    substrate: Substrate,
-) -> None:
-    """Happy-path plan execution pipeline (T4 — LD0+LD2+LD3+LD5).
+def _escalate_plan_body(coder: Any, decision: "LLMDecision") -> None:
+    """Happy-path plan escalation pipeline (T4 — LD0+LD2+LD3+LD5).
 
-    Pipeline:
-      1. Pre-walk: build id→Node map for leaf attribution.
-      2. Register 10 substrate-op handlers on the fresh dispatcher.
-      3. Execute: substrate.plan.execute(plan, dispatcher).
-      4. Emit per-leaf :act/result datoms in walk order (LD3 shape).
-      5. Emit :plan/done provenance datom (LD2 — NOT audit op).
-      6. Return None (LD0: terminal mode-switch — Coder.run() exits
-         naturally via the post-escalation early-return at _session.py:79).
+    This is the SOLE entry point that `Coder._escalate_plan` will wire
+    to in T7 — a single thin call. The body does the WHOLE pipeline:
 
-    Failure path (status="failed") is NOT handled here — delegated to T5.
-    This function only processes ExecutionResult.status == "ok".
+      1. Build:    plan = _build_plan_from_payload(decision.payload)
+      2. Validate: validate_plan_for_2_3a(plan)
+      3. Pre-walk: id_to_node map for leaf attribution
+      4. Dispatcher: substrate.plan.new_dispatcher()
+      5. Register: 10 substrate-op handlers (LD5)
+      6. Execute:  substrate.plan.execute(plan, dispatcher)
+      7. on status="failed": raise PlanExecutionFailed (T5 placeholder)
+      8. on status="ok": emit per-leaf :act/result + :plan/done; return None
+
+    Plan execution is a TERMINAL mode-switch (LD0). On success, returns
+    None and Coder.run() exits naturally via the post-escalation early-
+    return at _session.py:79. On failure, PlanExecutionFailed propagates
+    out of run() — caller's contract.
+
+    Args:
+        coder: The Coder instance. Provides `coder.substrate` for all
+            substrate calls. Typed `Any` to break a hypothetical import
+            cycle with _session.py at type-checking time; runtime is
+            duck-typed on `.substrate`.
+        decision: The plan-kind LLMDecision from _decide. Its payload
+            must carry `plan_edn` (str). Stage-1/Stage-2/Stage-3 errors
+            surface as PlanPayloadValidation.
 
     Forced spec deviation — T2 FD1 cascade:
       leaf.tag is ALREADY keyword-form (":fs/read" etc.) after execution.
@@ -392,23 +407,37 @@ def _escalate_plan_body(
       Plan leaves report latency_ms=0 at 2.3a. Per-leaf wall-clock
       tracking deferred to 2.4a (:sys/now / :clock/now route).
     """
-    from persistence.plan import execute as _plan_execute
+    from persistence.coder._planner_errors import PlanExecutionFailed
 
+    substrate = coder.substrate
     valid_from = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
 
-    # Step 1: pre-walk — build id→Node map for leaf attribution.
+    # Step 1+2: build + validate. Stage-1/2/3 raise PlanPayloadValidation.
+    plan = _build_plan_from_payload(decision.payload)
+    validate_plan_for_2_3a(plan)
+
+    # Step 3: pre-walk — build id→Node map for leaf attribution.
     # FD3: walk() returns list[str] (node IDs), not list[Node].
     # Use _collect_all_nodes (visitor-based) to get Node references.
     all_nodes = _collect_all_nodes(plan)
     id_to_node: dict[str, Node] = {n.id: n for n in all_nodes}
 
-    # Step 2: register handlers.
+    # Step 4: fresh dispatcher per LD5.
+    dispatcher = substrate.plan.new_dispatcher()
+
+    # Step 5: register 10 substrate-op handlers.
     _register_substrate_handlers(dispatcher, substrate)
 
-    # Step 3: execute.
-    result = _plan_execute(plan, dispatcher)
+    # Step 6: execute.
+    result = substrate.plan.execute(plan, dispatcher)
 
-    # Step 4: emit per-leaf :act/result datoms in walk order.
+    # Step 7: failure path — raise PlanExecutionFailed (T5 will replace
+    # this with full failure-path emission of partial-trace :act/results
+    # + failure-shaped :act/result + :plan/execute summary).
+    if result.status == "failed":
+        raise PlanExecutionFailed(failure=result.failure)
+
+    # Step 8a: emit per-leaf :act/result datoms in walk order.
     for leaf in result.leaf_results:
         node = id_to_node[leaf.node_id]
         _emit_act_result(
@@ -427,13 +456,17 @@ def _escalate_plan_body(
             latency_ms=0,                                  # deferred to 2.4a
         )
 
-    # Step 5: emit :plan/done provenance datom.
+    # Step 8b: emit :plan/done provenance datom (LD2).
+    # walk_order_node_ids = result.leaf_results node_id sequence (walk
+    # order per s.plan.execute capture-then-record contract).
+    walk_order_node_ids = [lr.node_id for lr in result.leaf_results]
     _emit_plan_done(
         substrate=substrate,
         valid_from=valid_from,
         plan_id=plan.id,
         leaf_count=len(result.leaf_results),
+        walk_order_node_ids=walk_order_node_ids,
     )
 
-    # Step 6: return None — terminal mode-switch (LD0).
+    # Step 8c: return None — terminal mode-switch (LD0).
     return None

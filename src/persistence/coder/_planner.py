@@ -445,10 +445,63 @@ def _escalate_plan_body(coder: Any, decision: "LLMDecision") -> None:
     # Step 6: execute.
     result = substrate.plan.execute(plan, dispatcher)
 
-    # Step 7: failure path — raise PlanExecutionFailed (T5 will replace
-    # this with full failure-path emission of partial-trace :act/results
-    # + failure-shaped :act/result + :plan/execute summary).
+    # Step 7: failure path — LD4 (R0-fold B1) full pipeline.
     if result.status == "failed":
+        # 1) Partial-trace: emit :act/result for each successful leaf.
+        #    The failing leaf is NOT in result.leaf_results — execute()
+        #    bails BEFORE appending it (confirmed at _execute.py:193-205).
+        for leaf in result.leaf_results:
+            node = id_to_node[leaf.node_id]
+            _emit_act_result(
+                substrate=substrate,
+                valid_from=valid_from,
+                op=leaf.tag,                        # FD1: keyword-form direct, NOT f":{leaf.tag}"
+                args_hash=canonical_hash(dict(node.attrs)),
+                result_summary=_summarize_leaf_result(
+                    leaf.result,
+                    plan_id=plan.id,
+                    node_id=leaf.node_id,
+                    tag=leaf.tag,                   # FD1: keyword-form direct
+                    handler_id=leaf.handler_id,
+                ),
+                error=None,
+                latency_ms=0,
+            )
+        # 2) Failure-shaped :act/result for the failing leaf.
+        #    Attrs + handler-id recovered via the pre-walked id→Node map
+        #    (R0-fold B1 resolution: the failing leaf is NOT in
+        #    result.leaf_results so we cannot get its context from there).
+        failed_node = id_to_node[result.failure.failed_node_id]
+        failed_handler_id = failed_node.attrs.get("handler-id", "<default>")
+        _emit_act_result(
+            substrate=substrate,
+            valid_from=valid_from,
+            op=result.failure.failed_tag,           # FD1: keyword-form direct
+            args_hash=canonical_hash(dict(failed_node.attrs)),
+            result_summary=_summarize_leaf_result(
+                None,                               # no handler result — execution raised
+                plan_id=plan.id,
+                node_id=result.failure.failed_node_id,
+                tag=result.failure.failed_tag,      # FD1: keyword-form direct
+                handler_id=failed_handler_id,
+            ),
+            error=result.failure.error_repr,        # R1-NICE: already class-prefixed repr
+            latency_ms=0,
+        )
+        # 3) Final :plan/execute summary datom.
+        _emit_act_result(
+            substrate=substrate,
+            valid_from=valid_from,
+            op=":plan/execute",
+            args_hash=canonical_hash({"plan_id": plan.id}),
+            result_summary={"plan_id": plan.id},
+            error=result.failure.error_repr,
+            latency_ms=0,
+        )
+        # 4) Re-raise. No __cause__ chain — execute() already captured the
+        #    original exception into FailureInfo (string-only) per
+        #    _execute.py:96-114. Native traceback UNAVAILABLE in 2.3a
+        #    (documented limitation per design § 7 + LD4; queued v0.9.x).
         raise PlanExecutionFailed(failure=result.failure)
 
     # Step 8a: emit per-leaf :act/result datoms in walk order.

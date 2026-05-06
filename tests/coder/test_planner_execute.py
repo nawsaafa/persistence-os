@@ -91,6 +91,17 @@ def _llm_decision_datoms(s: Substrate, session_start: dt.datetime):
     return [d for d in view.datoms if d.a == "llm/decision" and d.op == "assert"]
 
 
+def _scripted_perform(by_op):
+    """Build a fake substrate.effect.perform that returns by_op[op] for each call.
+
+    Used by the IMPORTANT-1 / IMPORTANT-2 regression tests to script per-op
+    handler returns (e.g. {":git/log": {"tag": "v0.9.0a1", ...}}).
+    """
+    def perform(op, args=None):
+        return by_op[op]
+    return perform
+
+
 @pytest.fixture
 def s():
     with Substrate.open("memory") as substrate:
@@ -299,3 +310,77 @@ def test_escalate_plan_returns_none_on_success(s):
     # Also confirm at least 1 :act/result and 1 :plan/done were emitted
     assert len(_act_result_datoms(s, session_start)) == 1
     assert len(_plan_done_datoms(s, session_start)) == 1
+
+
+# ---------------------------------------------------------------------------
+# G4 — Test 7: handler-key collision regression (coderabbit IMPORTANT-2)
+# ---------------------------------------------------------------------------
+
+def test_handler_key_collision_does_not_clobber_plan_context_tag(s):
+    """Regression for coderabbit IMPORTANT-2: a handler returning a 'tag' key
+    must NOT clobber the LD3 plan-context tag (:git/log etc).
+
+    Without the merge-order fix ({**base, **plan_context}), a future :git/log
+    handler returning {"tag": "v0.9.0a1"} would silently overwrite the
+    plan-context tag=":git/log" and break LD3 plan-context fidelity.
+    """
+    coder = _make_coder_stub(s)
+    # Handler returns a `tag` key shaped like a git ref — must not override plan-context tag
+    s.effect.perform = _scripted_perform({  # type: ignore[method-assign]
+        ":git/log": {"tag": "v0.9.0a1", "stdout": "log output"},
+    })
+    decision = _make_plan_decision('[:seq {} [:git/log {}]]')
+    _escalate_plan_body(coder, decision)
+    facts = list(s.fact.since(coder._session_start_dt).datoms)
+    act_results = sorted(
+        [d for d in facts if d.a == "act/result" and d.op == "assert"],
+        key=lambda d: d.tx,
+    )
+    assert len(act_results) == 1
+    rs = json.loads(act_results[0].v)["result_summary"]
+    # LD3 plan-context tag must win — NOT clobbered by handler's 'tag' field
+    assert rs["tag"] == ":git/log", (
+        f"handler-returned tag clobbered plan-context tag: rs={rs}"
+    )
+    # Sanity: handler's other keys still flow through
+    assert rs.get("stdout") == "log output"
+
+
+# ---------------------------------------------------------------------------
+# G4 — Test 8: handler long-stdout truncation regression (coderabbit IMPORTANT-1)
+# ---------------------------------------------------------------------------
+
+def test_handler_returning_long_stdout_gets_summarized_to_512_chars(s):
+    """Regression for coderabbit IMPORTANT-1: handler output piped through
+    _summarize_result before plan-context keys merge (LD3 contract from 2.2b).
+
+    `_summarize_result` (from `_session.py`) caps individual string fields
+    >512 chars by replacing the middle with "...[truncated]..." — so the
+    output for a 5000-char input is 256 + 19 + 256 = 531 chars. Without the
+    pipeline, the full 5000 chars would land in :act/result.v and render
+    verbatim next iteration (per `_prompt.py:67-68`).
+    """
+    coder = _make_coder_stub(s)
+    long_blob = "X" * 5000
+    s.effect.perform = _scripted_perform({  # type: ignore[method-assign]
+        ":fs/read": {"contents": long_blob},
+    })
+    decision = _make_plan_decision('[:seq {} [:fs/read {:path "x.txt"}]]')
+    _escalate_plan_body(coder, decision)
+    facts = list(s.fact.since(coder._session_start_dt).datoms)
+    act_results = [d for d in facts if d.a == "act/result" and d.op == "assert"]
+    assert len(act_results) == 1
+    rs = json.loads(act_results[0].v)["result_summary"]
+    contents = rs.get("contents")
+    assert isinstance(contents, str), f"expected truncated str, got {type(contents)}: {contents!r}"
+    # _summarize_result replaces middle of strings >512: 256 + 19 + 256 = 531 chars max
+    assert len(contents) < len(long_blob), (
+        f"handler stdout NOT summarized: {len(contents)} chars (input was {len(long_blob)})"
+    )
+    assert "[truncated]" in contents, (
+        f"expected '[truncated]' marker from _summarize_result; got {contents[:80]!r}..."
+    )
+    # Plan-context keys still present and correct after the merge
+    assert rs["tag"] == ":fs/read"
+    assert rs["plan_id"]
+    assert rs["node_id"]

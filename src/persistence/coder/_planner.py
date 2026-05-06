@@ -283,28 +283,42 @@ def _summarize_leaf_result(
     Single :act/result shape preserved so 2.2b LD3 _render_latest_action
     works without branching.
 
-    LD3 contract: result_summary is a dict (not a bare value) so that
-    plan-context keys and the handler's return value coexist. If the
-    handler returned a dict, its items are merged at top level; otherwise
-    the raw result is stored under key "result".
+    LD3 contract (from 2.2b): handler output passes through 2.2a's
+    `_summarize_result` FIRST — the ONLY cap on per-field string-blob
+    size in the result_summary contract (`_prompt.py:53,67` documents
+    "already capped — render verbatim" downstream). Without this hop, a
+    `:fs/read` returning a 60KB file would land verbatim in
+    `:act/result.v` and render verbatim next iteration.
+
+    Key precedence: plan-context keys {plan_id,node_id,tag,handler_id}
+    take PRECEDENCE over any same-named keys returned by the handler.
+    A handler returning {"tag": "v0.9.0a1"} (e.g. a future :git/log
+    op) must NOT clobber the LD3 plan-context tag=":git/log".
+    Implemented as `{**base, **plan_context}` — later keys win in
+    dict-spread.
+
+    Non-dict handler returns are wrapped under key "value" so plan-
+    context keys can attach. None handler returns yield context keys only.
     """
-    summary: dict[str, Any] = {
+    # Local import avoids a circular module dependency between
+    # _planner.py and _session.py (both live in persistence.coder).
+    from persistence.coder._session import _summarize_result
+
+    plan_context: dict[str, Any] = {
         "plan_id": plan_id,
         "node_id": node_id,
         "tag": tag,
         "handler_id": handler_id,
     }
     if handler_result is None:
-        pass  # context keys only — no result key
-    elif isinstance(handler_result, dict):
-        # Merge handler dict items; plan-context keys take precedence
-        # (plan_id / node_id / tag / handler_id never collide with op
-        # results in practice — ops return domain-specific keys like
-        # "content", "stdout", "diff", etc.)
-        summary.update(handler_result)
-    else:
-        summary["result"] = handler_result
-    return summary
+        return plan_context
+    base = _summarize_result(handler_result)  # 2.2a 512-char cap
+    if not isinstance(base, dict):
+        # _summarize_result is identity on non-dict inputs — wrap so
+        # plan-context keys can attach to a single dict envelope.
+        base = {"value": base}
+    # `{**base, **plan_context}` — plan-context keys WIN on collision.
+    return {**base, **plan_context}
 
 
 def _emit_act_result(

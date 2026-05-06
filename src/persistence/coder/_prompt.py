@@ -23,7 +23,10 @@ EDN-formatted plan (s.plan.parse-compatible canonical EDN). Constraints:
 - Root MUST be :seq. No other root kinds at this phase.
 - Leaves MUST be one of: :fs/read, :fs/write, :fs/glob, :fs/grep, \
 :shell/exec, :code/run, :git/diff, :git/status, :git/log, :git/commit.
-- NO :branch or :code leaves (queued to later phases).
+- NO bare :branch or bare :code leaves — these are plan-spec primitives \
+reserved for later phases (MCTS branch in 2.3b, sandboxed code execution \
+in v0.2). The :code/run leaf in the registered list above is a different \
+op (Phase 2.2b coder substrate handler) and IS allowed.
 - Max 64 nodes, max depth 4, max 8192 bytes.
 
 Examples:

@@ -1250,6 +1250,9 @@ def _code_run_clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> dic
         stdout = timeout_exc.partial_stdout
         stderr = timeout_exc.partial_stderr
         exit_code = -1  # sentinel matching legacy exec_code line 1119
+        # NOTE: timeout path reports the CONFIGURED timeout, not measured
+        # kill-and-drain wall-clock. Matches legacy :code/exec timeout-datom
+        # semantics (code.py:1119-1120). Agents discriminate via exit_code=-1.
         wall_clock_ms = int(timeout_seconds * 1000)
 
     return {

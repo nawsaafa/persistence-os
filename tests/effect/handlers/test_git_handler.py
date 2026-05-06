@@ -187,7 +187,7 @@ def test_git_emits_single_outer_audit_entry(tmp_path: Path) -> None:
     project_root = tmp_path / "repo"
     project_root.mkdir()
     subprocess.run(
-        ["git", "init", "-b", "main"],
+        ["git", "init"],
         cwd=project_root,
         check=True,
         capture_output=True,
@@ -303,3 +303,73 @@ def test_git_log_n_too_large_raises_GitArgValidation(tmp_path: Path) -> None:
 
     with with_runtime(rt) as r, pytest.raises(GitArgValidation):
         r.perform(":git/log", {"cwd": str(project_root), "n": 10_000})
+
+
+# --------------------------------------------------------------------------
+# T9.1 ARIS Impl R1 fold — paths validation across all 4 :git/* ops
+# --------------------------------------------------------------------------
+
+
+def test_git_diff_paths_as_string_raises_validation(tmp_path: Path) -> None:
+    """I1 fold — :git/diff with paths as a string (not list) raises
+    GitArgValidation. Without validation, ``sorted("x.txt")`` would
+    silently expand to ``['.', 't', 't', 'x', 'x']`` — char-by-char
+    argv injection."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+
+    spy, _captured = _spy_shell_handler()
+    git_handler = make_git_handler(project_root=project_root)
+    rt = Runtime(handlers=[spy, git_handler])
+
+    with with_runtime(rt) as r, pytest.raises(GitArgValidation, match="must be list"):
+        r.perform(":git/diff", {"cwd": str(project_root), "paths": "x.txt"})
+
+
+def test_git_status_paths_with_non_str_element_raises_validation(
+    tmp_path: Path,
+) -> None:
+    """I1 fold — :git/status with paths=[1] raises GitArgValidation
+    (would otherwise crash later in argv-extension)."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+
+    spy, _captured = _spy_shell_handler()
+    git_handler = make_git_handler(project_root=project_root)
+    rt = Runtime(handlers=[spy, git_handler])
+
+    with with_runtime(rt) as r, pytest.raises(GitArgValidation, match="must be str"):
+        r.perform(":git/status", {"cwd": str(project_root), "paths": [1]})
+
+
+def test_git_commit_paths_with_non_str_element_raises_validation(
+    tmp_path: Path,
+) -> None:
+    """I2 fold — :git/commit with paths=[1] raises GitArgValidation,
+    NOT raw TypeError from ``Path(1)``. _validate_paths runs BEFORE
+    the per-path resolution loop."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+
+    spy, _captured = _spy_shell_handler()
+    git_handler = make_git_handler(project_root=project_root)
+    rt = Runtime(handlers=[spy, git_handler])
+
+    with with_runtime(rt) as r, pytest.raises(GitArgValidation, match="must be str"):
+        r.perform(
+            ":git/commit",
+            {"cwd": str(project_root), "message": "x", "paths": [1]},
+        )
+
+
+def test_git_log_paths_as_dict_raises_validation(tmp_path: Path) -> None:
+    """I1 fold — :git/log with paths as dict raises GitArgValidation."""
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+
+    spy, _captured = _spy_shell_handler()
+    git_handler = make_git_handler(project_root=project_root)
+    rt = Runtime(handlers=[spy, git_handler])
+
+    with with_runtime(rt) as r, pytest.raises(GitArgValidation, match="must be list"):
+        r.perform(":git/log", {"cwd": str(project_root), "paths": {"foo": "bar"}})

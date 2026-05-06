@@ -45,8 +45,8 @@ from persistence.effect.runtime import Handler, mask, perform
 # The five env vars the :shell/exec contract honors (subset of
 # ``handlers.shell.ENV_DEFAULT``). MUST be a list[str] — the underlying
 # clause reads ``args.get("env_allowlist_subset", [])`` and iterates it.
-# Order is alphabetical-ish but stable; what matters is that the same
-# bytes go through canonical hashing under replay.
+# Order is intentional: PATH first for execvp resolution clarity;
+# stability is the contract.
 _ENV_SUBSET: list[str] = ["PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE"]
 
 # Common argv prefix for every :git/<sub> call. ``color.ui=false`` and
@@ -87,6 +87,32 @@ def _resolve_cwd(args: dict[str, Any], project_root: Path) -> Path:
     return _safe_resolve(cwd_raw, project_root)
 
 
+def _validate_paths(paths: Any) -> list[str]:
+    """Validate ``paths`` is ``list[str]``, raising
+    :class:`GitArgValidation` on violation.
+
+    Closes the I1/I2 fold gap: without this guard, ``paths="x.txt"``
+    (a bare string) would silently pass through ``sorted(...)`` and
+    expand to a per-character argv list (``['.', 't', 't', 'x', 'x']``),
+    and ``paths=[1, 2]`` would later crash with a raw ``TypeError``
+    inside argv-extension or :func:`pathlib.Path` construction.
+
+    Empty list is OK for :git/diff / :git/status / :git/log (means
+    "all paths"); :git/commit has its own non-empty check via
+    :func:`_commit_clause_factory`.
+    """
+    if not isinstance(paths, list):
+        raise GitArgValidation(
+            f":git/* paths must be list[str], got {type(paths).__name__}"
+        )
+    for i, p in enumerate(paths):
+        if not isinstance(p, str):
+            raise GitArgValidation(
+                f":git/* paths[{i}] must be str, got {type(p).__name__}"
+            )
+    return paths
+
+
 def _delegate_to_shell(
     argv: list[str],
     cwd: Path,
@@ -121,7 +147,7 @@ def _diff_clause_factory(project_root: Path, audit_handler_name: str):
         cwd = _resolve_cwd(args, project_root)
         ref = args.get("ref", "HEAD")
         cached = args.get("cached", False)
-        paths = sorted(args.get("paths", []))
+        paths = sorted(_validate_paths(args.get("paths", [])))
         argv = list(_GIT_PREFIX) + ["diff", "--no-color"]
         if cached:
             argv.append("--cached")
@@ -139,7 +165,7 @@ def _status_clause_factory(project_root: Path, audit_handler_name: str):
 
     def clause(args: dict[str, Any], _k: Any, _ctx: dict[str, Any]) -> Any:
         cwd = _resolve_cwd(args, project_root)
-        paths = sorted(args.get("paths", []))
+        paths = sorted(_validate_paths(args.get("paths", [])))
         argv = list(_GIT_PREFIX) + ["status", "--porcelain", "--no-color", "--"]
         argv.extend(paths)
         return _delegate_to_shell(argv, cwd, audit_handler_name)
@@ -166,7 +192,7 @@ def _log_clause_factory(project_root: Path, audit_handler_name: str):
             raise GitArgValidation(
                 f":git/log format={fmt!r} not in {sorted(_ALLOWED_LOG_FORMATS)}"
             )
-        paths = sorted(args.get("paths", []))
+        paths = sorted(_validate_paths(args.get("paths", [])))
         argv = list(_GIT_PREFIX) + [
             "log",
             "--no-color",
@@ -192,8 +218,13 @@ def _commit_clause_factory(project_root: Path, audit_handler_name: str):
         message = args.get("message", "")
         if not isinstance(message, str) or not message.strip():
             raise GitArgValidation(":git/commit requires non-empty message")
-        paths = args.get("paths", [])
-        if not isinstance(paths, list) or not paths:
+        # _validate_paths runs BEFORE the empty-paths gate so wrong-type
+        # errors (paths=[1]) surface as ":git/* paths[i] must be str"
+        # rather than the less-specific "non-empty paths list" message,
+        # AND so the per-path Path(p) loop below only sees strings
+        # (closes I2 — no raw TypeError leak).
+        paths = _validate_paths(args.get("paths", []))
+        if not paths:
             raise GitArgValidation(":git/commit requires non-empty paths list")
         # Per-path safe-resolve — relative paths are resolved against cwd,
         # absolute paths are checked as-is. All must land inside

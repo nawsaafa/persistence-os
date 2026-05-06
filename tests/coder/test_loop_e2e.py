@@ -398,7 +398,7 @@ def test_coder_loop_5_iters_emits_9_audit_entries_g5b(tmp_path: Path):
     s.close()
 
 
-def test_coder_loop_code_run_traceback_reaches_iter5_prompt_verbatim_g5b(
+def test_coder_loop_code_run_traceback_reaches_iter3_prompt_verbatim_g5b(
     tmp_path: Path,
 ):
     """G5b — LD3 e2e proof. iter 2 dispatches :code/run with source that

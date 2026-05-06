@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from pathlib import Path
 
 from persistence.coder._session import Coder
 from persistence.coder._types import LLMDecision
@@ -41,7 +40,7 @@ def _act_results(s: Substrate) -> list[dict]:
     return [json.loads(d.v) for d in view.datoms if d.a == "act/result"]
 
 
-def test_act_code_run_writes_act_result_and_one_audit_entry(tmp_path: Path) -> None:
+def test_act_code_run_writes_act_result_and_one_audit_entry() -> None:
     """:code/run happy path — ``print('hello')`` → :act/result captures
     ``stdout = 'hello\\n'`` and ``exit_code == 0``; exactly 1 new audit
     entry for ``:code/run``."""
@@ -75,9 +74,7 @@ def test_act_code_run_writes_act_result_and_one_audit_entry(tmp_path: Path) -> N
         s.close()
 
 
-def test_act_code_run_traceback_in_result_summary_truncated(
-    tmp_path: Path,
-) -> None:
+def test_act_code_run_traceback_in_result_summary_truncated() -> None:
     """Source that raises → exit_code != 0; stderr contains 'RuntimeError'
     + 'boom'. ``_summarize_result`` only truncates string values >512
     chars. A short traceback fits under that cap and is preserved
@@ -109,7 +106,7 @@ def test_act_code_run_traceback_in_result_summary_truncated(
         s.close()
 
 
-def test_act_code_run_args_hash_byte_identity(tmp_path: Path) -> None:
+def test_act_code_run_args_hash_byte_identity() -> None:
     """LD4 — two identical ``_act`` calls produce identical ``args_hash``
     in their :act/result datoms. ``canonical_hash(args)`` is
     deterministic across calls."""
@@ -135,7 +132,7 @@ def test_act_code_run_args_hash_byte_identity(tmp_path: Path) -> None:
         s.close()
 
 
-def test_act_code_run_result_summary_contains_expected_keys(tmp_path: Path) -> None:
+def test_act_code_run_result_summary_contains_expected_keys() -> None:
     """Pin :code/run result_summary shape — exactly the five keys
     documented in ``code.py::_code_run_clause``: stdout, stderr,
     exit_code, wall_clock_ms, output_hash. ``_summarize_result``

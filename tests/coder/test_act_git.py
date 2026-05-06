@@ -45,7 +45,7 @@ def _init_repo(repo: Path) -> None:
     (HEAD must exist) and commit tests.
     """
     subprocess.run(
-        ["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True
+        ["git", "init"], cwd=repo, check=True, capture_output=True
     )
     subprocess.run(
         ["git", "config", "user.email", "test@example.com"],

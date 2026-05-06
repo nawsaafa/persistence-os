@@ -208,7 +208,7 @@ ReAct as the outer skeleton, escalating to Plan + MCTS as ambiguity rises:
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Most tool-use cycles stay in ReAct. Plan escalation triggers when the LLM's decision payload includes a `:strategy/plan` field (multi-step composition). MCTS escalation triggers on explicit `:strategy/branch` or when the agent's confidence score on a single decision is below threshold (default `0.65` — **starting value, will be tuned during dogfood (Phase 2.4a) on calibration data; missing-confidence default is `0.5`** so a malformed `:llm/decision` payload does not silently bypass the escalation gate).
+Most tool-use cycles stay in ReAct. Plan escalation triggers when the LLM's decision has `kind=="plan"` (multi-step composition) — `_should_escalate_plan` returns `decision.kind == "plan"` at `_session.py:234`. MCTS escalation triggers on explicit `kind=="branch"` or when the agent's confidence score on a single decision is below threshold (default `0.65` — **starting value, will be tuned during dogfood (Phase 2.4a) on calibration data; missing-confidence default is `0.5`** so a malformed `:llm/decision` payload does not silently bypass the escalation gate).
 
 ### 3.5 Skill library
 

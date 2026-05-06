@@ -69,7 +69,7 @@ def test_run_raises_on_first_stub(substrate_with_echo):
         # _act removed — filled in Phase 2.2a T5, no longer a stub.
         # _should_escalate_plan removed — filled in Phase 2.2a T6, no longer a stub.
         # _should_escalate_branch removed — filled in Phase 2.2a T6, no longer a stub.
-        ("_escalate_plan",          "Phase 2.3a — Plan AST builder + s.plan.execute"),
+        # _escalate_plan removed — filled in Phase 2.3a T7, no longer a stub.
         ("_escalate_branch",        "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"),
         ("_check_pause",            "Phase 2.3d — :repl/request datom check + pause/resume"),
     ],
@@ -128,10 +128,4 @@ def test_should_escalate_plan_returns_false_for_kind_act():
     s.close()
 
 
-def test_escalate_plan_still_raises_stub():
-    s = Substrate.open("memory")
-    coder = Coder(task="t", substrate=s)
-    from persistence.coder._types import LLMDecision
-    with pytest.raises(CoderStubNotImplemented):
-        coder._escalate_plan(LLMDecision(kind="plan", confidence=0.9, payload={}))
-    s.close()
+# test_escalate_plan_still_raises_stub removed — _escalate_plan filled in Phase 2.3a T7.

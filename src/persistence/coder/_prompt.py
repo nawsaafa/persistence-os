@@ -17,6 +17,24 @@ from typing import Any, Mapping
 
 from ._types import Observation
 
+_PLAN_EDN_GUIDANCE = """\
+When emitting kind="plan", the payload["plan_edn"] field carries an \
+EDN-formatted plan (s.plan.parse-compatible canonical EDN). Constraints:
+- Root MUST be :seq. No other root kinds at this phase.
+- Leaves MUST be one of: :fs/read, :fs/write, :fs/glob, :fs/grep, \
+:shell/exec, :code/run, :git/diff, :git/status, :git/log, :git/commit.
+- NO :branch or :code leaves (queued to later phases).
+- Max 64 nodes, max depth 4, max 8192 bytes.
+
+Examples:
+
+(1) Read a file, run code, then diff:
+[:seq {} [:fs/read {:path "src/foo.py"}] [:code/run {:source "print(42)"}] [:git/diff {}]]
+
+(2) Grep then commit:
+[:seq {} [:fs/grep {:pattern "TODO" :path "src/"}] [:git/commit {:message "wip"}]]"""
+
+
 EMIT_DECISION_TOOL_SCHEMA: dict[str, Any] = {
     "name": "emit_decision",
     "description": (
@@ -24,7 +42,7 @@ EMIT_DECISION_TOOL_SCHEMA: dict[str, Any] = {
         "kind='act' for a single tool invocation; kind='plan' for a multi-step "
         "composition; kind='branch' if you are uncertain and want the agent to "
         "fork-and-explore. confidence is in [0.0, 1.0]; values below 0.65 trigger "
-        "branch escalation."
+        "branch escalation. " + _PLAN_EDN_GUIDANCE
     ),
     "input_schema": {
         "type": "object",

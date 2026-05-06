@@ -46,8 +46,9 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from persistence.coder._planner_errors import PlanPayloadValidation
-from persistence.plan import Node, parse, walk
+from persistence.plan import Dispatcher, Node, parse, walk
 from persistence.plan._errors import ParseError
+from persistence.sdk import Substrate
 
 __all__ = [
     "MAX_PLAN_DEPTH",
@@ -55,6 +56,7 @@ __all__ = [
     "MAX_PLAN_NODES",
     "REGISTERED_LEAF_TAGS",
     "_build_plan_from_payload",
+    "_register_substrate_handlers",
     "validate_plan_for_2_3a",
 ]
 
@@ -221,3 +223,34 @@ def _check_leaves_recursive(node: Node) -> None:
         # Non-leaf: recurse into children.
         for child in node.children:
             _check_leaves_recursive(child)
+
+
+def _make_adapter(substrate: Substrate, tag: str):
+    """Bind one substrate-op adapter for the given keyword-form tag.
+
+    Adapter shape: (node, env) -> Any. Calls substrate.effect.perform
+    with the same keyword-form tag and a dict-copy of node.attrs.
+    """
+
+    def adapter(node: Node, env: dict[str, Any]) -> Any:
+        # FD3-T3: dict() coerces frozen Mapping -> plain dict for
+        # substrate.effect.perform's args param.
+        return substrate.effect.perform(tag, dict(node.attrs))
+
+    adapter.__name__ = f"_plan_adapter_{tag.lstrip(':').replace('/', '_')}"
+    return adapter
+
+
+def _register_substrate_handlers(
+    dispatcher: Dispatcher,
+    substrate: Substrate,
+) -> None:
+    """Register the 10 LD5 substrate ops as plan-leaf handlers.
+
+    Per design LD5, the dispatcher is fresh per `_escalate_plan_body`
+    invocation, so double-registration cannot occur in normal flow.
+    REGISTERED_LEAF_TAGS uses keyword-form tags (T2 FD1) matching
+    Node.tag's required shape.
+    """
+    for tag in sorted(REGISTERED_LEAF_TAGS):
+        dispatcher.register(tag, _make_adapter(substrate, tag))

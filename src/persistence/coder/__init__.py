@@ -11,5 +11,9 @@ G1 lockfile contract test lands in 2.1c).
 """
 
 from ._session import Coder, CoderStubNotImplemented
+from ._planner_errors import (
+    PlanExecutionFailed,
+    PlanPayloadValidation,
+)
 
-__all__ = ["Coder", "CoderStubNotImplemented"]
+__all__ = ["Coder", "CoderStubNotImplemented", "PlanExecutionFailed", "PlanPayloadValidation"]

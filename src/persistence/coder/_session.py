@@ -234,10 +234,19 @@ class Coder:
     def _should_escalate_plan(self, decision: LLMDecision) -> bool:
         return decision.kind == "plan"
 
-    def _escalate_plan(self, _decision: LLMDecision) -> None:
-        raise CoderStubNotImplemented(
-            "Phase 2.3a — Plan AST builder + s.plan.execute"
-        )
+    def _escalate_plan(self, decision: LLMDecision) -> None:
+        """Phase 2.3a — terminal mode-switch to s.plan.execute.
+
+        Delegates to `persistence.coder._planner._escalate_plan_body`,
+        which builds the plan from `decision.payload["plan_edn"]`,
+        validates, registers handlers on a fresh Dispatcher, and runs
+        s.plan.execute. On success: emits :act/result per leaf +
+        :plan/done; returns. On failure: emits partial-trace + failing-
+        leaf + summary :act/result; raises PlanExecutionFailed.
+        Caller-visible failure mirrors _act's contract.
+        """
+        from persistence.coder._planner import _escalate_plan_body
+        _escalate_plan_body(self, decision)
 
     def _should_escalate_branch(self, decision: LLMDecision) -> bool:
         return decision.kind == "branch" or decision.confidence < self.confidence_threshold

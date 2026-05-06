@@ -210,25 +210,7 @@ def test_done_short_circuits_before_act(tmp_path: Path):
     s.close()
 
 
-def test_kind_plan_halts_loop_with_stub_raise(tmp_path: Path):
-    """kind=plan raises CoderStubNotImplemented(2.3a); :llm/decision provenance survives."""
-    s = Substrate.open("memory")
-    s.effect.install_handler(
-        make_callable_llm_handler(
-            call_fn=_scripted_decisions([
-                {"kind": "plan", "confidence": 0.9, "payload": {}},
-            ])
-        ),
-        position="bottom",
-    )
-    coder = Coder(task="t", substrate=s)
-    with pytest.raises(CoderStubNotImplemented, match="2.3a"):
-        coder.run()
-    # :llm/decision MUST be transacted before raise (provenance survives)
-    view = s.fact.since(dt.datetime(2000, 1, 1, tzinfo=dt.timezone.utc))
-    decisions = [d for d in view.datoms if d.a == "llm/decision"]  # bare
-    assert len(decisions) == 1
-    s.close()
+# test_kind_plan_halts_loop_with_stub_raise removed — _escalate_plan filled in Phase 2.3a T7.
 
 
 def test_kind_branch_halts_loop_with_stub_raise(tmp_path: Path):

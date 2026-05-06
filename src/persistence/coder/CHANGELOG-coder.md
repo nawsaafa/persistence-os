@@ -1,5 +1,197 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.3a — 2026-05-06 (Plan AST escalation — `_escalate_plan` wired to `_planner._escalate_plan_body`)
+
+Phase 2.3a fills the `_escalate_plan` stub that 2.2a left with
+`CoderStubNotImplemented`. When the LLM emits `kind="plan"` with a
+`payload["plan_edn"]` field, the new bridge validates the plan through a
+three-stage ingestion pipeline (byte budget → `parse(strict=False)` →
+semantic validator), registers all 10 coder substrate ops as plan-leaf
+handlers on a fresh `Dispatcher`, and runs `s.plan.execute`. On success
+every leaf's handler result is recorded as a `:act/result` datom in walk
+order and one `:plan/done` provenance datom is emitted before returning.
+On failure a partial `:act/result` trace is emitted for every completed
+leaf, a failure-shaped `:act/result` is appended for the failing leaf
+(recovered via a pre-walked id→Node map), and `PlanExecutionFailed` is
+raised so the caller's contract mirrors `_act`'s error surface. Plan
+execution is a TERMINAL mode-switch: `Coder.run()` returns immediately
+after `_escalate_plan_body` via the early-return at `_session.py:79`.
+
+### Locked decisions (LD1–LD8) — design ARIS R1 PASS (mean 8.14 / min 7.8)
+
+- **LD0 — terminal mode-switch contract**: `_escalate_plan` is a one-call
+  bridge; `_session.py` returns immediately after on either path.
+- **LD1 — gate predicate closure**: `_should_escalate_plan` returns
+  `decision.kind == "plan"` (keyword `"plan"`, NOT `:strategy/plan`
+  attribute). See § 211 prose update below and design doc § 3.4.
+- **LD2 — `:plan/done` provenance datom**: Written via `s.fact.transact`
+  after all leaf `:act/result`s. NOT in `CANONICAL_AUDIT_WRAPPED_OPS`.
+  Shape: `{plan_id, leaf_count, walk_order_node_ids}`. Presence implies
+  status=ok (failure path raises before this datom is written).
+- **LD3 — extended `:act/result` shape**: Plan-leaf results extend the 2.2a
+  `{op, args_hash, result_summary, error, latency_ms}` envelope. The
+  `result_summary` field packs plan-context keys `{plan_id, node_id, tag,
+  handler_id}` alongside the handler's own result. Single datom shape so
+  2.2b LD3 `_render_latest_action` works without branching. Handler output
+  passes through `_summarize_result`'s 512-char cap before merging;
+  plan-context keys WIN over same-named handler-returned keys
+  (`{**base, **plan_context}` merge order).
+- **LD4 — id→Node pre-walk**: `_collect_all_nodes` called BEFORE
+  `s.plan.execute` to build the `id_to_node` map. Failure-path leaf
+  attribution relies on this map; it cannot be built post-failure.
+- **LD5 — 10-op handler registration**: All 10 coder substrate ops
+  (`:fs/read`, `:fs/write`, `:fs/glob`, `:fs/grep`, `:shell/exec`,
+  `:code/run`, `:git/diff`, `:git/status`, `:git/log`, `:git/commit`)
+  registered as plan-leaf handlers on a fresh `Dispatcher` per invocation.
+  One `_make_adapter(substrate, tag)` factory closes over the substrate;
+  all adapters call `substrate.effect.perform(tag, dict(node.attrs))`.
+- **LD6 — three-stage ingestion**: Stage 1 byte budget (`≤ 8192` bytes
+  UTF-8); Stage 2 `parse(strict=False)` (FD2 — strict would reject all
+  coder tags); Stage 3 semantic validator is the SOLE safety layer.
+  Stage-1/2/3 violations surface as `PlanPayloadValidation`.
+- **LD7 — `_planner_errors.py` exception module**: `PlanPayloadValidation`
+  (invalid plan structure, `field=` context) and `PlanExecutionFailed`
+  (runtime leaf failure, `plan_id=` + `failed_node_id=` + `cause=`).
+- **LD8 — few-shot EDN prompt guidance**: `_PLAN_EDN_GUIDANCE` string
+  added to `_prompt.py` and injected into `build_messages` for
+  `kind="plan"` cycles. Disambiguates bare `:branch`/`:code` (banned
+  plan-spec primitives) from `:code/run` (coder substrate op, allowed).
+
+### Test gates
+
+- **G1** — `tests/coder/test_planner_errors.py` + `test_planner_build.py`
+  (6 tests). `PlanPayloadValidation` field/reason shape, missing `plan_edn`,
+  wrong type, byte-budget exceeded, `ParseError` wrapping.
+- **G2** — `tests/coder/test_planner_validate.py` (6 tests).
+  `validate_plan_for_2_3a`: root-must-be-`:seq`, empty-root rejection,
+  node-count budget, depth budget, banned-leaf rejection, unregistered-
+  leaf rejection.
+- **G3** — `tests/coder/test_planner_dispatcher.py` (4 + 4 = 8 tests).
+  T0 factory (4): `s.plan.new_dispatcher()` curated factory contract.
+  T3 expansion (4): `_register_substrate_handlers` registers all 10 tags,
+  adapter calls `substrate.effect.perform` with correct tag + dict-coerced
+  attrs, `_make_adapter` name derived from tag.
+- **G4** — `tests/coder/test_planner_execute.py` (8 tests; 6 spec'd + 2
+  T4-fix2 regression). Happy-path: `_escalate_plan_body` returns None,
+  emits per-leaf `:act/result` + `:plan/done` in walk order, `plan_id` in
+  both datoms, `walk_order_node_ids` in `:plan/done`. T4-fix2 regressions:
+  `walk_order_node_ids` present (initial draft omitted field), correct
+  `{**base, **plan_context}` key-precedence.
+- **G5** — `tests/coder/test_planner_failure.py` (7 tests; 6 spec'd + 1
+  T3-residual adapter property). Failure path: partial `:act/result` trace
+  emitted for completed leaves, failure-shaped `:act/result` for failing
+  leaf, `PlanExecutionFailed` raised, `_DEFAULT_HANDLER_ID` imported from
+  `_execute.py` (not duplicated literal), `_summarize_result` 512-char cap
+  applied on failure-leaf result.
+- **G6** — `tests/coder/test_planner_rejection.py` (10 tests; 7 spec'd +
+  2 T2-IMPORTANT closures + 1 T6-fix nested-empty-`:seq`). Interior `:par`
+  rejected (`field="interior_tag"`) closing silent-skip hole. Nested empty
+  `:seq` raises `field="plan_body"` not `field="leaf_tag"` (correct defect
+  class). All 6 original validator edge cases pass.
+- **G7 (collapsed at R0-fold I1)**: Drift-pin assertions for `:plan/done`
+  outside `CANONICAL_AUDIT_WRAPPED_OPS` were absorbed into G4's `:plan/done`
+  emission shape tests; no standalone gate needed.
+
+Total: gross 48 new tests (G1-G6 = 6+6+8+8+7+10+3 T0/T1 standalone = 48),
+T7 deleted 3 stub-assertion tests → **net +45**. Suite delta: 2408 → 2453.
+
+### Forced spec deviations and implementation-time discoveries
+
+1. **T2 FD1 — `Node.tag` is KEYWORD-FORM**: `_ast.py:__post_init__` requires
+   `tag.startswith(":")`. `REGISTERED_LEAF_TAGS` and `_BANNED_LEAF_TAGS`
+   store keyword-form (`:fs/read`, `:seq`). `leaf.tag` used DIRECTLY
+   throughout — no `f":{tag}"` prepending. Impl plan incorrectly claimed bare
+   form.
+2. **T2 FD2 — `parse(strict=False)`**: `strict=True` rejects all coder ops
+   (`:fs/read`, `:code/run`, `:git/*`, `:shell/exec`) because the plan-spec
+   enum at `_parse.py:211` covers only the closed canonical set. Stage 3
+   semantic validator (`validate_plan_for_2_3a`) is the SOLE safety layer for
+   the 2.3a coder subset — it is strictly tighter than strict-mode for this
+   surface (explicit 10-op allowlist + banned-leaf list + interior-tag `:seq`-
+   only restriction).
+3. **T2 FD3 — `walk()` returns `list[str]`**: Walk returns a list of node ID
+   strings, not `list[Node]`. The `visitor` callback is used to accumulate
+   `Node` objects; `_depth()` is a separate recursive helper.
+4. **T2 FD4 — banned-tag pre-screen before `walk()`**: `_check_nodes_recursive`
+   validates every node BEFORE `_collect_all_nodes` calls `walk()`. `walk()`
+   raises `UnimplementedNodeKindError` for `:branch`/`:code` leaves
+   (`_walk.py:49`); banned checks MUST precede the walk call.
+5. **T3 FD — `dict(node.attrs)` coercion**: `node.attrs` is a frozen
+   `Mapping`; `substrate.effect.perform` expects a plain `dict`. Each adapter
+   wraps `node.attrs` with `dict()` at call time.
+6. **T4 FD — `latency_ms=0` for plan leaves**: Per-leaf wall-clock timing
+   deferred to 2.4a (`:sys/now` substrate op). All plan-leaf `:act/result`
+   datoms emit `latency_ms=0` at 2.3a.
+7. **T4-fix — `:plan/done` payload corrected**: Initial draft omitted
+   `walk_order_node_ids` from the `:plan/done` payload. Corrected to
+   `{plan_id, leaf_count, walk_order_node_ids}` per LD2; regression tests
+   added (2 of G4's 8 tests).
+8. **T4-fix — `_escalate_plan_body` signature aligned**: Initial impl had
+   `(plan, dispatcher, *, substrate)` parameter drift vs spec `(coder,
+   decision)`. Corrected; `coder.substrate` accessed via duck-typed attribute.
+9. **T4-fix2 — `_summarize_leaf_result` pipes through `_summarize_result`**:
+   LD3 contract from 2.2b requires handler output capped at 512 chars BEFORE
+   merging plan-context. Without this, a `:fs/read` returning 60KB would land
+   verbatim in `:act/result.v`. Merge order `{**base, **plan_context}` ensures
+   plan-context keys win over handler-returned keys with the same name.
+10. **T5-fix — `_DEFAULT_HANDLER_ID` imported from `_execute.py`**: Not
+    duplicated as a literal. Coupling consistency with success-path
+    `LeafResult.handler_id` — both paths use the same source of truth.
+11. **T6 IMPORTANT closures — validator tightened (two coderabbit residuals)**:
+    (a) Interior nodes restricted to `:seq` only: `[:seq {} [:par {} [:fs/read {}]]]`
+    was previously accepted; `:par` is interior so leaf-only checks skipped it.
+    Now raises `field="interior_tag"`, closing the silent-skip hole. (b) Nested
+    empty `:seq` raises `field="plan_body"` (correct defect class) not
+    `field="leaf_tag"` (wrong class). T6-fix added 1 regression test (total G6 = 10).
+12. **T7 — EDN prompt disambiguation**: `_PLAN_EDN_GUIDANCE` clarifies bare
+    `:branch`/`:code` (plan-spec primitives, banned in 2.3a) vs `:code/run`
+    (coder substrate op, allowed). Without this, an LLM can confuse the two
+    similarly named tags.
+
+### New datoms
+
+- **`:plan/done`** — one entity per `_escalate_plan_body` success. Written via
+  `s.fact.transact`; NOT in `CANONICAL_AUDIT_WRAPPED_OPS` (same supporting-
+  provenance shape as `:act/result` and `:llm/decision`). Shape:
+  `{plan_id, leaf_count, walk_order_node_ids}`. Absence means failure (failure
+  path raises before this write).
+- **Extended `:act/result`** — plan-leaf shape has plan-context keys
+  (`plan_id`, `node_id`, `tag`, `handler_id`) packed INSIDE `result_summary`
+  alongside the handler's own result. Same outer envelope as 2.2a `_act` so
+  `_render_latest_action` renders both paths without branching.
+
+### W3 honest-rescope deferrals
+
+- **Native traceback passthrough (v0.9.x)**: `PlanExecutionFailed.cause` carries
+  the original exception but traceback is not surfaced verbatim to the prompt.
+  The 512-char `_summarize_result` cap applies on the failure-leaf result.
+  Full native traceback passthrough queued as v0.9.x.
+- **Per-leaf wall-clock timing (2.4a)**: `latency_ms=0` for all plan leaves.
+  `:sys/now` substrate op (2.4a) unlocks real per-leaf timing.
+- **LLM EDN syntax-error rate (2.4a)**: How often the LLM generates malformed
+  EDN in practice is unknown at 2.3a. Calibration data from 2.4a dogfood will
+  inform whether `_PLAN_EDN_GUIDANCE` or parser feedback needs strengthening.
+- **Multi-iteration plans (2.5+)**: Single plan execution per `run()` call at
+  2.3a; multi-plan chaining and loop re-entry after plan completion deferred.
+- **`:branch` interior tag (2.3b)**: MCTS branch escalation. Banned at 2.3a.
+- **Skill library (2.3c)**: Named versioned `PlanAST`-backed skills. Deferred.
+
+### Refs
+
+- Design: `docs/plans/2026-04-30-phase-2-persistence-coder-design.md`
+- New modules: `src/persistence/coder/_planner.py`,
+  `src/persistence/coder/_planner_errors.py`
+- New tests: `tests/coder/test_planner_build.py`,
+  `tests/coder/test_planner_dispatcher.py`,
+  `tests/coder/test_planner_errors.py`,
+  `tests/coder/test_planner_execute.py`,
+  `tests/coder/test_planner_failure.py`,
+  `tests/coder/test_planner_rejection.py`,
+  `tests/coder/test_planner_validate.py`
+- Suite delta: 2408 → 2453 (+45 net; +48 gross − 3 T7 stub-test cleanup).
+
+---
+
 ## Phase 2.2b — 2026-05-06 (LD3 latest-action prompt widening + `_act` coverage of `:code/run` + `:git/*`)
 
 Phase 2.2b extends the coder's prompting and dispatch surface to the new

@@ -2,6 +2,144 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## Phase 2.2b — 2026-05-06 (:code/run + :git/* thin-wrapper-over-:shell/exec quartet)
+
+Phase 2.2b extends the persistence-coder's `_act` surface with two new
+handler factories and five new canonical audit ops. `:code/run` is the
+LLM-emit-source-shape sister to the legacy `:code/exec`, and `:git/{diff,
+status,log,commit}` are LD2 thin wrappers that delegate via
+`runtime.perform(":shell/exec", ...)` under a `mask("audit")` discipline so
+each `:git/<sub>` call emits exactly one outer audit entry rather than the
+two-entry pair that an unmasked delegation would produce. None of the new
+ops is added to `CANONICAL_AUDIT_RAW_OPS` — all five carry substantive
+returns and live in WRAPPED only, matching the `:llm/call` and `:fs/*`
+precedent.
+
+### Added
+
+- **`make_code_run_dispatch_handler(*, name="code-run") -> Handler`**
+  (`handlers/code.py`). Distinct from the legacy `make_code_exec_handler`
+  in three load-bearing ways:
+  - The audit `args_hash` is computed over the LLM-emitted source-shape
+    args (`{source: <str>, stdin: <str>, ...}`), not the legacy
+    hash-shape `{source-hash, stdin-hash}` payload. This keeps audit
+    inputs aligned with what the LLM actually emitted, so replay can
+    reconstruct the call from the audit datom alone.
+  - Every code path returns a substantive result dict — forbidden-import
+    sentinel, timeout, non-zero exit, traceback, and successful run all
+    return the same shape rather than raising. The substantive-return
+    contract is what makes `_act` provenance-survives-failure work
+    end-to-end without special-casing exceptions in the dispatch loop.
+  - On timeout, the clause catches `CodeExecTimeout` and synthesises the
+    return shape with `exit_code=-1` and
+    `wall_clock_ms=int(timeout_seconds*1000)`. The plan's pseudocode
+    showed `run_subprocess` returning a tuple on all paths; in practice
+    it raises `CodeExecTimeout` (`code.py:946`), so the explicit catch
+    here is a forced spec deviation and is documented in Notes below.
+  Reuses `run_subprocess` and `output_hash` (renamed public in T1, see
+  below) for cross-handler determinism.
+
+- **`make_git_handler(*, project_root, audit_handler_name="audit") -> Handler`**
+  (`handlers/git.py`, NEW file ~250 LOC). Per LD2 in
+  `docs/plans/2026-05-06-phase-2.2b-git-code-exec-design.md`, this is a
+  thin wrapper over `:shell/exec` rather than a fresh subprocess call
+  site. Each clause:
+  - Validates op-specific args and raises `GitArgValidation` on bad
+    input (empty paths list, empty commit message, format outside the
+    `{oneline, short, medium}` enum, n outside `[1, 1000]`, etc.).
+  - Enforces cwd via `_safe_resolve(project_root)` and raises
+    `FsCapabilityDenied` for any cwd outside the project root —
+    capability-denial-not-detection, same pattern as `:fs/*`.
+  - Constructs deterministic argv: prefix
+    `["git", "-c", "color.ui=false", "-c", "core.pager=cat"]`,
+    `sorted()` paths, `--` separator before path arguments, format
+    restricted to the allowed enum, `n` clamped at the validation step.
+  - Delegates to `runtime.perform(":shell/exec", ...)` wrapped in
+    `with mask(audit_handler_name)` so the inner `:shell/exec` is
+    skipped by the audit middleware and the outer `:git/<sub>` clause
+    emits exactly ONE AuditEntry per call (LD2 single-audit-entry
+    property).
+  Four ops covered: `:git/diff`, `:git/status`, `:git/log`,
+  `:git/commit`.
+
+- **`GitArgValidation(ValueError)`** (`handlers/git.py`). Raised by the
+  `:git/*` clauses on bad args. ValueError subclass so existing
+  exception-aware test fixtures keep working.
+
+- **Five new ops in `CANONICAL_AUDIT_WRAPPED_OPS`**: `:code/run`,
+  `:git/diff`, `:git/status`, `:git/log`, `:git/commit`. None added to
+  `CANONICAL_AUDIT_RAW_OPS`. The drift-pin in
+  `tests/effect/test_canonical_audit_stack.py` was extended in T1 to
+  cover all five — that pin is the project's de-facto WRAPPED_OPS
+  lockfile (verified: `tests/sdk/` has no separate snapshot file).
+
+- **`output_hash` and `run_subprocess` promoted public** (formerly
+  `_output_hash` and `_run_subprocess`) in `handlers/code.py`. Both are
+  now reused across `:code/exec` and `:code/run` for cross-handler
+  determinism. The local-variable `output_hash` inside the `exec_code`
+  body was renamed to `output_hash_value` to avoid shadowing the now-
+  public function.
+
+### Notes
+
+- The `mask("audit")` discipline IS the LD2 single-audit-entry property.
+  Without it, every `:git/diff` call would emit BOTH a `:git/diff` outer
+  AuditEntry AND an inner `:shell/exec` AuditEntry; the chain would
+  double-count. The G1 spy tests verify the inner `:shell/exec` runs
+  while the outer audit count advances by exactly 1 per `:git/<sub>`
+  call.
+- Argv determinism is a property captured by tests, NOT by the audit
+  `args_hash`. Audit hashes the LLM-emitted op args BEFORE the clause
+  runs (`audit.py:493-495`); none of the constructed argv, cwd,
+  allowlist_version, env_subset, or timeout values reach the audit
+  hash. The G1 spy tests in `test_git_handler.py` therefore pin all
+  five inner-call kwargs explicitly rather than relying on the audit
+  datom for determinism evidence.
+- Forced spec deviation in factory signature:
+  `make_code_run_dispatch_handler(*, name="code-run")`. Design § 3
+  originally specified `(project_root, scratch_dir)` parameters, but
+  neither is referenced by the implementation — `run_subprocess` runs
+  in `tempfile.mkdtemp` regardless, so threading those parameters
+  through would have been YAGNI noise. The factory keeps only `name`.
+- Forced spec deviation in the `:code/run` clause body: the plan
+  pseudocode showed `run_subprocess` returning a tuple on all paths.
+  In practice it raises `CodeExecTimeout` on the timeout path
+  (`code.py:946`). Without the explicit `try/except CodeExecTimeout`
+  the clause would propagate the exception, breaking the substantive-
+  return contract that `_act` relies on. The catch synthesises the
+  return shape with `exit_code=-1` and the timeout-derived
+  `wall_clock_ms`.
+- Substrate-wide rule (not `:git/*`-specific): no direct
+  `runtime.perform()` inside a `dosync` body — use `tx.effect()`
+  instead. `:git/*` participates in this rule like every other op.
+
+### Tests
+
+- `tests/effect/handlers/test_code_run_handler.py` — 6 G2 tests:
+  basic execution + audit emit, byte-identical `output_hash` across
+  runs (G2 acceptance signal for cross-run determinism), `args_hash`
+  computed over source-shape args, forbidden-import sentinel
+  passthrough, timeout returns `exit_code=-1` with synthesised
+  `wall_clock_ms`, `args_hash` distinct from the legacy `:code/exec`
+  hash for the same logical input.
+- `tests/effect/handlers/test_git_handler.py` — 15 G1 tests: 7
+  parametrized argv-determinism rows pinning all 5 `:shell/exec`
+  call kwargs (argv, cwd, env, allowlist_version, timeout), 1
+  default-cwd-is-project-root, 1 single-audit-entry-per-call
+  (mask discipline), 6 validation errors (cwd outside root, empty
+  commit message, empty paths list, format outside enum, n=0,
+  n=10000).
+
+### Refs
+
+- Design: `docs/plans/2026-05-06-phase-2.2b-git-code-exec-design.md`
+  (LD2 = single-audit-entry-via-mask; LD3 = `_render_latest_action`
+  prompt widening lives in coder, not effect).
+- Suite delta at T7: 2354 → 2404 (+50 effect+coder tests across
+  2.2b T1-T7).
+
+---
+
 ## Phase 2.2a — 2026-05-05 (:fs/* + :shell/exec handler factories + canonical audit op extension)
 
 Phase 2.2a ships two new handler factories that give the persistence-coder

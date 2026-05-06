@@ -1,5 +1,129 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.2b — 2026-05-06 (LD3 latest-action prompt widening + `_act` coverage of `:code/run` + `:git/*`)
+
+Phase 2.2b extends the coder's prompting and dispatch surface to the new
+`:code/run` and `:git/{diff,status,log,commit}` ops shipped in
+`persistence.effect` this phase. The `build_messages` body grows an LD3
+"latest action" block so the LLM is no longer blind on its own outputs,
+and the `_act` body from 2.2a now has falsifiable test coverage of every
+new op via isolated substrate fixtures.
+
+### Added
+
+- **LD3 `build_messages` widening** (`_prompt.py`). New helper
+  `_render_latest_action(action: Mapping[str, Any]) -> list[str]` renders
+  `obs.recent_actions[-1]` with explicit field formatting (op, error,
+  result_summary keys laid out individually). The rendered block is
+  inserted into `build_messages` BEFORE the existing "Recent loop
+  history" block. This closes the "blind on its own outputs" failure
+  mode where the existing `[:200]` truncation in the older history
+  block would eat stdout sentinels and tracebacks. The OLDER history
+  block (trailing 3 entries with the `[:200]` cap) is unchanged so
+  rolling context still has a hard length budget. Forced spec
+  deviation: action dicts in `recent_actions` do NOT carry an
+  `iter_count` field (only the top-level `Observation` does), so the
+  latest-action header is plain `"Latest action output:"` without
+  iter-count context. Iter context continues to be announced once via
+  the existing `"Recent loop history (iter N):"` line.
+
+- **Three falsifiable LD3 acceptance signals (G5a)** in
+  `tests/coder/test_observe_latest_action.py`:
+  - stdout sentinel reaches the prompt verbatim past 200-char depth
+    (would have been truncated under 2.2a's `[:200]` cap).
+  - stderr sentinel reaches the prompt verbatim past 200-char depth.
+  - `result_summary=None` exception path renders the placeholder and
+    leaves the `error` field non-null, so the LLM sees both that the
+    last action failed and what failed about it.
+
+- **`_act` dispatch coverage of the new ops** via isolated `Substrate.open`
+  fixtures. The `_act` body itself (`_session.py:225` from 2.2a) is
+  unchanged — it still routes via `s.effect.perform(op, args)` and emits
+  a `:act/result` provenance datom on both success and failure paths.
+  T4 added:
+  - `tests/coder/test_act_git.py` (4 G3 tests). `:git/diff` and
+    `:git/commit` via `_act` write a `:act/result` datom AND advance the
+    canonical audit chain by EXACTLY 1 entry per op (the LD2 mask
+    property holds end-to-end, not just at the handler call site).
+    `:git/commit` paths-unchanged returns `exit=1` passthrough; the
+    coder records a non-error `:act/result` because the op succeeded
+    even if git's exit code is 1. cwd-outside-root surfaces
+    `FsCapabilityDenied` via `:act/result.error` (provenance-survives-
+    failure invariant from 2.2a).
+  - `tests/coder/test_act_code_run.py` (4 G4 tests). `:code/run`
+    traceback is captured in `result_summary` (truncated by
+    `_summarize_result`'s 512-char cap, same shape as every other
+    op's failure-path `:act/result`).
+
+### Notes
+
+- LD3 fixes a regression-class introduced incidentally by 2.2a's
+  `[:200]` cap — the cap was applied to the JSON-dump of EVERY recent
+  action including the most recent one, which meant any action whose
+  result string exceeded 200 bytes would get truncated before the LLM
+  saw it. After 2.2b only OLDER history entries (the trailing 3 in
+  `recent_actions[:-1]`) get the cap; the most recent action passes
+  through verbatim, subject only to `_summarize_result`'s 512-char
+  ceiling on string fields. That 512-char ceiling is the new
+  effective limit for "what the LLM sees about its last action".
+- The G5b 5-iter scripted scenario in `test_loop_e2e.py` asserts
+  EXACTLY 9 audit entries across the run (5 `:llm/call` + 1 each of
+  `:fs/read`, `:code/run`, `:git/diff`, `:git/commit`) AND that the
+  `:shell/exec` count is 0. The `:shell/exec` zero-count IS the LD2
+  single-audit-entry-via-mask property proved end-to-end through the
+  coder loop, not just at a single handler call site.
+- The G6 deterministic-invariants tests in `test_loop_replay.py`
+  assert `output_hash` byte-identity for `:code/run` across runs and
+  argv-determinism for `:git/*` across handler instances. They do
+  NOT assert full `AuditEntry.id` byte-identity — that would fail
+  because `wall_clock_ms` is included in both ops' result dicts and
+  `result_hash` is non-deterministic by design. The deterministic
+  invariants (`output_hash`, argv) are the right G6 surface; the
+  full-replay byte-identity property is a separate concern owned by
+  the replay module's own tests.
+- CLI wiring of `:fs/*`, `:shell/exec`, `:code/run`, and `:git/*` in
+  `__main__.py` is DEFERRED. This is a pre-existing gap from 2.2a:
+  `__main__.py` only installs the LLM provider handler, and the
+  test surface uses isolated `Substrate.open("memory")` fixtures
+  that install the new handlers per-test. Production CLI wiring of
+  the full effect surface belongs to 2.4a hardening or a separate
+  follow-up; carrying that work into 2.2b would have widened scope
+  beyond LD2/LD3.
+
+### Tests
+
+- `tests/coder/test_observe_latest_action.py` — 6 G5a tests
+  (latest-action verbatim passthrough, stdout/stderr sentinel
+  reach, exception-path placeholder + non-null error, header
+  ordering, empty-history no-op, `_render_latest_action` field
+  formatting).
+- `tests/coder/test_act_git.py` — 4 G3 tests (`:git/diff` audit
+  entry count, `:git/commit` paths-unchanged exit=1 passthrough,
+  cwd-outside-root provenance-survives-failure, single-audit-entry
+  per `:git/*` call via `_act`).
+- `tests/coder/test_act_code_run.py` — 4 G4 tests (`:code/run`
+  success path, traceback captured in `result_summary`,
+  forbidden-import sentinel reaches `:act/result.error`,
+  `args_hash` distinct from `:code/exec` for the same logical
+  input).
+- `tests/coder/test_loop_e2e.py` — 3 G5b tests appended (existing 5
+  unchanged): 5-iter 9-audit-entry scenario asserting
+  `:shell/exec` count == 0 (LD2 e2e proof), `:code/run`
+  traceback reaches the next-iter prompt verbatim, cwd-denied
+  `:git/diff` surfaces error in `:act/result`.
+- `tests/coder/test_loop_replay.py` — 3 G6 tests appended
+  (existing 3 unchanged): `:code/run` `output_hash` byte-identity
+  across runs, `:git/diff` argv-determinism via spy fixture,
+  `:git/log` argv-determinism across handler instances.
+
+### Refs
+
+- Design: `docs/plans/2026-05-06-phase-2.2b-git-code-exec-design.md`
+- Suite delta at T7: 2354 → 2404 (+50 across 2.2b T1-T7; +20 in
+  the coder module).
+
+---
+
 ## v0.9.0a1 (unreleased) — Phase 2.2a `_observe` + `_act` + `run()` loop widening
 
 Phase 2.2a fulfils the LD5 deferral from 2.1b: "loop widening lands in 2.2a

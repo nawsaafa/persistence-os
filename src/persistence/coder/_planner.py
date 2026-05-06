@@ -46,7 +46,7 @@ from __future__ import annotations
 
 import uuid
 import datetime as dt
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from persistence.coder._planner_errors import PlanExecutionFailed, PlanPayloadValidation
 from persistence.effect.canonical import canonical_dumps, canonical_hash

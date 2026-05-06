@@ -44,6 +44,7 @@ from persistence.sdk.uri import open_store
 
 if TYPE_CHECKING:  # pragma: no cover
     from persistence.effect.runtime import Handler
+    from persistence.plan import Dispatcher
 
 
 # ---------------------------------------------------------------------------

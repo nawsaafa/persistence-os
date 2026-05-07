@@ -70,7 +70,7 @@ from persistence.effect.handlers.audit import AuditEntry
 from persistence.effect.handlers.callable import make_callable_llm_handler
 from persistence.effect.handlers.fs import make_fs_handler
 from persistence.effect.handlers.skill import make_skill_handler
-from persistence.plan import parse
+from persistence.plan import parse, unparse
 from persistence.sdk import Substrate
 
 
@@ -225,7 +225,17 @@ def test_g4_end_to_end_define_lookup_inline_execute(tmp_path: Path, perturb_iter
         iter_1_plan_id = parse(iter_1_inner_edn, strict=False).id
         expected_skill_id = "skill/" + iter_1_plan_id[:16]
 
-        iter_3_inner_edn_verbatim = iter_1_inner_edn
+        # T9.1 R1-fold I2: canonicalize the verbatim case via parse->unparse
+        # round-trip so the precomputed string matches what :skill/lookup
+        # returns byte-identically. SkillLibrary stores the parsed Plan AST
+        # Node; lookup() returns unparse(node) which canonicalizes dict-key
+        # ordering (alphabetical). Without this round-trip, the upfront
+        # iter_1_inner_edn string has surface dict-key ordering that differs
+        # from the canonical form, defeating the byte-equality check codex
+        # Impl R1 I1 asks for. The perturbed case is left un-canonicalized
+        # to make the divergence cleanly observable (its plan_id will not
+        # match either way).
+        iter_3_inner_edn_verbatim = unparse(parse(iter_1_inner_edn, strict=False))
         iter_3_inner_edn_perturbed = _inner_plan_edn(perturbed_marker_path)
         iter_3_inner_edn = (
             iter_3_inner_edn_perturbed if perturb_iter3 else iter_3_inner_edn_verbatim
@@ -353,6 +363,25 @@ def test_g4_end_to_end_define_lookup_inline_execute(tmp_path: Path, perturb_iter
         assert id(s._db.store) == id(skill_lib._db.store)
 
         # ============================================================
+        # T9.1 R1-fold I1 + I2: literal byte-equality of looked-up :plan-edn
+        # vs the iter-3 scripted plan_edn (verbatim case only). Codex Impl R1
+        # I1: AST-equality (parse().id match) is INDIRECT — a plan_edn that
+        # parses to the same canonical id but with surface-text variations
+        # would still pass. Direct string equality is the literal procedural-
+        # recall claim: the coder splices the observed :plan-edn VERBATIM into
+        # iter-3 (precomputation here matches what the runtime lookup returns,
+        # demonstrating dataflow alignment between iter-2's observable and
+        # iter-3's payload — minimal close per codex Impl R1 I2 NICE-strength).
+        # ============================================================
+        if not perturb_iter3:
+            iter_3_plan_edn_check = decisions[2]["payload"]["plan_edn"]
+            assert looked_up_plan_edn == iter_3_plan_edn_check, (
+                "verbatim iter-3 plan_edn must EQUAL the looked-up :plan-edn "
+                "string byte-for-byte (literal byte-determinism, not just "
+                "AST-equality via parse().id match)"
+            )
+
+        # ============================================================
         # ITER 3 — inline-execute
         # ============================================================
         coder.run()
@@ -376,9 +405,11 @@ def test_g4_end_to_end_define_lookup_inline_execute(tmp_path: Path, perturb_iter
             assert Path(marker_path).read_text() == "g4-marker"
 
         # G4(b) iter-3 plan body matches lookup result byte-identically
-        # (verbatim case). The decision-3 plan_edn is built by re-wrapping
-        # iter_3_inner_edn into [:seq {} ...]; net structural equivalence
-        # is checked by content-address.
+        # (verbatim case). The decision-3 plan_edn is the [:seq {} ...] form
+        # of the looked-up skill body (no re-wrapping needed — :skill/lookup
+        # returns the canonical [:seq {} ...] EDN). Content-address match
+        # via parse().id is the structural check; the literal byte-equality
+        # check above (T9.1 R1-fold I1) is the dataflow claim.
         iter_3_decision = decisions[2]  # the dict we scripted
         iter_3_plan_edn_str = iter_3_decision["payload"]["plan_edn"]
         iter_3_plan_id = parse(iter_3_plan_edn_str, strict=False).id

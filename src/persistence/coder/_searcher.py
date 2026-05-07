@@ -27,12 +27,14 @@ LD0–LD7 reference: docs/plans/2026-05-07-phase-2.3b-mcts-fork-design.md.
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Mapping
 
 from persistence.coder._planner import (
     MAX_PLAN_EDN_BYTES,
+    _escalate_plan_body,
     validate_plan_for_2_3a,
 )
 from persistence.coder._planner_errors import PlanPayloadValidation
@@ -46,6 +48,7 @@ from persistence.coder._searcher_errors import (
     BranchPayloadValidation,
     BranchSearchFailed,
 )
+from persistence.coder._types import LLMDecision
 from persistence.plan import LLMExpander, LLMJudgeEvaluator, Node, parse, unparse
 from persistence.plan._errors import ParseError
 from persistence.plan._mcts import (
@@ -59,7 +62,6 @@ from persistence.plan._mcts import (
 
 if TYPE_CHECKING:
     from persistence.coder._session import Coder
-    from persistence.coder._types import LLMDecision
 
 __all__ = [
     "MAX_BRANCH_EDN_BYTES",
@@ -479,6 +481,85 @@ def _make_branch_evaluator(coder: "Coder") -> LLMJudgeEvaluator:
     return LLMJudgeEvaluator(provider=provider)
 
 
-def _escalate_branch_body(coder: "Coder", decision: "LLMDecision") -> None:
-    """Stub for T6 — happy path lands here. T7 adds failure paths."""
-    raise NotImplementedError("T4–T7 fill this body")
+def _escalate_branch_body(coder: "Coder", decision: LLMDecision) -> None:
+    """Phase 2.3b — terminal mode-switch to s.plan.mcts_search.
+
+    Algorithm (LD0–LD7):
+        1. Build seed plan: byte-budget + parse + validate (2.3a strict).
+        2. Resolve MCTSConfig: bridge default with optional payload override.
+        3. Construct LLMExpander + LLMJudgeEvaluator (providers route through
+           :llm/call per LD3).
+        4. Synthesize started_at_ms (FD1: time.time_ns()//1e6 — queued for
+           2.4a :sys/now).
+        5. Run s.plan.mcts_search with db=substrate._db (LD5 audit chain
+           lands on the substrate's fact-store directly).
+        6. T7 will wrap with try/except for LD4 path-1 (bubble-out exceptions)
+           + post-search detection of terminated_by="all_evaluations_failed"
+           (LD4 path-2). T6 = happy path only — search-layer failures
+           propagate raw and the test-suite distinguishes them by exception
+           class.
+        7. Synthesize LLMDecision(kind="plan", payload={"plan_edn":
+           unparse(winner)}) and call 2.3a's _escalate_plan_body. LD0:
+           single execution — losers were structural search-tree nodes
+           only, never dispatched.
+
+    Plan execution is a TERMINAL mode-switch — caller (_session.py) returns
+    immediately after this returns successfully (or re-raises).
+    """
+    # Stage 1+2: ingest seed plan (byte-budget + parse).
+    seed_plan = _build_seed_plan(decision.payload)
+
+    # Stage 3: semantic validation (re-uses 2.3a's strict validator per LD2).
+    # Re-raise as BranchPayloadValidation to keep the bridge's error contract
+    # uniform — _validate_seed_plan_for_2_3b raises 2.3a's PlanPayloadValidation
+    # but the branch ingestion path's contract is BranchPayloadValidation.
+    try:
+        _validate_seed_plan_for_2_3b(seed_plan)
+    except PlanPayloadValidation as e:
+        raise BranchPayloadValidation(field=e.field, reason=e.reason) from e
+
+    # Stage 4: resolve MCTSConfig (Stage 4 of ingestion).
+    config = _resolve_mcts_config(decision.payload)
+
+    # Stage 5: build LLM-driven expander + evaluator. Providers route through
+    # substrate.effect.perform(":llm/call", ...) per LD3 — verified at
+    # _searcher.py:_make_branch_expander / _make_branch_evaluator.
+    expander = _make_branch_expander(coder)
+    evaluator = _make_branch_evaluator(coder)
+
+    # FD1: mcts_search.started_at_ms must be a positive int (NOT bool, NOT
+    # float; enforced at _mcts.py:870-877). 2.4a will route this through
+    # :sys/now; for now use raw time module.
+    started_at_ms = time.time_ns() // 1_000_000  # noqa: wall-clock — FD1 + queued for 2.4a
+
+    # Stage 6: run search. db=coder.substrate._db lands :mcts/* provenance
+    # datoms directly on the substrate's fact-store (LD5). Verified at
+    # _facade.py:1402 (Substrate.__init__ assigns self._db = _db; the same
+    # DB instance backs s.fact.since(...) views).
+    #
+    # T6 = happy path. If mcts_search raises (path-1 bubble-out) the
+    # exception propagates raw; T7 will wrap with try/except + emit
+    # :act/result(op=":mcts/search", error=...) + raise BranchSearchFailed.
+    # If mcts_search returns with terminated_by="all_evaluations_failed"
+    # (path-2) the result is consumed here; T7 will inspect and raise
+    # BranchSearchFailed with all four fields populated.
+    result = coder.substrate.plan.mcts_search(
+        seed_plan,
+        expander=expander,
+        evaluator=evaluator,
+        started_at_ms=started_at_ms,
+        config=config,
+        db=coder.substrate._db,
+    )
+
+    # Stage 7: execute winner ONCE via 2.3a's bridge. LD0 invariant —
+    # losers' leaves are structural Plan-AST nodes, never dispatched.
+    # Synthesize an LLMDecision(kind="plan") so 2.3a's _escalate_plan_body
+    # consumes it identically to a real LLM-emitted plan decision.
+    winner_edn = unparse(result.winner)
+    synthesized_decision = LLMDecision(
+        kind="plan",
+        confidence=1.0,
+        payload={"plan_edn": winner_edn},
+    )
+    _escalate_plan_body(coder, synthesized_decision)

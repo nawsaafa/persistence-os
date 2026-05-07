@@ -47,15 +47,17 @@ def test_stub_subtype_inherits_from_not_implemented_error():
     assert issubclass(CoderStubNotImplemented, NotImplementedError)
 
 
-def test_run_raises_on_first_stub(substrate_with_echo):
-    # Phase 2.2a T6: _should_escalate_* are now filled. With echo handler,
-    # echo returns kind="act" confidence=0.5 (missing_confidence_default)
-    # which is below threshold 0.65 — _should_escalate_branch returns True
-    # → _escalate_branch raises the stub.
-    coder = Coder(task="hi", substrate=substrate_with_echo)
-    with pytest.raises(CoderStubNotImplemented) as exc:
-        coder.run()
-    assert str(exc.value) == "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"
+# Phase 2.3b T8 (LD1): the legacy `test_run_raises_on_first_stub` premise
+# (echo returns kind="act" confidence=0.5 → confidence-below-threshold
+# routes into the `_escalate_branch` stub) NO LONGER HOLDS. The
+# confidence-based half of `_should_escalate_branch` was removed per
+# LD1 R0 codex finding (type/shape mismatch — kind="act" payloads
+# would reach a branch escalator that expects branch-specific payload).
+#
+# `_escalate_branch` is now filled. The only remaining stub on the
+# critical path is `_check_pause` (Phase 2.3d) — and that's only reached
+# by the loop after a successful `_act` / `_should_*` cycle, so its
+# coverage is already exercised by the per-stub parametrize below.
 
 
 # F3 from impl ARIS R1: exact-equality pins each stub's downstream-phase
@@ -70,7 +72,7 @@ def test_run_raises_on_first_stub(substrate_with_echo):
         # _should_escalate_plan removed — filled in Phase 2.2a T6, no longer a stub.
         # _should_escalate_branch removed — filled in Phase 2.2a T6, no longer a stub.
         # _escalate_plan removed — filled in Phase 2.3a T7, no longer a stub.
-        ("_escalate_branch",        "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"),
+        # _escalate_branch removed — filled in Phase 2.3b T8, no longer a stub.
         ("_check_pause",            "Phase 2.3d — :repl/request datom check + pause/resume"),
     ],
 )
@@ -96,11 +98,21 @@ def test_should_escalate_branch_returns_true_for_kind_branch():
     s.close()
 
 
-def test_should_escalate_branch_returns_true_below_threshold():
+def test_should_escalate_branch_ignores_low_confidence_act():
+    """Phase 2.3b T8 (LD1): `_should_escalate_branch` no longer triggers
+    on confidence-below-threshold for kind="act" decisions. Per LD1 R0
+    codex finding, the confidence-based half was removed because it
+    routed kind="act" payloads (carrying `{op, args}`) into the branch
+    escalator, which expects branch-specific payload contract.
+
+    This test pins the LD1 invariant: kind="act" never reaches the
+    branch path regardless of confidence."""
     s = Substrate.open("memory")
     coder = Coder(task="t", substrate=s)
     from persistence.coder._types import LLMDecision
-    assert coder._should_escalate_branch(LLMDecision(kind="act", confidence=0.4, payload={})) is True
+    assert coder._should_escalate_branch(LLMDecision(kind="act", confidence=0.4, payload={})) is False
+    assert coder._should_escalate_branch(LLMDecision(kind="act", confidence=0.0, payload={})) is False
+    assert coder._should_escalate_branch(LLMDecision(kind="plan", confidence=0.1, payload={})) is False
     s.close()
 
 

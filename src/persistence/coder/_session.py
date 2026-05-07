@@ -249,12 +249,36 @@ class Coder:
         _escalate_plan_body(self, decision)
 
     def _should_escalate_branch(self, decision: LLMDecision) -> bool:
-        return decision.kind == "branch" or decision.confidence < self.confidence_threshold
+        """Phase 2.3b LD1: ``kind=="branch"`` only.
 
-    def _escalate_branch(self, _decision: LLMDecision) -> None:
-        raise CoderStubNotImplemented(
-            "Phase 2.3b — s.plan.mcts_search + s.txn.fork + s.plan.judge"
-        )
+        Confidence-based escalation half is removed; deferred to Phase
+        2.4a once dogfood calibration data exists. Per LD1 R0 codex
+        finding: a confidence-based trigger could route non-`branch`
+        payloads (e.g. ``kind=="act"`` with ``{op,args}``) into the
+        branch escalator, which expects branch-specific payload
+        contract — that creates a type/shape mismatch.
+        """
+        return decision.kind == "branch"
+
+    def _escalate_branch(self, decision: LLMDecision) -> None:
+        """Phase 2.3b — terminal mode-switch to ``s.plan.mcts_search``.
+
+        Delegates to ``persistence.coder._searcher._escalate_branch_body``
+        which builds a seed plan from ``decision.payload['seed_plan_edn']``,
+        validates, runs MCTS, and executes the WINNER once via 2.3a's
+        ``_escalate_plan_body``.
+
+        On success: emits ``:act/result`` per winner leaf + ``:plan/done``
+        provenance datom; returns. On search-layer failure (LD4): emits
+        ``:act/result`` with ``op=':mcts/search'`` and raises
+        ``BranchSearchFailed``. On winner-execution failure: 2.3a's
+        ``PlanExecutionFailed`` propagates unchanged.
+
+        Caller-visible failure mirrors ``_escalate_plan`` / ``_act``
+        contract.
+        """
+        from persistence.coder._searcher import _escalate_branch_body
+        _escalate_branch_body(self, decision)
 
     # --- REPL pause hook — Phase 2.3d fills this ---------------------
 

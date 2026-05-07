@@ -373,7 +373,7 @@ Per project convention, each gate is a **falsifiable test**, not a narrative cla
 | **2.2a** | `:fs` + `:shell` effect handlers | 17-18 | agent reads / writes / globs / greps the repo; allowlist versioning datomized |
 | **2.2b** | `:code` + `:git` effect handlers | 18-20 | agent runs sandboxed Python + commits |
 | **2.3a** | Plan escalation gate + Plan AST builder | 20-21 | `:strategy/plan` decisions execute via `s.plan.execute` |
-| **2.3b** | MCTS branch + `s.txn.fork` / `s.txn.fold_into` integration | 21-22 | `:strategy/branch` rolls out via `s.mcts.search` + the fork/fold-into pair (MCTS uses `s.txn.fork` for substrate-true rollback) |
+| **2.3b** | MCTS branch escalation — `s.plan.mcts_search` + `s.plan.judge` composed via `_searcher._escalate_branch_body`; winner executes once via 2.3a's `_escalate_plan_body` (LD0 single-execution invariant). 2026-05-07 R0-fold B1: substrate-true rollback is NOT in scope here — `mcts_search` uses in-memory dict transposition at `_mcts.py:881-882`, NOT `s.txn.fork`. | 21-22 | `kind="branch"` decisions trigger MCTS over a seed plan; the highest-visited root edge executes once via the 2.3a winner-execution bridge. Losing branches NEVER dispatch handlers. |
 | **2.3c** | Skill library: registry, lookup, builtin set | 22-23 | 5 builtin skills + custom-skill registration |
 | **2.3d** | REPL-steering session class | 23-25 | pause/snapshot/branch/fold/commit ops live; `:repl/request`+`:repl/response` datoms emitted |
 | **2.4a** | Dogfood: agent rebuilds `implement_function` skill + tunes confidence threshold from telemetry | 25-26 | golden trajectory recorded |

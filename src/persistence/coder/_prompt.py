@@ -38,6 +38,30 @@ Examples:
 [:seq {} [:fs/grep {:pattern "TODO" :path "src/"}] [:git/commit {:message "wip"}]]"""
 
 
+_BRANCH_EDN_GUIDANCE = """\
+When you emit kind="branch", provide a SEED plan that the substrate's \
+MCTS engine will explore structural variations around. Use this when \
+multiple leaf compositions might achieve the goal and you want the \
+substrate to evaluate alternatives — NOT when you have a definite \
+linear plan (use kind="plan" instead, which executes directly).
+
+Payload shape:
+  {"seed_plan_edn": "<canonical-EDN>",       // required
+   "mcts_config": {"max_iter": 25,           // optional override
+                   "expander_k": 3}}         // (max_iter <= 50,
+                                             //  expander_k <= 4)
+
+Example seed plan (3 leaves under :seq):
+[:seq {} [:fs/read {:path "src/main.py"}] \
+[:git/diff {:revisions ["HEAD"]}] \
+[:fs/write {:path "/tmp/summary.txt" :bytes_or_text "..."}]]
+
+The MCTS expander proposes Substitute / AddStep variations; the \
+evaluator scores candidates; the highest-visited root edge is executed \
+once. Losing branches NEVER run their leaves.\
+"""
+
+
 EMIT_DECISION_TOOL_SCHEMA: dict[str, Any] = {
     "name": "emit_decision",
     "description": (
@@ -157,3 +181,111 @@ def parse_text_decision(text: str) -> dict[str, Any] | None:
         "confidence": confidence,
         "payload": payload,
     }
+
+
+#: Phase 2.3b — JSON-mode contract for `LLMExpander.provider` proposals.
+#: One tool-use call per expansion; the response carries `proposals`,
+#: a sequence of action descriptors with raw `logit` values that the
+#: bridge softmax-normalizes into priors. ComposeWithSkillAction
+#: proposals are accepted by the schema (LLM may emit them) but dropped
+#: at the wrapper layer per LD3 — defer to 2.3c.
+EMIT_BRANCH_PROPOSAL_TOOL_SCHEMA: dict = {
+    "name": "emit_branch_proposals",
+    "description": (
+        "Propose up to k structural actions to apply to the seed plan. "
+        "Each action is one of: SubstituteLeafAction (replace a leaf at "
+        "target_path with a new EDN-encoded leaf), AddStepAction (insert "
+        "a new child at index `at` under the node at target_path), or "
+        "ComposeWithSkillAction (deferred — will be ignored). Provide a "
+        "raw `logit` per action; the bridge softmax-normalizes them so "
+        "MCTS receives a proper probability distribution."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "proposals": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": [
+                                "SubstituteLeafAction",
+                                "AddStepAction",
+                                "ComposeWithSkillAction",
+                            ],
+                        },
+                        "target_path": {
+                            "type": "array",
+                            "items": {"type": "integer", "minimum": 0},
+                        },
+                        "new_leaf_edn": {"type": "string"},
+                        "at": {"type": "integer", "minimum": 0},
+                        "new_child_edn": {"type": "string"},
+                        "skill_id": {"type": "string"},
+                        "logit": {"type": "number"},
+                    },
+                    "required": ["kind", "target_path", "logit"],
+                },
+            },
+        },
+        "required": ["proposals"],
+    },
+}
+
+
+_BRANCH_EXPANDER_SYSTEM_PROMPT: str = """\
+You are the EXPANDER of a Monte-Carlo tree search over a Plan AST.
+
+Given a seed plan, propose up to k structural variations as Actions.
+Each action edits the plan structurally (substitute a leaf, add a
+step), NOT by executing it. Provide a raw `logit` (any real number)
+per action; the bridge softmax-normalizes them.
+
+Constraints:
+- Actions must be SubstituteLeafAction or AddStepAction.
+  ComposeWithSkillAction is reserved for Phase 2.3c — emit only as
+  last resort; the bridge will drop it.
+- New leaves must be ONE of these tags: :fs/read, :fs/write, :fs/glob,
+  :fs/grep, :shell/exec, :code/run, :git/diff, :git/status, :git/log,
+  :git/commit. (Same set as Phase 2.3a leaf handlers.)
+- Plan structure must remain :seq-rooted with depth <= 4 and
+  node-count <= 64. The bridge dry-runs your action and rejects any
+  proposal that would violate these.
+
+Return proposals via the `emit_branch_proposals` tool.
+"""
+
+
+#: Phase 2.3b — JSON-mode contract for `LLMJudgeEvaluator.provider`.
+#: One tool-use call per evaluation; the response carries a single
+#: `score` field in [0.0, 1.0]. Out-of-range values are clamped at the
+#: bridge layer rather than raised (avoid spurious EvaluatorContractError
+#: for off-by-epsilon JSON parsing).
+EMIT_BRANCH_SCORE_TOOL_SCHEMA: dict = {
+    "name": "emit_branch_score",
+    "description": (
+        "Score the given plan in [0.0, 1.0]. Higher = more likely to "
+        "achieve the goal. The bridge clamps out-of-range values."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "score": {"type": "number"},
+        },
+        "required": ["score"],
+    },
+}
+
+
+_BRANCH_EVALUATOR_SYSTEM_PROMPT: str = """\
+You are the EVALUATOR of a Monte-Carlo tree search over a Plan AST.
+
+Given a candidate plan, return a SINGLE score in [0.0, 1.0] estimating
+how likely this plan, if executed, will achieve the user's goal.
+
+Higher = more likely. Use the full range; don't cluster around 0.5.
+
+Return the score via the `emit_branch_score` tool.
+"""

@@ -15,5 +15,16 @@ from ._planner_errors import (
     PlanExecutionFailed,
     PlanPayloadValidation,
 )
+from ._searcher_errors import (
+    BranchPayloadValidation,
+    BranchSearchFailed,
+)
 
-__all__ = ["Coder", "CoderStubNotImplemented", "PlanExecutionFailed", "PlanPayloadValidation"]
+__all__ = [
+    "Coder",
+    "CoderStubNotImplemented",
+    "PlanExecutionFailed",
+    "PlanPayloadValidation",
+    "BranchPayloadValidation",
+    "BranchSearchFailed",
+]

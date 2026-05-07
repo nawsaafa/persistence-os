@@ -213,21 +213,7 @@ def test_done_short_circuits_before_act(tmp_path: Path):
 # test_kind_plan_halts_loop_with_stub_raise removed — _escalate_plan filled in Phase 2.3a T7.
 
 
-def test_kind_branch_halts_loop_with_stub_raise(tmp_path: Path):
-    """kind=branch raises CoderStubNotImplemented(2.3b)."""
-    s = Substrate.open("memory")
-    s.effect.install_handler(
-        make_callable_llm_handler(
-            call_fn=_scripted_decisions([
-                {"kind": "branch", "confidence": 0.9, "payload": {}},
-            ])
-        ),
-        position="bottom",
-    )
-    coder = Coder(task="t", substrate=s)
-    with pytest.raises(CoderStubNotImplemented, match="2.3b"):
-        coder.run()
-    s.close()
+# test_kind_branch_halts_loop_with_stub_raise removed — _escalate_branch filled in Phase 2.3b T8.
 
 
 # ---------------------------------------------------------------------------

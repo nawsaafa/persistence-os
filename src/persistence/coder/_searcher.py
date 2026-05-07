@@ -427,10 +427,21 @@ def _parse_evaluator_tool_response(response: Mapping[str, Any]) -> float:
     tool_calls = response.get("tool_calls", [])
     if not tool_calls:
         return 0.0
+    # I4 (coderabbit T5 review): defensive guard — if tool_calls[0] is
+    # a string/int/list (not a Mapping), .get(...) would AttributeError.
+    # Drop to no-signal rather than leak.
+    if not isinstance(tool_calls[0], Mapping):
+        return 0.0
     raw = tool_calls[0].get("input", {}).get("score")
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
         return 0.0
     score = float(raw)
+    # I1 (coderabbit T5 review): NaN/Inf guard. JSON schema {"type": "number"}
+    # accepts NaN/Inf; both `score < 0.0` and `score > 1.0` are False for NaN,
+    # so without this guard NaN leaks to the engine and trips _is_finite_score
+    # → phase="reject" silent degradation. Treat as no-signal.
+    if not math.isfinite(score):
+        return 0.0
     if score < 0.0:
         return 0.0
     if score > 1.0:

@@ -38,6 +38,30 @@ Examples:
 [:seq {} [:fs/grep {:pattern "TODO" :path "src/"}] [:git/commit {:message "wip"}]]"""
 
 
+_BRANCH_EDN_GUIDANCE = """\
+When you emit kind="branch", provide a SEED plan that the substrate's \
+MCTS engine will explore structural variations around. Use this when \
+multiple leaf compositions might achieve the goal and you want the \
+substrate to evaluate alternatives — NOT when you have a definite \
+linear plan (use kind="plan" instead, which executes directly).
+
+Payload shape:
+  {"seed_plan_edn": "<canonical-EDN>",       // required
+   "mcts_config": {"max_iter": 25,           // optional override
+                   "expander_k": 3}}         // (max_iter <= 50,
+                                             //  expander_k <= 4)
+
+Example seed plan (3 leaves under :seq):
+[:seq {} [:fs/read {:path "src/main.py"}] \
+[:git/diff {:revisions ["HEAD"]}] \
+[:fs/write {:path "/tmp/summary.txt" :bytes_or_text "..."}]]
+
+The MCTS expander proposes Substitute / AddStep variations; the \
+evaluator scores candidates; the highest-visited root edge is executed \
+once. Losing branches NEVER run their leaves.\
+"""
+
+
 EMIT_DECISION_TOOL_SCHEMA: dict[str, Any] = {
     "name": "emit_decision",
     "description": (

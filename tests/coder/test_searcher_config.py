@@ -56,3 +56,67 @@ def test_resolve_rejects_expander_k_over_cap():
         _resolve_mcts_config({"mcts_config": {"expander_k": 5}})
     assert "expander_k" in excinfo.value.field
     assert "cap" in excinfo.value.reason.lower() or "4" in excinfo.value.reason
+
+
+def test_resolve_rejects_non_mapping_mcts_config():
+    """raw must be a Mapping; non-Mapping (str, list) -> BranchPayloadValidation.
+
+    Falsifiability: deleting `isinstance(raw, Mapping)` branch at the top
+    of _resolve_mcts_config would silently survive without this test.
+    """
+    with pytest.raises(BranchPayloadValidation) as excinfo:
+        _resolve_mcts_config({"mcts_config": "not a dict"})
+    assert excinfo.value.field == "mcts_config"
+    assert (
+        "mapping" in excinfo.value.reason.lower()
+        or "dict" in excinfo.value.reason.lower()
+    )
+
+
+def test_resolve_rejects_unsupported_mcts_config_field():
+    """Closed-set narrowing: a REAL MCTSConfig field that's deliberately NOT
+    in `_PAYLOAD_OVERRIDABLE_FIELDS` must be rejected.
+
+    Falsifiability proof for LD6's "narrow surface" claim: without this test
+    the closed-set guard would silently survive deletion. `simple_regret_threshold`
+    is a real `MCTSConfig` field per `_mcts.py:256-315` but deliberately not
+    payload-overridable — caller must subclass the bridge to tune it.
+    """
+    with pytest.raises(BranchPayloadValidation) as excinfo:
+        _resolve_mcts_config({"mcts_config": {"simple_regret_threshold": 0.1}})
+    assert excinfo.value.field == "mcts_config.simple_regret_threshold"
+    assert (
+        "unsupported" in excinfo.value.reason.lower()
+        or "overridable" in excinfo.value.reason.lower()
+    )
+
+
+def test_resolve_rejects_float_max_iter():
+    """Bridge narrows to int-only — DELIBERATE stricter contract than
+    `MCTSConfig.__post_init__` (which accepts both int and float for these
+    fields per _mcts.py:279-315). Floats must reject at the bridge layer
+    BEFORE construction.
+    """
+    with pytest.raises(BranchPayloadValidation) as excinfo:
+        _resolve_mcts_config({"mcts_config": {"max_iter": 25.0}})
+    assert "mcts_config.max_iter" in excinfo.value.field
+    assert (
+        "int" in excinfo.value.reason.lower()
+        or "float" in excinfo.value.reason.lower()
+    )
+
+
+def test_resolve_rejects_zero_max_iter():
+    """Positivity guard: 0 and negatives must reject.
+
+    `MCTSConfig.__post_init__` also enforces positivity, but the bridge
+    surfaces `BranchPayloadValidation` for uniform error contract.
+    """
+    with pytest.raises(BranchPayloadValidation) as excinfo:
+        _resolve_mcts_config({"mcts_config": {"max_iter": 0}})
+    assert "mcts_config.max_iter" in excinfo.value.field
+    assert (
+        "> 0" in excinfo.value.reason
+        or "positive" in excinfo.value.reason.lower()
+        or "got 0" in excinfo.value.reason.lower()
+    )

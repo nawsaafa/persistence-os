@@ -36,13 +36,18 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import datetime as _dt
+
 from persistence.coder._searcher import _escalate_branch_body
 from persistence.coder._searcher_errors import BranchPayloadValidation
 from persistence.coder._types import LLMDecision
+from persistence.effect.handlers.callable import make_callable_llm_handler
 from persistence.effect.handlers.fs import make_fs_handler
 from persistence.plan import parse, unparse
 from persistence.plan._mcts import MCTSResult
 from persistence.sdk import Substrate
+
+_EPOCH = _dt.datetime(1970, 1, 1, tzinfo=_dt.timezone.utc)
 
 
 # --------------------------------------------------------------------------- #
@@ -275,3 +280,214 @@ def test_semantic_rejection_short_circuits_before_search(s):
         _escalate_branch_body(coder, _branch_decision(seed_edn))
 
     mock_search.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# G4 / LD0 acceptance signal — REAL `s.plan.mcts_search` end-to-end
+#
+# The tests above mock `mcts_search` to isolate BRIDGE behavior from
+# ENGINE behavior. Codex Impl R1 (T9.1) flagged that the frozen-doc
+# G4/LD0 signal explicitly calls for a "scripted K=2 real-MCTS" run
+# proving losers DON'T dispatch handlers under real engine control.
+#
+# These tests close that gap with a smart `:llm/call` handler that
+# distinguishes expander vs evaluator by tool name, runs real
+# `s.plan.mcts_search` with tight bounds, and asserts:
+#   - LD0: only the winner's plan executes (disk-marker invariant)
+#   - LD5: ZERO `:fork/*` datoms in the audit chain (mcts_search uses
+#          in-memory dict transposition, NOT s.txn.fork)
+#   - LD5: `:plan/done` provenance datom emitted exactly once on winner
+# --------------------------------------------------------------------------- #
+
+
+def _make_real_mcts_call_fn(*, winner_path: str, loser_path: str):
+    """Smart `:llm/call` mock that distinguishes expander vs evaluator
+    by tool name. Returns 2 SubstituteLeafActions per expansion (winner
+    leaf vs loser leaf); evaluator scores plans containing 'winner'
+    substring at 0.95, 'loser' at 0.30, seed at 0.05 — deterministic
+    winner under PUCT selection."""
+
+    def call_fn(*, model, messages, tools=None, temperature=None, max_tokens=None):
+        tool_name = tools[0]["name"] if tools else ""
+
+        if tool_name == "emit_branch_proposals":
+            return {
+                "tool_calls": [{
+                    "input": {
+                        "proposals": [
+                            {
+                                "kind": "SubstituteLeafAction",
+                                "target_path": [0],
+                                "new_leaf_edn": (
+                                    f'[:fs/write {{:path "{winner_path}" '
+                                    f':bytes_or_text "winner_content"}}]'
+                                ),
+                                "logit": 2.0,
+                            },
+                            {
+                                "kind": "SubstituteLeafAction",
+                                "target_path": [0],
+                                "new_leaf_edn": (
+                                    f'[:fs/write {{:path "{loser_path}" '
+                                    f':bytes_or_text "loser_content"}}]'
+                                ),
+                                "logit": 1.0,
+                            },
+                        ]
+                    }
+                }],
+                "text": "",
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+                "fingerprint": "test",
+            }
+
+        if tool_name == "emit_branch_score":
+            user_content = messages[1]["content"]
+            if "winner" in user_content:
+                score = 0.95
+            elif "loser" in user_content:
+                score = 0.30
+            else:
+                score = 0.05
+            return {
+                "tool_calls": [{"input": {"score": score}}],
+                "text": "",
+                "usage": {"input_tokens": 5, "output_tokens": 1},
+                "fingerprint": "test",
+            }
+
+        return {"tool_calls": [], "text": "unknown tool"}
+
+    return call_fn
+
+
+def test_real_mcts_ld0_disk_marker_invariant_under_engine_control(s, tmp_path):
+    """G4/LD0 — REAL `s.plan.mcts_search` proves losers DON'T dispatch.
+
+    Tight bounds (`max_iter=2, expander_k=2`) keep the search small
+    while still exercising the engine's expand/evaluate/select cycle.
+    The smart call_fn produces winner/loser SubstituteLeafActions; the
+    engine selects the highest-q child (winner) and the bridge executes
+    it once via 2.3a's `_escalate_plan_body`.
+
+    Falsifiability: if the bridge accidentally dispatched the loser
+    branch's leaves (or the seed's), `loser.txt` or `seed.txt` would
+    appear on disk → assertion fails.
+    """
+    seed_path = str(tmp_path / "seed.txt")
+    winner_path = str(tmp_path / "winner.txt")
+    loser_path = str(tmp_path / "loser.txt")
+
+    seed_edn = (
+        f'[:seq {{}} [:fs/write {{:path "{seed_path}" :bytes_or_text "seed"}}]]'
+    )
+
+    s.effect.install_handler(
+        make_callable_llm_handler(
+            call_fn=_make_real_mcts_call_fn(
+                winner_path=winner_path, loser_path=loser_path,
+            )
+        ),
+        position="bottom",
+    )
+
+    coder = _CoderStub(substrate=s)
+    decision = LLMDecision(
+        kind="branch",
+        confidence=0.9,
+        payload={
+            "seed_plan_edn": seed_edn,
+            "mcts_config": {"max_iter": 2, "expander_k": 2},
+        },
+    )
+
+    _escalate_branch_body(coder, decision)
+
+    files = sorted(os.listdir(tmp_path))
+    assert "winner.txt" in files, f"winner missing! files={files}"
+    assert "loser.txt" not in files, (
+        f"LD0 broken — loser.txt exists, search dispatched losers; files={files}"
+    )
+    assert "seed.txt" not in files, (
+        f"LD0 broken — seed.txt exists, seed plan dispatched; files={files}"
+    )
+
+
+def test_real_mcts_emits_zero_fork_datoms(s, tmp_path):
+    """LD5 / R0-fold B1: `mcts_search` uses in-memory dict
+    transposition (`_mcts.py:881-882`), NOT `s.txn.fork`. The audit
+    chain MUST contain ZERO `:fork/*` datoms after a real-MCTS run."""
+    seed_path = str(tmp_path / "seed.txt")
+    winner_path = str(tmp_path / "winner.txt")
+    loser_path = str(tmp_path / "loser.txt")
+    seed_edn = (
+        f'[:seq {{}} [:fs/write {{:path "{seed_path}" :bytes_or_text "seed"}}]]'
+    )
+
+    s.effect.install_handler(
+        make_callable_llm_handler(
+            call_fn=_make_real_mcts_call_fn(
+                winner_path=winner_path, loser_path=loser_path,
+            )
+        ),
+        position="bottom",
+    )
+    coder = _CoderStub(substrate=s)
+    decision = LLMDecision(
+        kind="branch",
+        confidence=0.9,
+        payload={
+            "seed_plan_edn": seed_edn,
+            "mcts_config": {"max_iter": 2, "expander_k": 2},
+        },
+    )
+
+    _escalate_branch_body(coder, decision)
+
+    view = s.fact.since(_EPOCH)
+    fork_datoms = [d for d in view.datoms if d.a.startswith("fork/")]
+    assert fork_datoms == [], (
+        f"LD5 broken — mcts_search must NOT emit :fork/* datoms; got "
+        f"{[d.a for d in fork_datoms]!r}"
+    )
+
+
+def test_real_mcts_emits_exactly_one_plan_done_on_winner(s, tmp_path):
+    """LD5: `:plan/done` provenance datom emitted exactly once via 2.3a's
+    `_escalate_plan_body` for the winner. Losers never reach
+    `_escalate_plan_body` so they emit zero `:plan/done`."""
+    seed_path = str(tmp_path / "seed.txt")
+    winner_path = str(tmp_path / "winner.txt")
+    loser_path = str(tmp_path / "loser.txt")
+    seed_edn = (
+        f'[:seq {{}} [:fs/write {{:path "{seed_path}" :bytes_or_text "seed"}}]]'
+    )
+
+    s.effect.install_handler(
+        make_callable_llm_handler(
+            call_fn=_make_real_mcts_call_fn(
+                winner_path=winner_path, loser_path=loser_path,
+            )
+        ),
+        position="bottom",
+    )
+    coder = _CoderStub(substrate=s)
+    decision = LLMDecision(
+        kind="branch",
+        confidence=0.9,
+        payload={
+            "seed_plan_edn": seed_edn,
+            "mcts_config": {"max_iter": 2, "expander_k": 2},
+        },
+    )
+
+    _escalate_branch_body(coder, decision)
+
+    view = s.fact.since(_EPOCH)
+    plan_done_datoms = [
+        d for d in view.datoms if d.a == "plan/done" and d.op == "assert"
+    ]
+    assert len(plan_done_datoms) == 1, (
+        f"LD5 broken — expected exactly 1 :plan/done from winner execution; "
+        f"got {len(plan_done_datoms)}"
+    )

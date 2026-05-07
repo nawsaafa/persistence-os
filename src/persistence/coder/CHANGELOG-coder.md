@@ -170,11 +170,12 @@ shape that 2.3a's `_escalate_plan` uses.
   `_make_branch_evaluator` (3 from T5 + 9 from T5-fix: empty
   `tool_calls`, NaN/Inf guard, malformed-score parametrize, missing
   score field, non-Mapping `tool_calls[0]`).
-- `tests/coder/test_searcher_search.py` — 7 tests for the LD0 single-
-  execution invariant + bridge wiring (disk-marker invariant,
-  mcts_search kwargs, default vs override config, winner→
-  `_escalate_plan_body` delegation, byte-budget short-circuit, semantic
-  short-circuit).
+- `tests/coder/test_searcher_search.py` — 10 tests covering BOTH the
+  bridge-isolated layer (7: disk-marker invariant via mock, mcts_search
+  kwargs, default vs override config, winner→`_escalate_plan_body`
+  delegation, byte-budget + semantic short-circuit) AND end-to-end
+  real-MCTS engine control (3: LD0 disk-marker under engine, ZERO
+  `:fork/*` datoms, exactly-one `:plan/done`).
 - `tests/coder/test_searcher_winner_failure.py` — 3 G5b tests for
   winner-execution failure inheriting 2.3a's `PlanExecutionFailed`
   unchanged.
@@ -187,26 +188,41 @@ shape that 2.3a's `_escalate_plan` uses.
   `side_effect=AssertionError + assert_not_called()` spy double-
   protection (2.3a precedent).
 
-Suite delta: 2454 → 2525 (+71 net; baseline at 2.3a merge was 2454).
+Suite delta: 2454 → 2528 (+74 net; baseline at 2.3a merge was 2454).
 
 ### Test-fixture pattern
 
-The `_escalate_branch_body` integration tests deliberately mock
+Most of the `_escalate_branch_body` tests mock
 `coder.substrate.plan.mcts_search` to a `MagicMock` returning a hand-
-crafted `MCTSResult`. The full real-MCTS audit-chain G4 acceptance
-signal (`:mcts/iteration` chain shape across iterations) is queued
-as a Phase 2.4a / v0.9.x rescope artifact. Reasons:
+crafted `MCTSResult`, which isolates BRIDGE behavior from ENGINE
+behavior (engine correctness is `tests/plan/test_mcts.py`'s job —
+substrate-side, separately tested).
 
-1. T6 isolates BRIDGE behavior from ENGINE behavior — engine
-   correctness is the responsibility of `tests/plan/test_mcts.py`
-   (substrate-side, separately tested).
-2. Real MCTS with fixed-proposal LLM mocks deadlocks on transposition
-   deduplication (zero new uniques per iter blocks sane termination
-   under bridge-default `max_iter=50` unless the mock varies its
-   output by iter or plan content — non-trivial fixture).
-3. The LD0 single-execution invariant — what `_escalate_branch_body`
-   does with the WINNER — is fully testable at the bridge layer via
-   the disk-marker test (winner writes a file, losers do not).
+**End-to-end real-MCTS G4 acceptance signal** (added at T9.1 to close
+codex Impl R1 I1+I2): three tests in `test_searcher_search.py` run
+`s.plan.mcts_search` end-to-end with a smart `make_callable_llm_handler`
+call_fn that distinguishes expander vs evaluator by tool name. With
+`max_iter=2, expander_k=2`, the search produces winner + loser child
+plans; the engine selects the highest-q winner via PUCT; the bridge
+executes ONLY the winner via `_escalate_plan_body`.
+
+These tests pin three load-bearing invariants under real engine
+control:
+- **LD0** disk-marker single-execution invariant — only `winner.txt`
+  exists post-search (zero `loser.txt`, zero `seed.txt`).
+- **LD5** zero `:fork/*` datoms (R0-fold B1 — `mcts_search` uses
+  in-memory dict transposition at `_mcts.py:881-882`, NOT
+  `s.txn.fork`).
+- **LD5** exactly one `:plan/done` datom (winner execution emits via
+  2.3a's `_escalate_plan_body`; losers never reach it).
+
+Total real-MCTS test runtime: ~50ms across the three tests.
+
+The earlier "fixed-proposal LLM mock deadlocks on transposition dedup"
+concern was specific to a fixture pattern that used `s.effect.perform =
+scripted_fn` direct method assignment. The working pattern (above)
+uses `make_callable_llm_handler` with the proper handler-stack
+installation, which routes correctly through `Substrate._runtime`.
 
 ### Module layout
 

@@ -260,7 +260,16 @@ def _decode_action_from_dict(d: Mapping[str, Any]) -> Action:
     proposals as empty contributions).
     """
     kind = d.get("kind")
-    target_path = tuple(d.get("target_path", []))
+    # I2 (coderabbit T4 review): explicit list-isinstance guard. Without
+    # this, target_path="abc" silently becomes ("a","b","c") and
+    # target_path={1:2} becomes (1,). Decoder rejects malformed input;
+    # wrapper drops on ValueError.
+    target_path_raw = d.get("target_path", [])
+    if not isinstance(target_path_raw, list):
+        raise ValueError(
+            f"target_path must be a list of int, got {type(target_path_raw).__name__}"
+        )
+    target_path = tuple(target_path_raw)
     if kind == "SubstituteLeafAction":
         leaf_edn = d.get("new_leaf_edn")
         if not isinstance(leaf_edn, str):
@@ -330,6 +339,11 @@ def _parse_expander_tool_response(
     if not tool_calls:
         return ()
     proposals_raw = tool_calls[0].get("input", {}).get("proposals", [])
+    # I1 (codex T4 review): defend against non-iterable proposals payload —
+    # drop to empty rather than raise TypeError into the LLMExpander caller.
+    # Strings ARE Sequences but iterating yields chars; reject explicitly.
+    if not isinstance(proposals_raw, Sequence) or isinstance(proposals_raw, str):
+        return ()
 
     surviving: list[tuple[Action, float]] = []
     raw_logits: list[float] = []

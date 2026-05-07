@@ -12,7 +12,6 @@ LD3 (deferred to 2.3c when SkillLibrary lands).
 """
 from __future__ import annotations
 
-import math
 from unittest.mock import MagicMock
 
 import pytest
@@ -121,3 +120,132 @@ def test_expander_drops_compose_with_skill_action():
     action, prior = proposals[0]
     assert isinstance(action, SubstituteLeafAction)
     assert not isinstance(action, ComposeWithSkillAction)
+
+
+def test_expander_returns_empty_when_response_has_no_tool_calls():
+    """LLM may emit text without invoking the tool. Wrapper drops to ()."""
+    coder = MagicMock()
+    coder.model = "claude-test"
+    coder.substrate.effect.perform.return_value = {
+        "tool_calls": [],
+        "text": "I cannot propose any expansions right now.",
+    }
+    expander = _make_branch_expander(coder)
+    plan = parse('[:seq {} [:fs/read {:path "y.txt"}]]', strict=False)
+    proposals = expander.propose(plan, k=4)
+    assert proposals == ()
+
+
+def test_expander_returns_empty_when_proposals_is_none():
+    """I1 (codex robustness): proposals=None must drop to () not raise TypeError."""
+    coder = MagicMock()
+    coder.model = "claude-test"
+    coder.substrate.effect.perform.return_value = {
+        "tool_calls": [{"input": {"proposals": None}}],
+        "text": "",
+    }
+    expander = _make_branch_expander(coder)
+    plan = parse('[:seq {} [:fs/read {:path "y.txt"}]]', strict=False)
+    proposals = expander.propose(plan, k=4)
+    assert proposals == ()
+
+
+def test_expander_drops_proposals_failing_dry_run_validator():
+    """LD2: proposals whose apply_action result would fail
+    validate_plan_for_2_3a are silently dropped at the wrapper layer.
+
+    A proposal substituting a leaf with an invalid tag (`:branch` is
+    banned per validate_plan_for_2_3a) MUST be dropped, not surfaced.
+    """
+    coder = MagicMock()
+    coder.model = "claude-test"
+    coder.substrate.effect.perform.return_value = {
+        "tool_calls": [{"input": {"proposals": [
+            # SubstituteLeafAction with a :branch leaf — validator rejects.
+            {
+                "kind": "SubstituteLeafAction",
+                "target_path": [0],
+                "new_leaf_edn": '[:branch {}]',
+                "logit": 1.0,
+            },
+            # Another with a valid :fs/read leaf.
+            {
+                "kind": "SubstituteLeafAction",
+                "target_path": [0],
+                "new_leaf_edn": '[:fs/read {:path "ok.txt"}]',
+                "logit": 1.0,
+            },
+        ]}}],
+        "text": "",
+    }
+    expander = _make_branch_expander(coder)
+    plan = parse('[:seq {} [:fs/read {:path "y.txt"}]]', strict=False)
+    proposals = expander.propose(plan, k=4)
+
+    # Only the valid one survives.
+    assert len(proposals) == 1
+    action, _prior = proposals[0]
+    assert isinstance(action, SubstituteLeafAction)
+
+
+def test_expander_decodes_add_step_action():
+    """I5: AddStepAction happy path. Validates `at: int + bool-isinstance`
+    branch + new_child_edn parse + isinstance(action, AddStepAction)."""
+    coder = MagicMock()
+    coder.model = "claude-test"
+    coder.substrate.effect.perform.return_value = {
+        "tool_calls": [{"input": {"proposals": [
+            {
+                "kind": "AddStepAction",
+                "target_path": [],   # root
+                "at": 1,
+                "new_child_edn": '[:fs/read {:path "added.txt"}]',
+                "logit": 2.0,
+            },
+        ]}}],
+        "text": "",
+    }
+    expander = _make_branch_expander(coder)
+    plan = parse('[:seq {} [:fs/read {:path "y.txt"}]]', strict=False)
+    proposals = expander.propose(plan, k=4)
+
+    assert len(proposals) == 1
+    action, prior = proposals[0]
+    assert isinstance(action, AddStepAction)
+    assert action.at == 1
+    # Single-survivor softmax → 1.0
+    assert abs(prior - 1.0) < _PRIOR_TOL
+
+
+@pytest.mark.parametrize("bad_proposal", [
+    # Non-Mapping entry.
+    "not a dict",
+    # Missing 'kind'.
+    {"target_path": [0], "logit": 1.0},
+    # Unknown 'kind'.
+    {"kind": "FooAction", "target_path": [0], "logit": 1.0},
+    # Non-numeric logit.
+    {"kind": "SubstituteLeafAction", "target_path": [0],
+     "new_leaf_edn": '[:fs/read {:path "x.txt"}]', "logit": "high"},
+    # Bool logit (FD2-style: bool-isinstance-int trap).
+    {"kind": "SubstituteLeafAction", "target_path": [0],
+     "new_leaf_edn": '[:fs/read {:path "x.txt"}]', "logit": True},
+    # Non-list target_path (I2 — string would silently char-split before fix).
+    {"kind": "SubstituteLeafAction", "target_path": "abc",
+     "new_leaf_edn": '[:fs/read {:path "x.txt"}]', "logit": 1.0},
+])
+def test_expander_drops_malformed_proposal_silently(bad_proposal):
+    """I6 + I2: malformed proposals are dropped silently. The wrapper's
+    contract is "drop bad, don't raise". Each filter branch has its own
+    skip-path; this parametrize asserts ALL of them drop correctly."""
+    coder = MagicMock()
+    coder.model = "claude-test"
+    coder.substrate.effect.perform.return_value = {
+        "tool_calls": [{"input": {"proposals": [bad_proposal]}}],
+        "text": "",
+    }
+    expander = _make_branch_expander(coder)
+    plan = parse('[:seq {} [:fs/read {:path "y.txt"}]]', strict=False)
+    proposals = expander.propose(plan, k=4)
+
+    assert proposals == ()

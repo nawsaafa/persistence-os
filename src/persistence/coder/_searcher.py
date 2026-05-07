@@ -26,8 +26,10 @@ LD0–LD7 reference: docs/plans/2026-05-07-phase-2.3b-mcts-fork-design.md.
 """
 from __future__ import annotations
 
+import datetime as dt
 import math
 import time
+import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Mapping
@@ -49,6 +51,7 @@ from persistence.coder._searcher_errors import (
     BranchSearchFailed,
 )
 from persistence.coder._types import LLMDecision
+from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.plan import LLMExpander, LLMJudgeEvaluator, Node, parse, unparse
 from persistence.plan._errors import ParseError
 from persistence.plan._mcts import (
@@ -533,24 +536,57 @@ def _escalate_branch_body(coder: "Coder", decision: LLMDecision) -> None:
     started_at_ms = time.time_ns() // 1_000_000  # noqa: wall-clock — FD1 + queued for 2.4a
 
     # Stage 6: run search. db=coder.substrate._db lands :mcts/* provenance
-    # datoms directly on the substrate's fact-store (LD5). Verified at
-    # _facade.py:1402 (Substrate.__init__ assigns self._db = _db; the same
-    # DB instance backs s.fact.since(...) views).
+    # datoms directly on the substrate's fact-store (LD5).
     #
-    # T6 = happy path. If mcts_search raises (path-1 bubble-out) the
-    # exception propagates raw; T7 will wrap with try/except + emit
-    # :act/result(op=":mcts/search", error=...) + raise BranchSearchFailed.
-    # If mcts_search returns with terminated_by="all_evaluations_failed"
-    # (path-2) the result is consumed here; T7 will inspect and raise
-    # BranchSearchFailed with all four fields populated.
-    result = coder.substrate.plan.mcts_search(
-        seed_plan,
-        expander=expander,
-        evaluator=evaluator,
-        started_at_ms=started_at_ms,
-        config=config,
-        db=coder.substrate._db,
-    )
+    # LD4 Path-1 (bubble-out): try/except catches ExpanderContractError +
+    # any raw expander provider exception. Per design R1-fold I1,
+    # PlanDepthExceeded is engine-caught at _populate_children
+    # phase="reject" — does NOT bubble. We catch broadly (Exception)
+    # because any raw provider exception is a possible bubble-out.
+    try:
+        result = coder.substrate.plan.mcts_search(
+            seed_plan,
+            expander=expander,
+            evaluator=evaluator,
+            started_at_ms=started_at_ms,
+            config=config,
+            db=coder.substrate._db,
+        )
+    except Exception as exc:
+        error_repr = f"{type(exc).__name__}: {exc}"
+        _emit_search_failure_act_result(
+            coder,
+            error_repr=error_repr,
+            search_id=None,
+            iter_count=None,
+            terminated_by=None,
+        )
+        raise BranchSearchFailed(
+            error_repr=error_repr,
+            search_id=None,
+            iter_count=None,
+            terminated_by=None,
+        ) from exc
+
+    # LD4 Path-2 (post-search detection): mcts_search returned cleanly
+    # but every evaluation failed → no useful winner. Funnel to the same
+    # BranchSearchFailed shape (with populated search_id/iter_count/
+    # terminated_by) so Coder.run() exits uniformly.
+    if result.terminated_by == "all_evaluations_failed":
+        error_repr = "all_evaluations_failed"
+        _emit_search_failure_act_result(
+            coder,
+            error_repr=error_repr,
+            search_id=result.search_id,
+            iter_count=result.iter_count,
+            terminated_by=result.terminated_by,
+        )
+        raise BranchSearchFailed(
+            error_repr=error_repr,
+            search_id=result.search_id,
+            iter_count=result.iter_count,
+            terminated_by=result.terminated_by,
+        )
 
     # Stage 7: execute winner ONCE via 2.3a's bridge. LD0 invariant —
     # losers' leaves are structural Plan-AST nodes, never dispatched.
@@ -563,3 +599,43 @@ def _escalate_branch_body(coder: "Coder", decision: LLMDecision) -> None:
         payload={"plan_edn": winner_edn},
     )
     _escalate_plan_body(coder, synthesized_decision)
+
+
+def _emit_search_failure_act_result(
+    coder: "Coder",
+    *,
+    error_repr: str,
+    search_id: str | None,
+    iter_count: int | None,
+    terminated_by: str | None,
+) -> None:
+    """Emit ONE :act/result datom with op=":mcts/search" + error fields.
+
+    Mirrors `_session.py:209-222` (_act._record). Used by BOTH LD4
+    failure paths (bubble-out + post-search detection) so observers
+    see a uniform shape regardless of which path failed.
+
+    `latency_ms=0` is a deliberate FD — per-leaf wall-clock latency
+    tracking is queued for 2.4a along with the rest of the latency
+    metrics work (`:sys/now` substrate op).
+    """
+    now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts
+    coder.substrate.fact.transact([{
+        "e": uuid.uuid4().hex,  # noqa: wall-clock — entity-id (mirrors _session.py:213 _act._record precedent)
+        "a": ":act/result",
+        "v": canonical_dumps({
+            "op": ":mcts/search",
+            "args_hash": canonical_hash({
+                "search_id": search_id,
+                "terminated_by": terminated_by,
+            }),
+            "result_summary": {
+                "search_id": search_id,
+                "iter_count": iter_count,
+                "terminated_by": terminated_by,
+            },
+            "error": error_repr,
+            "latency_ms": 0,  # FD — latency tracking deferred to 2.4a
+        }),
+        "valid_from": now,
+    }])

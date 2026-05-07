@@ -26,6 +26,8 @@ LD0–LD7 reference: docs/plans/2026-05-07-phase-2.3b-mcts-fork-design.md.
 """
 from __future__ import annotations
 
+import math
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Mapping
 
@@ -34,13 +36,24 @@ from persistence.coder._planner import (
     validate_plan_for_2_3a,
 )
 from persistence.coder._planner_errors import PlanPayloadValidation
+from persistence.coder._prompt import (
+    EMIT_BRANCH_PROPOSAL_TOOL_SCHEMA,
+    _BRANCH_EXPANDER_SYSTEM_PROMPT,
+)
 from persistence.coder._searcher_errors import (
     BranchPayloadValidation,
     BranchSearchFailed,
 )
-from persistence.plan import Node, parse
+from persistence.plan import LLMExpander, Node, parse, unparse
 from persistence.plan._errors import ParseError
-from persistence.plan._mcts import MCTSConfig
+from persistence.plan._mcts import (
+    Action,
+    AddStepAction,
+    ComposeWithSkillAction,
+    MCTSConfig,
+    SubstituteLeafAction,
+    apply_action,
+)
 
 if TYPE_CHECKING:
     from persistence.coder._session import Coder
@@ -221,6 +234,169 @@ def _resolve_mcts_config(payload: Mapping[str, Any]) -> MCTSConfig:
         overrides[k] = v
 
     return replace(_BRANCH_BRIDGE_DEFAULT_CONFIG, **overrides)
+
+
+def _softmax_normalize(logits: Sequence[float]) -> list[float]:
+    """Stable softmax: subtract max before exp() to avoid overflow.
+
+    Returns a list of priors summing to 1.0 within _PRIOR_TOL. Empty
+    input returns []. Single-element input returns [1.0].
+    """
+    if not logits:
+        return []
+    if len(logits) == 1:
+        return [1.0]
+    max_logit = max(logits)
+    exps = [math.exp(l - max_logit) for l in logits]
+    total = sum(exps)
+    return [e / total for e in exps]
+
+
+def _decode_action_from_dict(d: Mapping[str, Any]) -> Action:
+    """Decode a tool-use proposal dict into an Action ADT instance.
+
+    Raises ValueError if the dict shape is invalid for the declared
+    `kind`. The wrapper layer catches and drops these (treats malformed
+    proposals as empty contributions).
+    """
+    kind = d.get("kind")
+    target_path = tuple(d.get("target_path", []))
+    if kind == "SubstituteLeafAction":
+        leaf_edn = d.get("new_leaf_edn")
+        if not isinstance(leaf_edn, str):
+            raise ValueError("SubstituteLeafAction requires new_leaf_edn: str")
+        return SubstituteLeafAction(
+            target_path=target_path,
+            new_leaf=parse(leaf_edn, strict=False),
+        )
+    if kind == "AddStepAction":
+        child_edn = d.get("new_child_edn")
+        at = d.get("at")
+        if not isinstance(child_edn, str):
+            raise ValueError("AddStepAction requires new_child_edn: str")
+        if not isinstance(at, int) or isinstance(at, bool) or at < 0:
+            raise ValueError("AddStepAction requires at: non-negative int")
+        return AddStepAction(
+            target_path=target_path,
+            at=at,
+            new_child=parse(child_edn, strict=False),
+        )
+    if kind == "ComposeWithSkillAction":
+        skill_id = d.get("skill_id")
+        if not isinstance(skill_id, str):
+            raise ValueError("ComposeWithSkillAction requires skill_id: str")
+        return ComposeWithSkillAction(target_path=target_path, skill_id=skill_id)
+    raise ValueError(f"unknown action kind: {kind!r}")
+
+
+def _dry_run_apply_action_safely(plan: Node, action: Action) -> Node | None:
+    """Apply action to plan in-memory; return new plan or None on rejection.
+
+    LD2: rejects proposals whose `apply_action` result would fail
+    `validate_plan_for_2_3a` (the strict 2.3a validator). Also rejects
+    proposals that raise PlanDepthExceeded / ValueError during
+    apply_action itself.
+    """
+    try:
+        new_plan = apply_action(plan, action)
+    except Exception:
+        return None
+    try:
+        validate_plan_for_2_3a(new_plan)
+    except PlanPayloadValidation:
+        return None
+    return new_plan
+
+
+def _parse_expander_tool_response(
+    response: Mapping[str, Any],
+    seed_plan: Node,
+) -> Sequence[tuple[Action, float]]:
+    """Parse :llm/call tool-use response → softmax-normalized proposals.
+
+    Algorithm:
+        1. Extract response["tool_calls"][0]["input"]["proposals"] (list of dicts).
+        2. For each dict:
+            a. Drop ComposeWithSkillAction (LD3: 2.3c defer) by kind string.
+            b. Decode via `_decode_action_from_dict` (skip on ValueError/ParseError).
+            c. Belt-and-braces isinstance check on ComposeWithSkillAction (FD7).
+            d. Dry-run via `_dry_run_apply_action_safely` (skip on None).
+        3. Softmax-normalize the surviving raw logits.
+        4. Return [(action, prior)] sequence.
+
+    Empty list is acceptable -> MCTS treats as terminal-node signal.
+    """
+    tool_calls = response.get("tool_calls", [])
+    if not tool_calls:
+        return ()
+    proposals_raw = tool_calls[0].get("input", {}).get("proposals", [])
+
+    surviving: list[tuple[Action, float]] = []
+    raw_logits: list[float] = []
+    for d in proposals_raw:
+        if not isinstance(d, Mapping):
+            continue
+        # Drop ComposeWithSkillAction at the wrapper (LD3).
+        if d.get("kind") == "ComposeWithSkillAction":
+            continue
+        try:
+            action = _decode_action_from_dict(d)
+        except (ValueError, ParseError):
+            continue
+        # Belt-and-braces: reject ComposeWithSkillAction by isinstance even
+        # if the LLM mislabeled the kind.
+        if isinstance(action, ComposeWithSkillAction):
+            continue
+        if _dry_run_apply_action_safely(seed_plan, action) is None:
+            continue
+        logit = d.get("logit", 0.0)
+        if not isinstance(logit, (int, float)) or isinstance(logit, bool):
+            continue
+        surviving.append((action, float(logit)))
+        raw_logits.append(float(logit))
+
+    priors = _softmax_normalize(raw_logits)
+    return tuple(
+        (act, prior)
+        for (act, _logit), prior in zip(surviving, priors, strict=True)
+    )
+
+
+def _make_branch_expander(coder: "Coder") -> LLMExpander:
+    """Construct an `LLMExpander` whose provider routes through :llm/call.
+
+    LD3 invariant: every expander invocation becomes ONE :llm/call audit
+    datom on the canonical chain (under the iteration's :mcts/iteration
+    provenance group). The provider closure builds the request shape
+    `{model, messages, tools}` per `_session.py:134-139` (NOT
+    `{system, messages, tools, response_format}` — those keys aren't
+    part of the actual :llm/call dispatch).
+
+    LD2 invariant: the dry-run wrapper rejects proposals whose
+    apply_action result would fail validate_plan_for_2_3a (the same
+    validator the post-search winner is executed under).
+    """
+
+    def provider(plan: Node, k: int) -> Sequence[tuple[Action, float]]:
+        plan_edn = unparse(plan)
+        request = {
+            "model": coder.model,
+            "messages": [
+                {"role": "system", "content": _BRANCH_EXPANDER_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Seed plan EDN:\n{plan_edn}\n\n"
+                        f"Propose up to k={k} structural Actions."
+                    ),
+                },
+            ],
+            "tools": [EMIT_BRANCH_PROPOSAL_TOOL_SCHEMA],
+        }
+        response = coder.substrate.effect.perform(":llm/call", request)
+        return _parse_expander_tool_response(response, plan)
+
+    return LLMExpander(provider=provider)
 
 
 def _escalate_branch_body(coder: "Coder", decision: "LLMDecision") -> None:

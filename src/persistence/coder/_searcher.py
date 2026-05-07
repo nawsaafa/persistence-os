@@ -139,13 +139,88 @@ def _validate_seed_plan_for_2_3b(plan: Node) -> None:
     validate_plan_for_2_3a(plan)
 
 
-def _resolve_mcts_config(payload: Mapping[str, Any]) -> MCTSConfig:
-    """Stage 4: payload-override resolution + bounds enforcement.
+#: Numeric MCTSConfig fields the bridge accepts in payload override.
+#: Other fields (`simple_regret_threshold`, `simple_regret_window`,
+#: `wall_clock_budget_ms`, `seed`) are NOT exposed via payload — caller
+#: would need to subclass the bridge to tune them, which 2.4a will
+#: address. Keep the surface narrow.
+_PAYLOAD_OVERRIDABLE_FIELDS: frozenset[str] = frozenset({
+    "max_iter",
+    "expander_k",
+})
 
-    Stub for T3 — minimal implementation returns the bridge default.
-    T3 fills in the dict-merge + bool-numeric rejection + bounds check.
+#: Per-field bounds checks. Keys MUST be subset of _PAYLOAD_OVERRIDABLE_FIELDS.
+_FIELD_CAPS: Mapping[str, int] = {
+    "max_iter": MAX_BRANCH_MAX_ITER,
+    "expander_k": MAX_BRANCH_EXPANDER_K,
+}
+
+
+def _resolve_mcts_config(payload: Mapping[str, Any]) -> MCTSConfig:
+    """Stage 4: resolve effective MCTSConfig from optional payload override.
+
+    Algorithm:
+        1. If `payload["mcts_config"]` is absent -> return branch-bridge default.
+        2. If present, must be a Mapping. Otherwise -> BranchPayloadValidation.
+        3. For each key in the override mapping:
+            a. Key must be in _PAYLOAD_OVERRIDABLE_FIELDS. Otherwise reject.
+            b. Value must NOT be bool (FD2: MCTSConfig.__post_init__ rejects
+               with ValueError; we coerce to BranchPayloadValidation here for
+               uniform error contract).
+            c. Value must be int (the caps are int caps; floats coerce
+               unexpectedly under MCTSConfig.__post_init__).
+            d. Value must be > 0 AND <= field cap.
+        4. Build new MCTSConfig via `dataclasses.replace`.
+
+    LD6: `max_iter <= MAX_BRANCH_MAX_ITER` (50); `expander_k <=
+    MAX_BRANCH_EXPANDER_K` (4); both > 0 (positivity is also enforced
+    by MCTSConfig.__post_init__ but we surface the BranchPayloadValidation
+    contract here BEFORE construction).
     """
-    return _BRANCH_BRIDGE_DEFAULT_CONFIG
+    raw = payload.get("mcts_config")
+    if raw is None:
+        return _BRANCH_BRIDGE_DEFAULT_CONFIG
+    if not isinstance(raw, Mapping):
+        raise BranchPayloadValidation(
+            field="mcts_config",
+            reason=f"expected dict/mapping, got {type(raw).__name__}",
+        )
+
+    overrides: dict[str, int] = {}
+    for k, v in raw.items():
+        if k not in _PAYLOAD_OVERRIDABLE_FIELDS:
+            raise BranchPayloadValidation(
+                field=f"mcts_config.{k}",
+                reason=(
+                    f"unsupported field; only "
+                    f"{sorted(_PAYLOAD_OVERRIDABLE_FIELDS)} are payload-overridable"
+                ),
+            )
+        # FD2: bool BEFORE int (`isinstance(True, int) is True`).
+        if isinstance(v, bool):
+            raise BranchPayloadValidation(
+                field=f"mcts_config.{k}",
+                reason=f"bool not allowed (got {v!r}); must be a positive int",
+            )
+        if not isinstance(v, int):
+            raise BranchPayloadValidation(
+                field=f"mcts_config.{k}",
+                reason=f"expected int, got {type(v).__name__}",
+            )
+        if v <= 0:
+            raise BranchPayloadValidation(
+                field=f"mcts_config.{k}",
+                reason=f"must be > 0, got {v}",
+            )
+        cap = _FIELD_CAPS[k]
+        if v > cap:
+            raise BranchPayloadValidation(
+                field=f"mcts_config.{k}",
+                reason=f"exceeds 2.3b cap (max {cap}, got {v})",
+            )
+        overrides[k] = v
+
+    return replace(_BRANCH_BRIDGE_DEFAULT_CONFIG, **overrides)
 
 
 def _escalate_branch_body(coder: "Coder", decision: "LLMDecision") -> None:

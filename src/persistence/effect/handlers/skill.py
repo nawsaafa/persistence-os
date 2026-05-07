@@ -48,6 +48,23 @@ Forced spec deviations vs T1 spec:
        per LD1 / LD2 spec — the substrate encodes returns into
        ``:act/result.result_summary`` and downstream code reads them
        symmetrically.
+  FD-T8.1 (T8 re-export discovery): ``persistence.plan`` cannot be
+       imported at module load time without breaking the import graph.
+       ``persistence.effect.handlers/__init__.py`` is loaded eagerly
+       by ``persistence.effect._audit_stack`` (which imports
+       ``handlers.audit``); a top-level ``from persistence.plan import
+       ...`` here triggers ``persistence.plan._promotion`` which itself
+       imports ``persistence.effect.datom_to_audit_entry`` —
+       circular. Resolution: lazy-import ``persistence.plan``
+       (``SkillLibrary``, ``parse``, ``unparse``, ``ParseError``) at
+       FUNCTION-CALL time inside ``make_skill_handler`` and the
+       clause closures. Mirrors 2.3a ``_planner.py`` lazy-import of
+       ``_session._summarize_result`` and 2.3b ``Coder._escalate_branch``
+       lazy-import of ``_searcher._escalate_branch_body``. The
+       ``SkillLibrary`` parameter annotation on the factory uses a
+       string forward-reference under ``from __future__ import
+       annotations`` (PEP 563 deferred evaluation) so no runtime
+       import is needed for the type hint.
 
 References:
   docs/plans/2026-05-07-phase-2.3c.1-skill-library-design.md §§ LD1-LD5
@@ -57,11 +74,14 @@ References:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from persistence.effect.runtime import Handler
-from persistence.plan import SkillLibrary, parse, unparse
-from persistence.plan._errors import ParseError
+
+if TYPE_CHECKING:
+    # FD-T8.1: type-checking-only imports avoid the runtime circular
+    # import via persistence.plan._promotion → persistence.effect.
+    from persistence.plan import SkillLibrary
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +240,14 @@ def make_skill_handler(
         Handler ``name`` for the runtime; default ``"skill"``. Visible
         to ``mask(name)`` callers.
     """
+    # FD-T8.1: lazy-import persistence.plan symbols inside the factory
+    # body to break the circular import via persistence.plan._promotion
+    # -> persistence.effect.datom_to_audit_entry. Imports happen ONCE per
+    # make_skill_handler() call (which is once per Substrate); the
+    # closures capture parse/unparse/ParseError by name. Mirrors the 2.3a
+    # / 2.3b lazy-import precedent.
+    from persistence.plan import parse, unparse
+    from persistence.plan._errors import ParseError
 
     def _skill_define_clause(
         args: dict[str, Any],

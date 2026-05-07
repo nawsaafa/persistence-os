@@ -1,5 +1,304 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.3c.1 — 2026-05-07 (Skill library coder integration — `:skill/define` + `:skill/lookup` audit-anchored ops)
+
+Phase 2.3c.1 ships TWO new audit-wrapped substrate effect ops
+(`:skill/define`, `:skill/lookup`), wires them into the coder's plan
+escalation path as registered leaf tags, and proves the full
+define → lookup → inline-execute round-trip under the canonical audit
+chain via a load-bearing G4 end-to-end test. The substrate-side
+`SkillLibrary` (357 LOC at `src/persistence/plan/_skill_library.py`)
+and the `s.plan.skill_library(db)` factory ALREADY shipped in Phase
+2.0c-prime; 2.3c.1 is the bridge layer that lets the coder demo
+register Plan AST subtrees as skills under audit accountability and
+recall them procedurally as `:plan-edn` strings to splice into
+subsequent plans.
+
+This is the FIRST half of the 2.3c skill-system rollout. Per the
+2.3c kickoff codex consensus pass, 2.3c.1 ships **define + procedural
+recall** only — `:llm/call` recursion, `ComposeWithSkillAction`
+proposal acceptance in the MCTS expander (lifting 2.3b's FD7
+rejection), and any RUNTIME skill resolution at the dispatcher level
+are all deferred to 2.3c.2. The 2.3c.1 model is a "data-flow
+demonstration" that registered skill content survives a round-trip
+through fact-store + canonical audit chain + plan execution under
+coder control.
+
+### Locked decisions (LD0–LD7) — design ARIS R1.2 lite PASS (mean 7.80 / min 7.2, hard-mode + W3 honest-rescope per CLAUDE.md 2.0d-at-6.4 precedent)
+
+- **LD0 — SCOPE**: define + procedural recall, NO runtime resolution,
+  NO recursion, NO MCTS interaction. The coder uses the new ops via
+  standard Plan AST leaves emitted in `kind="plan"` decisions. Skill
+  RESOLUTION is procedural — `:skill/lookup` returns the skill's Plan
+  EDN as a substantive-return result; the coder inlines the EDN
+  content into a subsequent `plan_edn` payload. NO dispatcher-level
+  magic substitution, NO `:skill/compose` Plan AST primitive.
+- **LD1 — `:skill/define` op shape (R0-fold B1)**: new audit-wrapped
+  substantive-return op. The handler factory takes an INJECTED
+  `SkillLibrary` instance (singleton-scoped to the Substrate), NOT
+  one constructed per call. Per-call construction would yield empty
+  `_plans` / `_records` caches on every fresh instance; cross-call
+  `lookup` would always return `None`. The factory pattern matches
+  `make_fs_handler` and `make_callable_llm_handler` precedents.
+  Public return is `{":skill-id", ":plan-id"}`.
+- **LD2 — `:skill/lookup` op shape (R0-fold B1)**: same pattern as
+  LD1 — handler closes over the SAME injected `SkillLibrary`
+  singleton. Public return is `{":plan-edn", ":promotion-id",
+  ":plan-id"}`. The Plan AST `Node` itself is NOT returned — the
+  coder receives a STRING it can splice byte-identically into
+  subsequent `plan_edn` payloads. Splice-verbatim discipline is
+  enforced by content-addressing (G4(h) parametrized falsifiability).
+- **LD3 — `_PromotionRecordStub`**: minimal in-coder fabrication
+  satisfying `_PromotionRecordLike` structurally
+  (`@dataclass(frozen=True, slots=True)` with `promotion_id: str`).
+  Invariant boundary (R0-fold I1): `promotion_id` is OPAQUE
+  PROVENANCE only. 2.3c.1 makes NO correctness claim about
+  promotion. A7's `PromotionRecord` integration is queued for
+  v0.9.x. The `_PromotionRecordStub` is intentionally NOT
+  re-exported (private; leading-underscore symbol).
+- **LD4 — Failure modes mirror 2.3a LD4**: 3 new error classes in
+  `handlers/skill.py`:
+  - `SkillNotFound(ValueError)` — `:skill/lookup` on unregistered id
+  - `SkillDefineValidation(ValueError)` — `:skill/define` arg-shape
+    failure (missing/wrong-type fields, unparseable `:plan-edn`)
+  - `SkillLookupValidation(ValueError)` — `:skill/lookup` arg-shape
+    failure (missing/wrong-type `:skill-id`)
+  Native traceback inheritance is queued v0.9.x per 2.3a LD4 W3
+  rescope (`__cause__ is None` G6 acceptance signal flips when fix
+  lands).
+- **LD5 — Audit chain shape (R0-fold B3)**: both ops appended to
+  `CANONICAL_AUDIT_WRAPPED_OPS`; NEITHER appended to
+  `CANONICAL_AUDIT_RAW_OPS` (both are substantive-return; the
+  bottom-of-stack handler is the actual side-effect site, mirrors
+  2.2a `:fs/read` pattern). Threading invariant verified at
+  design-time: `DB.transact` returns a NEW DB bound to the SAME
+  underlying store; the underlying store mutation propagates
+  automatically without rebinding `ctx.substrate._db`. The
+  injected SkillLibrary singleton (LD1) ensures the library's own
+  `_db` view stays current across calls. 5-case failure-mode
+  taxonomy (A handler arg validation, B parse failure, C register
+  raise, D happy path, E AuditEntry emission failure post-handler-
+  return — Case E is THEORETICALLY POSSIBLE but no concrete
+  in-scope path; recovery contract is ASPIRATIONAL, queued v0.9.x).
+  Idempotent re-define ordering invariant: ZERO additional fact
+  datoms, ONE fresh AuditEntry (call event IS the audit signal,
+  not the fact-state delta — mirrors 2.2a `:fs/read` semantics).
+- **LD6 — `REGISTERED_LEAF_TAGS` extension (R0-fold I2)**: 2 new
+  tags appended to the closed set in `_planner.py`, taking it from
+  10 → 12 ops. `_register_substrate_handlers` is a loop over the
+  constant so the new ops auto-wire without further edits to the
+  function body. Single-source-of-truth verified at design-time:
+  only 3 reference points (definition, `__all__` export, runtime
+  check inside `_check_nodes_recursive`) — no duplicate tag list
+  introduced anywhere.
+- **LD7 — SUBSTRATE-PREREQS: NONE.** All four SDK touchpoints
+  (`s.plan.skill_library`, `s.plan.execute`, `s.fact.transact`,
+  `s.effect.perform`) ship today. Zero substrate-prereq tasks.
+
+### Forced spec deviations
+
+1. **FD1** (T1, anticipated in design § 5; CONFIRMED at impl) —
+   handler arg keys are BARE strings (no leading colon).
+   `args["plan-edn"]`, `args["promotion-id"]`, `args["registered-at-ms"]`,
+   `args["skill-id"]`. The EDN parser at `_parse.py:67-73` converts
+   `{:plan-edn "..."}` map-keys to plain strings BEFORE the
+   dispatcher adapter at `_planner.py:303` calls
+   `substrate.effect.perform(tag, dict(node.attrs))`. Same convention
+   as `fs.py:33` (`args["path"]`). Public RETURN map preserves
+   keyword-form keys (`":skill-id"` etc.) per LD1 / LD2 spec.
+2. **FD3** (T1, anticipated in design § 5; CONFIRMED at impl) —
+   `parse(plan_edn, strict=False)` per LD1; required because skills
+   can have arbitrary leaf tags outside 2.3a's closed 10-op set.
+   `ParseError` is caught and wrapped in
+   `SkillDefineValidation(field="plan-edn")` so the failure
+   surfaces as a typed validation error in the plan-execution
+   failure path. Bool numerics are rejected before the
+   `registered-at-ms` int validation (Python's `bool` is an `int`
+   subclass; allowing them would let `True`/`False` slip into the
+   `skill/registered-at` fact datom).
+3. **FD-T5.1** (T5) — `AuditEntry.op` keeps the leading colon
+   (`":skill/define"`, not `"skill/define"`). `AuditEntry.__post_init__`
+   at `audit.py:103-107` rejects non-leading-colon ops. Filter
+   `e.op == ":skill/define"` exactly.
+4. **FD-T5.2** (T5) — `s.effect.perform(op, args)` requires `args`
+   as a positional dict, NOT `**kwargs`. The bare arg keys
+   (`"plan-edn"`, `"promotion-id"`, `"registered-at-ms"`,
+   `"skill-id"`) contain hyphens — invalid Python identifiers — so
+   kwarg expansion fails with `TypeError: Runtime.perform() got an
+   unexpected keyword argument 'plan-edn'`. The Plan AST
+   dispatcher path at `_planner.py:303` already uses positional
+   dicts (`substrate.effect.perform(tag, dict(node.attrs))`), so
+   this matches production routing.
+5. **FD-T6.1** (T6) — LD0 terminal mode-switch means a single
+   `coder.run()` processes ONE plan decision then returns
+   immediately (per `_session.py:77-79` early-return contract).
+   The G4 "3-iter scripted scenario" is realized via THREE
+   sequential `coder.run()` calls on the SAME Substrate — the
+   fact-store + closed-over `SkillLibrary` singleton persist
+   across calls. Each `run()` consumes ONE scripted LLM decision
+   before the plan-escalation exit.
+6. **FD-T7.G6.4** (T7) — CPython 3.12 frozen+slots dataclass
+   fresh-attribute assignment raises `TypeError` BEFORE the
+   `FrozenInstanceError` check fires. The G6 negative test for
+   `_PromotionRecordStub` immutability accepts
+   `(FrozenInstanceError, AttributeError, TypeError)` rather than
+   pinning to `FrozenInstanceError` alone.
+7. **FD-T8.1** (T8, NEWLY DISCOVERED at re-export wiring) —
+   `persistence.plan` cannot be imported at module load time from
+   `handlers/skill.py` without breaking the import graph.
+   `persistence.effect.handlers/__init__.py` is loaded eagerly by
+   `persistence.effect._audit_stack` (which imports
+   `handlers.audit`); a top-level
+   `from persistence.plan import SkillLibrary, parse, unparse` here
+   triggers `persistence.plan._promotion` which itself imports
+   `persistence.effect.datom_to_audit_entry` — circular.
+   Resolution: lazy-import `persistence.plan` symbols (`parse`,
+   `unparse`, `ParseError`) inside the `make_skill_handler`
+   factory body. The `SkillLibrary` parameter annotation uses a
+   string forward-reference under `from __future__ import
+   annotations` (PEP 563 deferred evaluation) so no runtime import
+   is needed for the type hint. Mirrors the 2.3a `_planner.py`
+   lazy-import of `_session._summarize_result` and 2.3b
+   `Coder._escalate_branch` lazy-import of
+   `_searcher._escalate_branch_body`.
+
+### Test surface
+
+Six new test files under `tests/coder/`, all green:
+
+- `test_skill_define_op.py` — G1 `:skill/define` op semantics
+  (happy / idempotent / arg validation): 8 cases.
+- `test_skill_lookup_op.py` — G2 `:skill/lookup` op semantics
+  (happy / not-found / arg validation): 5 cases.
+- `test_skill_audit_chain.py` — G3 audit chain integration
+  (handler.wraps shape, prev-hash linkage, define→lookup chain
+  spans both new ops, idempotent re-define emits FRESH AuditEntry
+  with ZERO new fact datoms, negative-path SkillNotFound
+  propagation): 6 cases.
+- `test_skill_end_to_end_g4.py` — **G4 LOAD-BEARING** end-to-end
+  define → lookup → inline-execute round-trip; parametrized
+  verbatim/perturbed iter-3 splice; dedicated G4(g)
+  idempotent-re-define-in-coder-loop case: 3 parametrized cases
+  total. Per design § 4 codex consensus — without G4 passing, the
+  registry-CRUD tests can pass while semantic invariants (audit
+  anchoring, splice determinism, store identity) ship broken.
+- `test_skill_planner_integration.py` — G5 planner integration
+  (`REGISTERED_LEAF_TAGS == 12-tag set`, `_register_substrate_handlers`
+  call-count spy at exactly 12, single-source-of-truth no
+  duplicate hardcoded list outside the constant): 6 cases.
+- `test_skill_negative_g6.py` — G6 negative tests (each error
+  class raises in expected scenario; `LeafResult.error_repr`
+  populated correctly; `PlanExecutionFailed` propagates): 6 cases.
+
+Plus 1 modified test file: `tests/coder/test_planner_validate.py`
+— the 2.3a-era `REGISTERED_LEAF_TAGS` closed-set drift-pin
+extended in lockstep from 10 → 12 (T3).
+
+**G4 is the load-bearing gate** per codex consensus. Falsifiability
+assertion classes:
+- (f) Full-payload datom match: 3 `skill/*` fact datoms with EXACT
+  `(a, v, op)` triples — `("skill/plan", iter_1_plan_id, "assert")`,
+  `("skill/promotion-record", input_promotion_id, "assert")`,
+  `("skill/registered-at", input_registered_at_ms, "assert")`.
+  Blocks the "writes 3 junk datoms while serving correct lookups
+  from a separate cache" sophisticated-bug class.
+- (g) Idempotent re-define mutation test: re-emit `:skill/define`
+  with byte-identical args; assert `skill/*` fact-datom count
+  unchanged AND AuditEntry count +1 AND same `skill_id` returned.
+- (h) Splice byte-determinism (parametrized): verbatim case asserts
+  `parse(iter_3).id == iter_1_plan_id`; perturbed case (1-byte path
+  flip) asserts `parse(iter_3).id != iter_1_plan_id`. Empirically
+  confirmed: `9b9e7b09... != a59a58bb...`.
+- (i) Store-identity invariant: `id(s._db.store) ==
+  id(skill_lib._db.store)` checked after EACH iter (R1-fold I1 —
+  catches accidental fork/branch leak).
+
+Suite delta: 2528 → 2562 (+34 net new tests across 6 new files +
+1 modified drift-pin). All 262 coder tests pass; full effect
+suite (384 passed) regression-free post lazy-import fix.
+
+### v0.9.x rescopes queued (per design § 8 W3 honest-rescope)
+
+The R1.2 lite PASS at mean **7.80 / min 7.2** is below the standard
+ARIS soft-mode threshold (mean ≥ 8.0 / min ≥ 7.5). This is a
+hard-mode PASS via the W3 honest-rescope pattern (CLAUDE.md
+2.0d-at-6.4 precedent). All in-scope findings are closed; the
+following residuals are queued with falsifiable acceptance signals:
+
+1. **Case E recovery** (LD5) — AuditEntry emission failure AFTER
+   successful handler return is THEORETICALLY POSSIBLE but no
+   concrete in-scope path. The "reconstruct missing AuditEntry
+   from durable datoms" recovery contract is ASPIRATIONAL.
+   Queued for v0.9.x failure-injection track alongside concrete
+   recovery mechanism.
+2. **A7 `PromotionRecord` integration** (LD3) — `_PromotionRecordStub`
+   is OPAQUE PROVENANCE only; A7's full `PromotionRecord` (when
+   shipped) MAY reject or ignore skills registered via the stub.
+   Queued for v0.9.x.
+3. **Multi-process define-races** (LD1 R0-fold I3) —
+   `SkillLibrary.register`'s check-then-transact has no
+   uniqueness constraint at the fact-store level. Single-process
+   coder execution serializes calls; multi-process registration
+   needs a uniqueness query primitive. Queued for v0.9.x.
+4. **Store-identity-keyed SkillLibrary registry** (LD1 R1-fold I1)
+   — multi-store coder operations (`s.txn.fork`, `DB.branch`,
+   isolated-branch fold) would silently bind SkillLibrary to a
+   stale store. G4(i) static-invariant assertion catches the leak
+   today; future fork/branch use needs handler-side detection +
+   re-binding via store-identity-keyed registry. Queued for v0.9.x.
+5. **Production CLI wiring of `make_skill_handler`** — mirrors
+   2.2b's deferral pattern for fs/shell/code/git CLI wiring.
+   `make_skill_handler(skill_lib)` installed via
+   `s.effect.install_handler(handler, position="bottom")` at
+   coder boot. Tests use isolated `Substrate.open("memory")`
+   fixtures matching 2.2a precedent (`test_loop_replay.py:137`).
+   Queued for 2.4a.
+
+### Module layout
+
+NEW:
+- `src/persistence/effect/handlers/skill.py` (~300 LOC including
+  T8 lazy-import comments)
+- 6 test files (~1300 LOC total)
+
+MODIFIED:
+- `src/persistence/effect/_audit_stack.py` (+5 — `:skill/define` +
+  `:skill/lookup` appended to `CANONICAL_AUDIT_WRAPPED_OPS`; T2)
+- `src/persistence/effect/handlers/__init__.py` (+10 —
+  `make_skill_handler`, `SkillNotFound`, `SkillDefineValidation`,
+  `SkillLookupValidation` re-exports; T8)
+- `src/persistence/coder/_planner.py` (+14 / -2 —
+  `REGISTERED_LEAF_TAGS` extended 10 → 12, docstring update from
+  "10 ops" to "12 ops"; T3)
+- `src/persistence/coder/_prompt.py` (+~50 — `_SKILL_GUIDANCE`
+  prompt section + `_PLAN_EDN_GUIDANCE` 12-tag listing; T4)
+- `tests/coder/test_planner_validate.py` (+5 / -3 — drift-pin
+  rename + 2 new tags in expected frozenset; T3)
+- `src/persistence/effect/handlers/audit.py` — UNTOUCHED at
+  module level; the `audit/<keyword>` datom encoding handles the
+  new `:skill/define` and `:skill/lookup` ops via the existing
+  `/ → .` transformation.
+
+### Implementer pattern (hybrid per 2.3c kickoff codex consensus)
+
+Persistent semantic owner across the phase (T1, T3, T5, T6, T8)
++ per-task fresh sessions for isolated tickets (T2, T4, T7).
+Total subagent dispatches: ~9-12 (1 persistent-implementer reused
+across T1/T3/T5/T6/T8 + per-task-fresh dispatches for T2/T4/T7
++ 6 codex passes for design ARIS R0/R0-fold/R1/R1-fold/R1.1
+lite/R1.1-fold/R1.2 lite). FD-T8.1 (lazy-import circular fix)
+discovered LATE at T8 re-export wiring; closed in-task without
+re-spec-review.
+
+### Critical-path next
+
+**2.3c.2** (`:llm/call` recursion + `ComposeWithSkillAction`
+proposal acceptance in the MCTS expander, lift 2.3b FD7 rejection;
+depth limit + cycle detection) → 2.3d (REPL pause) → 2.4a-d
+harden → 2.4c lockfile (~Fri 2026-06-12) → `v0.9.0a1` tag (by
+2026-06-14). Phase 2 hard cutoff: 2026-06-05; ~30 days runway.
+Status: WELL UNDER BUDGET.
+
 ## Phase 2.3b — 2026-05-07 (MCTS branch escalation — `_escalate_branch` wired to `_searcher._escalate_branch_body`)
 
 Phase 2.3b fills the `_escalate_branch` stub that 2.3a left with

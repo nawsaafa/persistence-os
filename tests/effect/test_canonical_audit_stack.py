@@ -61,6 +61,8 @@ def test_canonical_audit_stack_covers_phase_2_ops():
         ":fs/read", ":fs/write", ":fs/glob", ":fs/grep", ":shell/exec",
         # Phase 2.2b additions:
         ":code/run", ":git/diff", ":git/status", ":git/log", ":git/commit",
+        # Phase 2.3c.1 additions:
+        ":skill/define", ":skill/lookup",
     }
     assert set(CANONICAL_AUDIT_WRAPPED_OPS) == expected_wrapped
 
@@ -76,3 +78,11 @@ def test_canonical_audit_stack_covers_phase_2_ops():
     new_ops_2_2b = {":code/run", ":git/diff", ":git/status", ":git/log", ":git/commit"}
     assert not (new_ops_2_2b & set(CANONICAL_AUDIT_RAW_OPS)), \
         ":code/run and :git/* ops MUST NOT be in CANONICAL_AUDIT_RAW_OPS"
+
+    # Phase 2.3c.1: :skill/define + :skill/lookup are substantive-return
+    # (define returns {:skill-id, :plan-id}; lookup returns
+    # {:plan-edn, :promotion-id, :plan-id}). Bottom-of-stack handler
+    # installed separately via s.effect.install_handler(..., position="bottom").
+    new_ops_2_3c_1 = {":skill/define", ":skill/lookup"}
+    assert not (new_ops_2_3c_1 & set(CANONICAL_AUDIT_RAW_OPS)), \
+        ":skill/* ops MUST NOT be in CANONICAL_AUDIT_RAW_OPS (substantive-return per LD5)"

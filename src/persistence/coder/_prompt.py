@@ -22,7 +22,8 @@ When emitting kind="plan", the payload["plan_edn"] field carries an \
 EDN-formatted plan (s.plan.parse-compatible canonical EDN). Constraints:
 - Root MUST be :seq. No other root kinds at this phase.
 - Leaves MUST be one of: :fs/read, :fs/write, :fs/glob, :fs/grep, \
-:shell/exec, :code/run, :git/diff, :git/status, :git/log, :git/commit.
+:shell/exec, :code/run, :git/diff, :git/status, :git/log, :git/commit, \
+:skill/define, :skill/lookup.
 - NO bare :branch or bare :code leaves — these are plan-spec primitives \
 reserved for later phases (MCTS branch in 2.3b, sandboxed code execution \
 in v0.2). The :code/run leaf in the registered list above is a different \
@@ -36,6 +37,39 @@ Examples:
 
 (2) Grep then commit:
 [:seq {} [:fs/grep {:pattern "TODO" :path "src/"}] [:git/commit {:message "wip"}]]"""
+
+
+_SKILL_GUIDANCE = """\
+Skills are reusable Plan AST fragments registered to a content-addressed \
+library. Two ops let you work with skills directly inside plans:
+
+- :skill/define {:plan-edn "<canonical-EDN>" :promotion-id "<opaque-id>" \
+:registered-at-ms <int>} — registers the inner plan_edn as a skill. \
+Returns {:skill-id "<skill/abc...>" :plan-id "<32-hex>"}. Re-defining the \
+SAME plan content is idempotent (zero new fact-store datoms; same skill_id \
+returned). The :skill-id is content-addressed: identical Plan ASTs always \
+hash to the same skill_id.
+
+- :skill/lookup {:skill-id "<skill/abc...>"} — retrieves a previously \
+registered skill. Returns {:plan-edn "<canonical-EDN>" :promotion-id "<...>" \
+:plan-id "<32-hex>"}. Raises if the skill_id is not registered.
+
+When to use:
+- :skill/define after completing a generalizable sub-task whose Plan AST \
+you might want to reuse (e.g. a "lint + format + commit" composition).
+- :skill/lookup when facing a similar sub-task; splice the returned \
+:plan-edn VERBATIM into a subsequent plan to reuse the registered logic.
+
+Procedural recall pattern (this is the only skill-use mode in 2.3c.1; \
+runtime composition + LLM-call recursion ship in 2.3c.2):
+  iter N    -> :skill/define registers a skill, returns :skill-id
+  iter N+M  -> :skill/lookup retrieves the :plan-edn for that :skill-id
+  iter N+M+1-> emit a new plan that splices the looked-up :plan-edn as a \
+sub-tree (byte-identically — content-addressing depends on it)
+
+Constraint: :promotion-id is OPAQUE provenance only. 2.3c.1 makes NO \
+promotion-validity claims; A7 PromotionRecord (queued for v0.9.x) MAY \
+later reject skills registered this way."""
 
 
 _BRANCH_EDN_GUIDANCE = """\
@@ -69,7 +103,7 @@ EMIT_DECISION_TOOL_SCHEMA: dict[str, Any] = {
         "kind='act' for a single tool invocation; kind='plan' for a multi-step "
         "composition; kind='branch' if you are uncertain and want the agent to "
         "fork-and-explore. confidence is in [0.0, 1.0]; values below 0.65 trigger "
-        "branch escalation. " + _PLAN_EDN_GUIDANCE
+        "branch escalation. " + _PLAN_EDN_GUIDANCE + "\n\n" + _SKILL_GUIDANCE
     ),
     "input_schema": {
         "type": "object",

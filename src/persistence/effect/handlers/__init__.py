@@ -15,6 +15,12 @@ from persistence.effect.handlers.shell import (  # noqa: F401
 )
 from persistence.effect.handlers.code import make_code_run_dispatch_handler  # noqa: F401
 from persistence.effect.handlers.git import make_git_handler, GitArgValidation  # noqa: F401
+from persistence.effect.handlers.skill import (  # noqa: F401
+    make_skill_handler,
+    SkillDefineValidation,
+    SkillLookupValidation,
+    SkillNotFound,
+)
 
 __all__ = [
     "make_callable_llm_handler",
@@ -31,4 +37,10 @@ __all__ = [
     "make_code_run_dispatch_handler",
     "make_git_handler",
     "GitArgValidation",
+    # Phase 2.3c.1 — skill library coder integration. _PromotionRecordStub
+    # is intentionally NOT re-exported (private; see handlers/skill.py LD3).
+    "make_skill_handler",
+    "SkillNotFound",
+    "SkillDefineValidation",
+    "SkillLookupValidation",
 ]

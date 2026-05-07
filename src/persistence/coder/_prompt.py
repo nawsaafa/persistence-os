@@ -232,3 +232,36 @@ Constraints:
 
 Return proposals via the `emit_branch_proposals` tool.
 """
+
+
+#: Phase 2.3b — JSON-mode contract for `LLMJudgeEvaluator.provider`.
+#: One tool-use call per evaluation; the response carries a single
+#: `score` field in [0.0, 1.0]. Out-of-range values are clamped at the
+#: bridge layer rather than raised (avoid spurious EvaluatorContractError
+#: for off-by-epsilon JSON parsing).
+EMIT_BRANCH_SCORE_TOOL_SCHEMA: dict = {
+    "name": "emit_branch_score",
+    "description": (
+        "Score the given plan in [0.0, 1.0]. Higher = more likely to "
+        "achieve the goal. The bridge clamps out-of-range values."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "score": {"type": "number"},
+        },
+        "required": ["score"],
+    },
+}
+
+
+_BRANCH_EVALUATOR_SYSTEM_PROMPT: str = """\
+You are the EVALUATOR of a Monte-Carlo tree search over a Plan AST.
+
+Given a candidate plan, return a SINGLE score in [0.0, 1.0] estimating
+how likely this plan, if executed, will achieve the user's goal.
+
+Higher = more likely. Use the full range; don't cluster around 0.5.
+
+Return the score via the `emit_branch_score` tool.
+"""

@@ -38,13 +38,15 @@ from persistence.coder._planner import (
 from persistence.coder._planner_errors import PlanPayloadValidation
 from persistence.coder._prompt import (
     EMIT_BRANCH_PROPOSAL_TOOL_SCHEMA,
+    EMIT_BRANCH_SCORE_TOOL_SCHEMA,
+    _BRANCH_EVALUATOR_SYSTEM_PROMPT,
     _BRANCH_EXPANDER_SYSTEM_PROMPT,
 )
 from persistence.coder._searcher_errors import (
     BranchPayloadValidation,
     BranchSearchFailed,
 )
-from persistence.plan import LLMExpander, Node, parse, unparse
+from persistence.plan import LLMExpander, LLMJudgeEvaluator, Node, parse, unparse
 from persistence.plan._errors import ParseError
 from persistence.plan._mcts import (
     Action,
@@ -411,6 +413,59 @@ def _make_branch_expander(coder: "Coder") -> LLMExpander:
         return _parse_expander_tool_response(response, plan)
 
     return LLMExpander(provider=provider)
+
+
+def _parse_evaluator_tool_response(response: Mapping[str, Any]) -> float:
+    """Parse :llm/call tool-use response → clamped float score.
+
+    Out-of-range / missing / non-numeric -> 0.0 (engine treats as "no
+    signal", not a contract violation — `0.0` is finite per
+    `_mcts.py:1069` `_is_finite_score` and accepted as a valid score).
+    Bool-isinstance check FIRST (FD2 — `isinstance(True, int) is True`
+    would let JSON true/false coerce to 1.0/0.0 silently otherwise).
+    """
+    tool_calls = response.get("tool_calls", [])
+    if not tool_calls:
+        return 0.0
+    raw = tool_calls[0].get("input", {}).get("score")
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return 0.0
+    score = float(raw)
+    if score < 0.0:
+        return 0.0
+    if score > 1.0:
+        return 1.0
+    return score
+
+
+def _make_branch_evaluator(coder: "Coder") -> LLMJudgeEvaluator:
+    """Construct an `LLMJudgeEvaluator` whose provider routes through :llm/call.
+
+    LD3: every evaluator invocation becomes ONE :llm/call audit datom
+    on the canonical chain (under the iteration's :mcts/iteration
+    provenance group).
+
+    FD4: LLMJudgeEvaluator.provider signature is `Callable[[Node],
+    float]` (single positional arg).
+    """
+
+    def provider(plan: Node) -> float:
+        plan_edn = unparse(plan)
+        request = {
+            "model": coder.model,
+            "messages": [
+                {"role": "system", "content": _BRANCH_EVALUATOR_SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": f"Plan EDN:\n{plan_edn}\n\nReturn a score in [0.0, 1.0].",
+                },
+            ],
+            "tools": [EMIT_BRANCH_SCORE_TOOL_SCHEMA],
+        }
+        response = coder.substrate.effect.perform(":llm/call", request)
+        return _parse_evaluator_tool_response(response)
+
+    return LLMJudgeEvaluator(provider=provider)
 
 
 def _escalate_branch_body(coder: "Coder", decision: "LLMDecision") -> None:

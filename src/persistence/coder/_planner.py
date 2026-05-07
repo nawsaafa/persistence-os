@@ -79,14 +79,22 @@ MAX_PLAN_NODES: int = 64
 #: Stage 3 plan-depth budget — design § LD6.
 MAX_PLAN_DEPTH: int = 4
 
-#: 10 substrate ops registered as plan-leaf handlers per LD5.
+#: 12 substrate ops registered as plan-leaf handlers per LD5 (was 10
+#: in 2.3a/2.3b; Phase 2.3c.1 LD6 appended :skill/define + :skill/lookup).
 #: Stored as KEYWORD-FORM (with leading colon) to match Node.tag after
 #: EDN parse — `_ast.py:67-103` __post_init__ enforces `tag.startswith(":")`.
 #: FD1: impl plan claimed BARE form; corrected to keyword-form per calibration.
+#: LD6 R0-fold I2: this constant is the SINGLE source of truth for the
+#: closed leaf-tag set — only 3 reference points exist (definition here,
+#: __all__ re-export, _check_nodes_recursive runtime check). No duplicate
+#: tag list anywhere.
 REGISTERED_LEAF_TAGS: frozenset[str] = frozenset({
     ":fs/read", ":fs/write", ":fs/glob", ":fs/grep",
     ":shell/exec", ":code/run",
     ":git/diff", ":git/status", ":git/log", ":git/commit",
+    # Phase 2.3c.1 — skill library coder integration; auto-wired into
+    # _register_substrate_handlers via the loop over REGISTERED_LEAF_TAGS.
+    ":skill/define", ":skill/lookup",
 })
 
 #: Banned leaf tags — keyword-form; would crash walk() per _execute.py:166-170.
@@ -310,7 +318,11 @@ def _register_substrate_handlers(
     dispatcher: Dispatcher,
     substrate: Substrate,
 ) -> None:
-    """Register the 10 LD5 substrate ops as plan-leaf handlers.
+    """Register the 12 LD5 substrate ops as plan-leaf handlers.
+
+    Was 10 ops in 2.3a/2.3b; Phase 2.3c.1 LD6 added :skill/define +
+    :skill/lookup. The body iterates REGISTERED_LEAF_TAGS so the
+    constant extension auto-wires without further edits here.
 
     Per design LD5, the dispatcher is fresh per `_escalate_plan_body`
     invocation, so double-registration cannot occur in normal flow.

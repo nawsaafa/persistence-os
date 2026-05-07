@@ -107,6 +107,16 @@ CANONICAL_AUDIT_WRAPPED_OPS: tuple[str, ...] = (
     ":git/status",
     ":git/log",
     ":git/commit",
+    # Phase 2.3c.1 — skill library coder integration; substantive-return ops
+    # with bottom-of-stack handlers installed separately via
+    # s.effect.install_handler(handler, position="bottom"). Audit middleware
+    # emits :audit/<op> AuditEntry; for :skill/define the 3 fact datoms
+    # (skill/plan, skill/promotion-record, skill/registered-at) are written by
+    # SkillLibrary.register via db.transact BEFORE the AuditEntry — matches
+    # 2.1c.6 fact-write-first / audit-second pattern. NOT added to
+    # CANONICAL_AUDIT_RAW_OPS (substantive return; LD5 design doc).
+    ":skill/define",
+    ":skill/lookup",
 )
 
 

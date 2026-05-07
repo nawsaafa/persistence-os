@@ -1,5 +1,231 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.3b — 2026-05-07 (MCTS branch escalation — `_escalate_branch` wired to `_searcher._escalate_branch_body`)
+
+Phase 2.3b fills the `_escalate_branch` stub that 2.3a left with
+`CoderStubNotImplemented`. When the LLM emits `kind="branch"` with a
+`payload["seed_plan_edn"]` field, the new bridge validates the seed plan
+through a four-stage ingestion pipeline (byte budget →
+`parse(strict=False)` → 2.3a's strict semantic validator
+re-used verbatim → optional `mcts_config` resolution with bool-numeric
+rejection + LD6 bounds), constructs LLM-driven expander + evaluator
+provider closures whose audit datoms route through
+`substrate.effect.perform(":llm/call", ...)`, runs `s.plan.mcts_search`,
+and executes the WINNER once via 2.3a's `_escalate_plan_body`. Losing
+branches are explored as Plan-AST structures only — they NEVER dispatch
+their leaves through the substrate handler stack.
+
+Branch escalation is a TERMINAL mode-switch — `Coder.run()` returns
+immediately after `_escalate_branch_body` via the same early-return
+shape that 2.3a's `_escalate_plan` uses.
+
+### Locked decisions (LD0–LD7) — design ARIS R1.1 PASS (mean 8.16 / min 8.0)
+
+- **LD0 — SCOPE**: MCTS-search drives over Plan-AST structures; the
+  winner executes ONCE via 2.3a's `_escalate_plan_body`. NO execution-
+  time handler dispatch happens during the search itself. Falsifiability
+  pin: the disk-marker test in `tests/coder/test_searcher_search.py::
+  test_only_winner_writes_marker_to_disk` constructs a winner whose
+  plan writes one file and a seed whose plan would write a different
+  file; after `_escalate_branch_body` returns, the file-system contains
+  exactly the winner's file and zero loser files.
+- **LD1 — TRIGGER**: `_should_escalate_branch` returns
+  `decision.kind == "branch"` only. The previous confidence-based half
+  (`or decision.confidence < self.confidence_threshold`) was removed
+  per the LD1 R0 codex finding: a confidence-below-threshold trigger
+  could route a `kind="act"` payload (which carries `{op, args}`) into
+  the branch escalator that expects branch-specific payload contract,
+  creating a type/shape mismatch. Confidence-based escalation is
+  deferred to Phase 2.4a once dogfood calibration data exists.
+- **LD2 — PAYLOAD**: `payload["seed_plan_edn"]` is the canonical EDN
+  string. Stage 3 semantic validation re-uses 2.3a's strict
+  `validate_plan_for_2_3a` verbatim — no looser sibling validator was
+  introduced (R0-fold N1: a looser validator would waste search budget
+  on plans the winner-execution path can't accept). Stage 1 byte budget
+  is `MAX_BRANCH_EDN_BYTES = MAX_PLAN_EDN_BYTES = 8192`. The expander's
+  dry-run wrapper rejects proposals whose `apply_action` result would
+  fail the same validator.
+- **LD3 — EXPANDER + EVALUATOR**: `LLMExpander.provider` and
+  `LLMJudgeEvaluator.provider` closures route through
+  `substrate.effect.perform(":llm/call", ...)` with the actual
+  `_session.py:134-141` request shape `{model, messages, tools}`. NO
+  `system` or `response_format` keys (they are not part of the
+  registered `:llm/call` dispatch). The system message is embedded as
+  `messages[0]` with `role="system"`. JSON-mode is enforced via the
+  `tools` arg. Two new tool-use schemas live in `_prompt.py`:
+  `EMIT_BRANCH_PROPOSAL_TOOL_SCHEMA` (expander) and
+  `EMIT_BRANCH_SCORE_TOOL_SCHEMA` (evaluator). Response parsing +
+  softmax normalization is bridge-side post-processing in
+  `_parse_expander_tool_response` and `_parse_evaluator_tool_response`.
+  `LLMJudgeEvaluator.provider` signature is `Callable[[Node], float]`.
+- **LD4 — FAILURE**: two-path `BranchSearchFailed` funnel.
+  - Path-1 (bubble-out): `mcts_search` raises (`ExpanderContractError`
+    or any raw expander provider exception; per R1-fold I1
+    `PlanDepthExceeded` is engine-caught at `_populate_children`
+    `phase="reject"` and does NOT bubble). The bridge wraps with
+    try/except, emits one `:act/result(op=":mcts/search", error=...)`
+    via `_emit_search_failure_act_result`, and raises
+    `BranchSearchFailed` with `search_id=None`, `iter_count=None`,
+    `terminated_by=None` (search never completed enough to have an id).
+  - Path-2 (post-search detection): `mcts_search` returns cleanly but
+    `MCTSResult.terminated_by == "all_evaluations_failed"`. The bridge
+    inspects post-search and raises `BranchSearchFailed` with all four
+    fields populated from the returned `MCTSResult`.
+  - 2.3a's `PlanExecutionFailed` propagates UNCHANGED for winner-
+    execution failures (LD4 invariant — `BranchSearchFailed` is
+    reserved for SEARCH-layer failures only, not post-search execution).
+- **LD5 — AUDIT**: the substrate engine emits `:mcts/iteration` (Merkle-
+  chained, content-addressed) + `:mcts/search` start/end + `:llm/call`
+  per dispatch (canonical chain via `:llm/call` with request_hash +
+  response_hash + model + tokens, wrapped under `:mcts/iteration`
+  provenance) + `:plan/done` provenance on the winner via 2.3a's
+  emission path. NO new audit shapes were introduced. ZERO `:fork/*`
+  datoms — `mcts_search` uses in-memory dict transposition at
+  `_mcts.py:881-882`, NOT `s.txn.fork` (R0-fold B1).
+- **LD6 — MCTS-CONFIG**: branch-bridge default
+  `_BRANCH_BRIDGE_DEFAULT_CONFIG = MCTSConfig(max_iter=50, expander_k=4)`.
+  Distinct from the engine default `MCTSConfig()` of `max_iter=200`.
+  ALWAYS used unless `payload["mcts_config"]` overrides; bounds-check
+  on overrides via `MAX_BRANCH_MAX_ITER=50` / `MAX_BRANCH_EXPANDER_K=4`.
+  Closed-set narrowing: only `max_iter` and `expander_k` are
+  payload-overridable; other `MCTSConfig` fields require subclassing
+  (queued for 2.4a).
+- **LD7 — SUBSTRATE-PREREQS**: NONE. All four SDK touchpoints
+  (`s.plan.mcts_search`, `s.plan.judge`, `s.fact.transact`,
+  `s.effect.perform`) ship today.
+
+### Forced spec deviations
+
+1. **FD1** — `mcts_search.started_at_ms` must be a positive int (NOT
+   bool, NOT float; enforced at `_mcts.py:870-877`). The bridge uses
+   `time.time_ns() // 1_000_000` at the call site; routing through
+   `:sys/now` is queued for Phase 2.4a.
+2. **FD2** — `MCTSConfig.__post_init__` rejects bool numerics via
+   `isinstance(v, bool)` check FIRST. The bridge's `_resolve_mcts_config`
+   coerces JSON `true`/`false` to `BranchPayloadValidation` BEFORE
+   `MCTSConfig(...)` construction so the bridge's error contract is
+   uniform (`BranchPayloadValidation` not `ValueError`).
+3. **FD3** — `LLMExpander.provider` signature is `Callable[[Node, int],
+   Sequence[tuple[Action, float]]]` — `(node, k)` returns up to k
+   `(action, prior)` pairs. `propose(plan, *, k)` is keyword-only k
+   on the engine side; the bridge passes positional.
+4. **FD4** — `LLMJudgeEvaluator.provider` signature is
+   `Callable[[Node], float]`; `evaluator.evaluate(plan)` is the public
+   method. `0.0` is a finite valid score per `_is_finite_score` —
+   accepting it for malformed-response cases does NOT trigger the
+   engine's `phase="reject"` absorption path.
+5. **FD5** (R0-fold B1) — `mcts_search` uses in-memory dict
+   transposition at `_mcts.py:881-882`, NOT `s.txn.fork`. The G4 audit-
+   shape assertion in `tests/coder/test_searcher_failure.py` explicitly
+   requires zero `:fork/*` datoms. The phase-table description in the
+   active Phase 2 design doc was updated to reflect this.
+6. **FD6** — `_derive_search_id(initial_plan.id, config, started_at_ms)`
+   is deterministic given `started_at_ms` but NOT cross-run byte-
+   identical (wall-clock advances). Replay byte-identity (record →
+   replay → same audit chain) holds; cross-run byte-identity is not a
+   2.3b acceptance criterion.
+7. **FD7** — `Action` ADT is closed-isinstance-strict at `_mcts.py:80-81`.
+   `ComposeWithSkillAction` is rejected at the wrapper layer via BOTH
+   a kind-string check AND a post-decode `isinstance` check (belt-and-
+   braces — the LLM may mislabel the `kind` field; isinstance catches
+   the case after decode). `ComposeWithSkillAction` is deferred to
+   Phase 2.3c when the skill library lands.
+8. **FD-T2.1** — EDN canonical form is bare-keyword + attrs-map:
+   `[:seq {} [:fs/read {:path "x.txt"}]]`. The plan-author drafted
+   tests with the quoted-keyword form `'[":seq" [":fs/read" ":path" "x.txt"]]'`
+   which the parser rejects (parses `":seq"` as a string scalar, not
+   a node-tag keyword). Caught at T2; canonical form used throughout.
+9. **FD-T6.1** — `:fs/write` argument key is `bytes_or_text` per
+   `src/persistence/effect/handlers/fs.py:60`, NOT `content`. Caught at
+   T6; corrected throughout the test fixtures.
+10. **FD-T7.1** — `uuid.uuid4().hex` and `dt.datetime.now(...)` in
+    `_emit_search_failure_act_result` require `# noqa: wall-clock` per
+    the ARIS R2 F5 wall-clock ban. Mirrors `_session.py:213` _act._record
+    precedent for the same datom-emission pattern. Latency tracking
+    (`latency_ms=0` placeholder) deferred to Phase 2.4a.
+11. **FD-T8.1** — `Coder._escalate_branch` body uses a lazy
+    `from persistence.coder._searcher import _escalate_branch_body`
+    inside the function to avoid module-load circular import. Mirrors
+    the 2.3a `_escalate_plan_body` lazy-import pattern.
+
+### Test surface
+
+- `tests/coder/test_searcher_errors.py` — 5 unit tests for
+  `BranchPayloadValidation` + `BranchSearchFailed` shapes (T1, G1
+  partial).
+- `tests/coder/test_searcher_build.py` — 6 G1 tests for `_build_seed_plan`
+  Stages 1+2 (T2).
+- `tests/coder/test_searcher_validate.py` — 5 G2 tests for
+  `_validate_seed_plan_for_2_3b` re-use of 2.3a strict validator (T2).
+- `tests/coder/test_searcher_config.py` — 9 G7 tests for
+  `_resolve_mcts_config` (5 from T3 + 4 from T3-fix closing falsifiability
+  gaps: closed-set narrowing on real MCTSConfig field, non-Mapping
+  reject, float reject, positivity).
+- `tests/coder/test_searcher_expander.py` — 11 G3 tests for
+  `_make_branch_expander` + `_softmax_normalize` (5 from T4 + 6 from
+  T4-fix: empty `tool_calls`, `proposals=None` non-iterable, dry-run
+  rejection of `:branch` leaf, `AddStepAction` happy path, parametrized
+  malformed proposals).
+- `tests/coder/test_searcher_evaluator.py` — 12 G3 tests for
+  `_make_branch_evaluator` (3 from T5 + 9 from T5-fix: empty
+  `tool_calls`, NaN/Inf guard, malformed-score parametrize, missing
+  score field, non-Mapping `tool_calls[0]`).
+- `tests/coder/test_searcher_search.py` — 7 tests for the LD0 single-
+  execution invariant + bridge wiring (disk-marker invariant,
+  mcts_search kwargs, default vs override config, winner→
+  `_escalate_plan_body` delegation, byte-budget short-circuit, semantic
+  short-circuit).
+- `tests/coder/test_searcher_winner_failure.py` — 3 G5b tests for
+  winner-execution failure inheriting 2.3a's `PlanExecutionFailed`
+  unchanged.
+- `tests/coder/test_searcher_failure.py` — 7 G5a tests for the two-path
+  `BranchSearchFailed` funnel (Path-1 bubble-out + raw provider
+  exception coverage; Path-2 post-search detection; both paths emit
+  one `:act/result` with `op=':mcts/search'`; both paths emit zero
+  `:plan/done`).
+- `tests/coder/test_searcher_rejection.py` — 5 G6/G7 tests with
+  `side_effect=AssertionError + assert_not_called()` spy double-
+  protection (2.3a precedent).
+
+Suite delta: 2454 → 2525 (+71 net; baseline at 2.3a merge was 2454).
+
+### Test-fixture pattern
+
+The `_escalate_branch_body` integration tests deliberately mock
+`coder.substrate.plan.mcts_search` to a `MagicMock` returning a hand-
+crafted `MCTSResult`. The full real-MCTS audit-chain G4 acceptance
+signal (`:mcts/iteration` chain shape across iterations) is queued
+as a Phase 2.4a / v0.9.x rescope artifact. Reasons:
+
+1. T6 isolates BRIDGE behavior from ENGINE behavior — engine
+   correctness is the responsibility of `tests/plan/test_mcts.py`
+   (substrate-side, separately tested).
+2. Real MCTS with fixed-proposal LLM mocks deadlocks on transposition
+   deduplication (zero new uniques per iter blocks sane termination
+   under bridge-default `max_iter=50` unless the mock varies its
+   output by iter or plan content — non-trivial fixture).
+3. The LD0 single-execution invariant — what `_escalate_branch_body`
+   does with the WINNER — is fully testable at the bridge layer via
+   the disk-marker test (winner writes a file, losers do not).
+
+### Module layout
+
+NEW:
+- `src/persistence/coder/_searcher.py` (~660 LOC)
+- `src/persistence/coder/_searcher_errors.py` (~50 LOC)
+- 9 test files (~2000 LOC total)
+
+MODIFIED:
+- `src/persistence/coder/_session.py` (+24 / -7 — `_escalate_branch`
+  body delegation + LD1 gate simplification)
+- `src/persistence/coder/_prompt.py` (+~140 — 2 new tool-use schemas +
+  2 new system prompts + `_BRANCH_EDN_GUIDANCE`)
+- `src/persistence/coder/__init__.py` (+9 — `BranchPayloadValidation` +
+  `BranchSearchFailed` re-exports)
+- `tests/coder/test_session_stubs.py` (-1 stub-premise test, -1
+  parametrize entry, +1 LD1-invariant test)
+- `tests/coder/test_loop_e2e.py` (-1 stub-raise test)
+
 ## Phase 2.3a — 2026-05-06 (Plan AST escalation — `_escalate_plan` wired to `_planner._escalate_plan_body`)
 
 Phase 2.3a fills the `_escalate_plan` stub that 2.2a left with

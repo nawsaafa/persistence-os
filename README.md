@@ -14,7 +14,11 @@ shared state change is a transaction; every LLM boundary has a spec; everything
 is REPL-live.
 
 **Status:** v0.8.5a1 substrate-completion bundle + Mimir Phase B Ed25519
-signing on the audit chain. 2135 tests passing / 19 skipped / 8 xfailed on
+signing on the audit chain + persistence-coder Phase 2 ReAct loop +
+effects + Plan AST escalation + MCTS branch escalation + skill library
+(`:skill/define` / `:skill/lookup`) + `:llm/call` recursion +
+`ComposeWithSkillAction` proposal acceptance (Phase 2.3c.2 merged at
+`54dca57` on 2026-05-08). 2668 tests passing / 36 skipped / 9 xfailed on
 `feat/v0.9-persistence-coder`. v0.9.0a1 alpha targets June 2026. PyPI
 release ships with Mimir v0.1.
 **License:** AGPL-3 (runtime) + CC-BY-4.0 (paper & benchmarks). Commercial option

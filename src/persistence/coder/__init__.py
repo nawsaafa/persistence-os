@@ -19,6 +19,15 @@ from ._searcher_errors import (
     BranchPayloadValidation,
     BranchSearchFailed,
 )
+# Phase 2.3c.2 — :llm/call recursion dispatcher errors. Public surface
+# for callers catching recursion-budget violations + skill-cycle
+# detection at the runtime layer. The DispatcherContext / RecursionBudget
+# value types stay private to the coder package (T3-T6 import them
+# directly from ``persistence.coder._recursion``).
+from ._recursion import (
+    LLMRecursionBudgetExceeded,
+    SkillCycleDetected,
+)
 
 __all__ = [
     "Coder",
@@ -27,4 +36,6 @@ __all__ = [
     "PlanPayloadValidation",
     "BranchPayloadValidation",
     "BranchSearchFailed",
+    "LLMRecursionBudgetExceeded",
+    "SkillCycleDetected",
 ]

@@ -26,13 +26,17 @@ import datetime as dt
 import json
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.sdk import Substrate
 
 from ._prompt import EMIT_DECISION_TOOL_SCHEMA, build_messages, parse_text_decision
+from ._recursion import DispatcherContext, dispatcher_context
 from ._types import LLMDecision, Observation
+
+if TYPE_CHECKING:  # pragma: no cover
+    from persistence.plan import SkillLibrary
 
 
 class CoderStubNotImplemented(NotImplementedError):
@@ -54,6 +58,7 @@ class Coder:
     missing_confidence_default: float = 0.5     # base § 3.4 fail-safe (must be < confidence_threshold)
     max_iters: int = 20                          # Phase 2.2a LD2; loop ceiling for run()
     observe_depth: int = 5                       # Phase 2.2a LD3; trailing datom window
+    skill_library: "SkillLibrary | None" = None  # Phase 2.3c.2 LD3+LD6 — threaded into _escalate_branch_body
     _session_start_dt: dt.datetime | None = field(init=False, default=None)  # set by run() — T6
     _iter_count: int = field(init=False, default=0)                          # incremented each loop iter
 
@@ -69,17 +74,23 @@ class Coder:
         self._session_start_dt = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
         for i in range(self.max_iters):
             self._iter_count = i
-            obs = self._observe()
-            decision = self._decide(obs)
-            if self._should_escalate_branch(decision):
-                self._escalate_branch(decision)  # raises CoderStubNotImplemented
-                return
-            if self._should_escalate_plan(decision):
-                self._escalate_plan(decision)  # raises CoderStubNotImplemented
-                return
-            if decision.payload.get("done"):
-                return
-            self._act(decision)
+            # Phase 2.3c.2 LD1 R0-fold I2: DispatcherContext lifetime is
+            # ONE full _decide ↔ _act ↔ _observe cycle. Fresh context per
+            # iteration; counters reset between iterations. The
+            # ContextVar binding lets `_audit_stack._make_dispatcher_handler`
+            # read the live context for budget enforcement + cycle API.
+            with dispatcher_context(DispatcherContext()):
+                obs = self._observe()
+                decision = self._decide(obs)
+                if self._should_escalate_branch(decision):
+                    self._escalate_branch(decision)  # raises CoderStubNotImplemented
+                    return
+                if self._should_escalate_plan(decision):
+                    self._escalate_plan(decision)  # raises CoderStubNotImplemented
+                    return
+                if decision.payload.get("done"):
+                    return
+                self._act(decision)
 
     # --- ReAct primitives — Phase 2.1b/2.2a fill these ---------------
 

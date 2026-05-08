@@ -53,10 +53,16 @@ def test_register_handlers_does_not_register_branch_or_code():
     assert not d.has_handler(":code")
 
 
-def test_register_handlers_does_not_register_llm_call():
-    """LD5: `:llm/call` is NOT a plan leaf — queued to 2.3c."""
+def test_register_handlers_registers_llm_call():
+    """Phase 2.3c.2 T4: `:llm/call` is now a registered plan leaf — skill
+    bodies may contain :llm/call leaves; the planner-side adapter routes
+    through s.effect.perform(":llm/call", ...) which goes through the
+    audit middleware's DispatcherContext binding (T3, _audit_stack).
+    Inverted from the 2.3a/2.3b/2.3c.1 placeholder that pinned the
+    `:llm/call`-NOT-registered invariant queued to 2.3c.
+    """
     from persistence.plan import Dispatcher
     d = Dispatcher()
     s = MagicMock()
     _register_substrate_handlers(d, s)
-    assert not d.has_handler(":llm/call")
+    assert d.has_handler(":llm/call")

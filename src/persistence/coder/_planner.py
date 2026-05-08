@@ -95,6 +95,13 @@ REGISTERED_LEAF_TAGS: frozenset[str] = frozenset({
     # Phase 2.3c.1 — skill library coder integration; auto-wired into
     # _register_substrate_handlers via the loop over REGISTERED_LEAF_TAGS.
     ":skill/define", ":skill/lookup",
+    # Phase 2.3c.2 — LD0/LD1: skill bodies may contain :llm/call leaves;
+    # planner-side adapter routes through s.effect.perform(":llm/call", ...)
+    # which goes through the audit middleware's DispatcherContext binding
+    # (T3, _audit_stack._make_dispatcher_handler). Budget + cycle API
+    # enforced at that layer; T4 binds the DispatcherContext at coder
+    # iteration entry (_session.run()).
+    ":llm/call",
 })
 
 #: Banned leaf tags — keyword-form; would crash walk() per _execute.py:166-170.

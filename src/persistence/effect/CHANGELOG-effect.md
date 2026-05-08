@@ -2,6 +2,107 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## Phase 2.3c.2 T2 — 2026-05-08 (AuditEntry.parent_audit_entry_id field add — chain-hash drift)
+
+Phase 2.3c.2 LD5 introduces a new optional field on `AuditEntry` that
+records the OUTER call's audit entry id when the current entry was
+emitted from a nested dispatch (LLM recursion or composed-skill body).
+T2 ships the field-add and the round-trip plumbing path; the live value
+is wired by T3 via `persistence.coder._recursion.DispatcherContext`.
+
+### Added
+
+- **`AuditEntry.parent_audit_entry_id: str | None = None`**
+  (`handlers/audit.py`). Default `None` preserves backward compatibility
+  with all v0.5.x..v0.9.0a1-pre audit entries. When non-None, must be a
+  `"sha256:"`-prefixed content hash; `__post_init__` validates the
+  prefix invariant. Always part of the canonical content hash (even
+  when `None`) so prev-hash chain integrity covers the new slot —
+  distinguishing it from `txn_commit`, which is omitted-when-None to
+  preserve the v0.5.0a1→v0.5.1 hash continuity rule. The `parent`
+  field (which mirrors `prev_hash` / linear-chain pointer) is unchanged
+  and stays load-bearing for the Merkle chain; `parent_audit_entry_id`
+  is a *call-nesting* pointer for replay/debug.
+
+- **`:audit/parent-audit-entry-id`** optional spec slot on
+  `:persistence.effect/audit-entry` (`spec/_canonical.py`). Wire form
+  is `_sha256_spec` (mirrors `:audit/prev-hash`); emitted only when the
+  in-memory field is non-None to keep wire shape tight (mirrors the
+  `:audit/parent` / `:audit/run-id` emit-when-set rule).
+
+- **`provenance[':parent-audit-entry-id']`** optional slot on the
+  audit datom wire form (`audit_entry_to_datom` /
+  `datom_to_audit_entry`). Lives next to `:effect/txn-commit` and
+  `:episode` in the colon-keyword namespace; emit-only-when-set. Does
+  NOT carry a bare-snake_case dual-namespace alias because
+  `parent_audit_entry_id` is a call-nesting pointer, distinct from the
+  prev-hash chain pointer that the typed `Provenance.parent_provenance_hash`
+  reader (D5) follows.
+
+- **`make_audit_handler` clause body** now reads
+  `ctx.get("parent_audit_entry_id")` per dispatch and writes the
+  resulting value (always `None` until T3 lands DispatcherContext
+  wiring) into the canonical content dict alongside `parent`,
+  `policy_id`, and the rest. The key is unconditionally present in the
+  hashed content (unlike `txn_commit` which is conditionally inserted).
+
+### Changed (chain-hash drift — INTENTIONAL, EXPECTED)
+
+The canonical content hash now incorporates `parent_audit_entry_id`
+even for non-nested entries (where it is `None`). Same input
+arguments + same clock + same handler chain therefore produce a
+DIFFERENT `entry.id` in v0.9.0a1+ than under v0.5.x..v0.8.x..v0.9.0a1-pre.
+This is the LD5 R0-fold I3 migration impact: the canonical AuditEntry
+shape is extended, and the chain hash reflects the extended shape.
+
+Concrete consequences:
+
+- **Audit logs from v0.5.x..v0.9.0a1-pre eras CANNOT be replay-byte-identity-validated
+  against v0.9.0a1+ chain hashes** unless a forward-compat validator
+  special-cases pre-migration entries (treats `parent_audit_entry_id`
+  as field-absent rather than `None` in the content). v0.9.0a1 is the
+  clean-release boundary; pre-2.3c.2 chains are out-of-scope for byte-
+  identity comparison against post-2.3c.2 chains.
+
+- **Drift-pin tests re-pinned in lockstep** with the field add (single
+  atomic T2 commit). Five test files updated:
+  `tests/effect/test_audit_canonicalize_drift_pin.py`,
+  `tests/effect/test_audit_canonicalize.py`,
+  `tests/effect/test_audit_rebind.py`,
+  `tests/repl/test_audit_emission.py`,
+  `tests/store/test_audit_chain_invariants.py`. Each adds
+  `parent_audit_entry_id=None` to its hand-rolled `content` fixture so
+  the helper-side hash matches the dataclass-side `to_dict()` output
+  byte-for-byte (the helper-vs-dataclass byte-lockstep invariant from
+  ARIS R6 N1 + R6-G2 holds under the extended shape).
+
+- **`emit_repl_op_audit`** (`src/persistence/repl/_audit.py`) is the
+  third in-tree producer of `AuditEntry` content (alongside
+  `make_audit_handler` clause and `rebind_audit_datom_prev_hash`).
+  Updated symmetrically: writes
+  `"parent_audit_entry_id": None` into its content dict because
+  `:repl/op` AuditEntries are always at the OUTER boundary of a REPL
+  call (never nested under another LLM/skill dispatch), so the field
+  is structurally always None. The key is present (not omitted) so
+  `verify_chain` recomputes the same hash via `to_dict()`.
+
+### Notes
+
+- T2 is intentionally STRUCTURAL only. The
+  `make_audit_handler` clause body reads
+  `ctx.get("parent_audit_entry_id")` from a key that no producer sets
+  yet — T3 wires `_audit_stack.py` to populate the live value from
+  `DispatcherContext.parent_audit_entry_id` (a `ContextVar` bound by
+  the dispatcher middleware around each `:llm/call` /
+  `ComposeWithSkillAction`-grafted skill body invocation per LD5).
+- `rebind_audit_datom_prev_hash` round-trips the new field
+  unchanged: `datom_to_audit_entry` reads
+  `provenance[':parent-audit-entry-id']` into the field,
+  `to_dict()` includes it, the canonical content hash incorporates
+  it, and `audit_entry_to_datom` re-emits the colon-keyword slot. The
+  rebind helper's `prev_hash` mutation does not touch call-nesting
+  structure.
+
 ## Phase 2.2b — 2026-05-06 (:code/run + :git/* thin-wrapper-over-:shell/exec quartet)
 
 Phase 2.2b extends the persistence-coder's `_act` surface with two new

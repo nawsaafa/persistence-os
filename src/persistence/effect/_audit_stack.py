@@ -35,12 +35,31 @@ Semantics:
          ``entries`` (the same list bound to ``Substrate._audit_entries``
          under the M2 wiring, so ``s.audit.entries()`` and
          ``s.audit.verify_chain()`` see the post-commit Merkle chain).
+      4. ``coder-dispatcher`` — Phase 2.3c.2 LD1+LD2 dispatcher middleware
+         wrapping ``:llm/call`` only. Reads the
+         :class:`persistence.coder._recursion.DispatcherContext` ContextVar
+         and, when bound: enforces 4-layer token budget, depth + request
+         bounds via :func:`enter_call` / :func:`exit_call`, and provides
+         the ContextVar plumbing for cycle detection (LD2 Layer B; the
+         actual ``cycle_path`` push/pop is owned by the coder-side, not
+         the middleware). Transparent (pass-through) when no
+         DispatcherContext is bound — preserves backward compatibility
+         for pre-2.3c.2 callers and substrate-only flows that don't go
+         through the coder loop.
 
   - The runtime is returned **unactivated**. ``Substrate.open`` activates
     it (via ``persistence.effect.runtime._active.set(rt)``) at construction
     time and releases it in ``close()`` — this gives audit coverage for
     the substrate's lifetime without requiring callers to wrap usage in a
     ``with with_runtime(...):`` block.
+
+Phase 2.3c.2 LD5 W3 rescope (commit ``98df051``): ``parent_audit_entry_id``
+active wiring (non-None values for nested dispatch) is rescoped to v0.9.x.
+The dispatcher handler here threads DispatcherContext for budget + cycle
+purposes ONLY; ``parent_audit_entry_id`` stays ``None`` at the audit
+middleware layer in 2.3c.2. T2 already shipped the field plumbing through
+the dataclass + chain-hash + wire form + datom round-trip + spec layers
+(commit ``4dc3fb3``); v0.9.x activates the population path.
 
 Cross-references:
   - design doc § 3.7 per-effect replay table (the ops covered here are the
@@ -50,10 +69,14 @@ Cross-references:
     fail-fast guard when intent log is non-empty but no runtime is active
     (raises :class:`persistence.txn.AuditStackMissing`); this stack is the
     intended satisfier of that guard for substrate-driven flows.
+  - :mod:`persistence.coder._recursion` for the DispatcherContext + budget
+    types + ContextVar binding + push/pop API consumed by the dispatcher
+    handler factory below.
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import json
+from typing import TYPE_CHECKING, Any
 
 from persistence.effect.handlers.audit import AuditEntry, make_audit_handler
 from persistence.effect.handlers.clock import make_system_clock_handler
@@ -170,6 +193,163 @@ def _make_canonical_raw_terminator() -> Handler:
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 2.3c.2 — coder-dispatcher middleware (LD1 budget + LD2 cycle plumbing)
+# ---------------------------------------------------------------------------
+
+
+# Layer 2 input-token estimation rate per design § LD1: rough
+# ``len(json.dumps(messages)) // 4``. Tokenizers under-count for some
+# encodings/role/tool blocks (R1-fold I1 caveat); load-bearing safety is
+# Layer 4 post-call accounting which catches per-call overshoot before
+# the next nested call.
+_LAYER_2_BYTES_PER_TOKEN: int = 4
+
+
+def _estimate_input_tokens(args: dict[str, Any]) -> int:
+    """Rough Layer 2 input-token estimate.
+
+    Per design § LD1 R1.1-fold: ``len(json.dumps(messages)) // 4``. Used
+    by Layers 2 (early reject if estimated_input would push over budget)
+    and 4 (fallback when provider response lacks ``usage.total_tokens``).
+    """
+    messages = args.get("messages", [])
+    try:
+        serialised = json.dumps(messages, default=str)
+    except (TypeError, ValueError):  # pragma: no cover — defensive
+        serialised = str(messages)
+    return len(serialised) // _LAYER_2_BYTES_PER_TOKEN
+
+
+def _make_dispatcher_handler() -> Handler:
+    """Phase 2.3c.2 LD1 + LD2 dispatcher middleware for ``:llm/call``.
+
+    Reads the :class:`DispatcherContext` ContextVar from
+    ``persistence.coder._recursion``. When bound, enforces the 4-layer
+    token budget + depth + request bounds; transparent pass-through
+    otherwise.
+
+    Layer enforcement (per design § LD1 R1-fold + R1.1-fold):
+
+      * **Pre-call (Layer 1):** ``ctx.token_count >= ctx.budget.max_tokens``
+        → raise :class:`LLMRecursionBudgetExceeded(field="tokens")` BEFORE
+        ``k(args)`` is called.
+      * **Pre-call (Layer 2):** estimated input tokens
+        (``_estimate_input_tokens``) plus current ``token_count`` over
+        budget → raise BEFORE ``k(args)``.
+      * **Pre-call (enter_call):** :func:`enter_call` increments ``depth``
+        + ``request_count`` and raises on bound violation.
+      * **Pre-call (Layer 3):** inject ``args["max_tokens"] = min(existing,
+        remaining)`` so providers honoring the field cap output tokens.
+      * **Post-call (Layer 4):** read ``result["usage"]["total_tokens"]``
+        if present; otherwise fall back to
+        ``estimated_input + injected_max_tokens`` (conservative
+        overcount; R1.1-fold NICE).
+      * **Post-call (exit_call):** :func:`exit_call` decrements depth.
+        ``request_count`` + ``token_count`` are cumulative across the
+        recursion tree (LD1) — NOT decremented.
+
+    LD5 W3 rescope: this handler does NOT populate
+    ``parent_audit_entry_id`` on the wrapped audit handler's ctx. The
+    audit middleware below (innermost direction) reads
+    ``ctx.get("parent_audit_entry_id")`` and gets ``None`` per
+    backward-compat default; v0.9.x will activate the population path.
+
+    Returns:
+        :class:`Handler` named ``"coder-dispatcher"`` wrapping ``:llm/call``.
+        Add to a runtime's handler list at the OUTER end (highest index)
+        so it sees ops before the audit middleware.
+    """
+    name = "coder-dispatcher"
+
+    def llm_call_clause(args: dict[str, Any], k, ctx_local) -> Any:
+        # Lazy import — avoids circular dependency at module-load time:
+        # persistence.coder._recursion imports persistence.plan._mcts which
+        # eventually pulls in persistence.effect (this module's parent
+        # package). Lazy at call-time keeps the import graph clean.
+        from persistence.coder._recursion import (
+            LLMRecursionBudgetExceeded,
+            current_dispatcher_context,
+            enter_call,
+            exit_call,
+        )
+
+        dctx = current_dispatcher_context()
+        if dctx is None:
+            # Transparent pass-through — preserve pre-2.3c.2 behavior
+            # for substrate-only flows that don't go through the coder
+            # loop (no DispatcherContext bound).
+            return k(args)
+
+        budget = dctx.budget
+        # --- Layer 1: best-effort early reject on cumulative token budget
+        remaining = budget.max_tokens - dctx.token_count
+        if remaining <= 0:
+            raise LLMRecursionBudgetExceeded(
+                field="tokens",
+                limit=budget.max_tokens,
+                observed=dctx.token_count,
+            )
+        # --- Layer 2: best-effort input estimation
+        estimated_input = _estimate_input_tokens(args)
+        if dctx.token_count + estimated_input > budget.max_tokens:
+            raise LLMRecursionBudgetExceeded(
+                field="tokens",
+                limit=budget.max_tokens,
+                observed=dctx.token_count + estimated_input,
+            )
+
+        # --- enter_call: depth + request bounds (raises on overflow)
+        enter_call(dctx)
+        # NOTE: enter_call mutates dctx.depth + dctx.request_count
+        # in-place; on raise, the counters are NOT rolled back per LD1.
+        # Sequential demo uses don't observe this because the raised
+        # error propagates out of the dispatcher_context block and the
+        # ctx is discarded; Python-stack-nested cases (v0.9.x) need
+        # caller-side cleanup discipline.
+
+        # --- Layer 3: output cap injection
+        # ``args`` is mutated in place — the audit middleware below
+        # already pops ``_txn_commit`` similarly. Both producers see the
+        # capped value; ``args_hash`` covers it.
+        existing_max = args.get("max_tokens")
+        if existing_max is None:
+            injected_max_tokens = remaining
+        else:
+            injected_max_tokens = min(int(existing_max), remaining)
+        args["max_tokens"] = injected_max_tokens
+
+        result: Any = None
+        try:
+            result = k(args)
+            return result
+        finally:
+            # --- Layer 4: post-call hard accounting
+            usage_total: int | None = None
+            if isinstance(result, dict):
+                usage = result.get("usage")
+                if isinstance(usage, dict):
+                    raw_total = usage.get("total_tokens")
+                    # bool is a subclass of int — exclude bool explicitly.
+                    if isinstance(raw_total, int) and not isinstance(raw_total, bool):
+                        usage_total = raw_total
+            if usage_total is not None:
+                dctx.token_count += usage_total
+            else:
+                # Conservative-overcount substitute (R1.1-fold NICE):
+                # provider didn't report usage.total_tokens, so we charge
+                # the budget as if input + injected_max_tokens were spent.
+                dctx.token_count += estimated_input + injected_max_tokens
+            # --- exit_call: decrement depth (cumulative counters stay)
+            exit_call(dctx)
+
+    return Handler(
+        name=name,
+        wraps={":llm/call"},
+        clauses={":llm/call": llm_call_clause},
+    )
+
+
 def canonical_audit_stack(entries: list[AuditEntry]) -> Runtime:
     """Return a :class:`Runtime` with the canonical audit handler stack.
 
@@ -177,6 +357,13 @@ def canonical_audit_stack(entries: list[AuditEntry]) -> Runtime:
     2.0b / 2.0c / 2.0c-ext; see :data:`CANONICAL_AUDIT_OPS`. The audit
     middleware's :class:`AuditEntry` outputs are appended to ``entries``
     (caller-owned), forming the substrate's session-local Merkle chain.
+
+    Phase 2.3c.2 LD1+LD2: a NEW ``coder-dispatcher`` handler is added at
+    the outer end of the stack wrapping ``:llm/call``. It reads the
+    :class:`persistence.coder._recursion.DispatcherContext` ContextVar
+    and enforces the 4-layer token budget + depth + request bounds when
+    a context is bound; pass-through otherwise. See
+    :func:`_make_dispatcher_handler` for layer-by-layer semantics.
 
     Args:
         entries: caller-owned list to receive :class:`AuditEntry` records.
@@ -192,13 +379,17 @@ def canonical_audit_stack(entries: list[AuditEntry]) -> Runtime:
         not a single ``with`` block).
 
     See module docstring for the design rationale; the handler order
-    (raw terminator → clock → audit middleware) is innermost-first per
-    the :class:`Runtime` constructor's documented stack convention.
+    (raw terminator → clock → audit middleware → coder-dispatcher) is
+    innermost-first per the :class:`Runtime` constructor's documented
+    stack convention. The dispatcher sits OUTSIDE the audit middleware
+    so budget rejections raise BEFORE an AuditEntry would be emitted —
+    an over-budget call produces zero entries.
     """
     raw = _make_canonical_raw_terminator()
     clock = make_system_clock_handler()
     audit = make_audit_handler(entries, wraps=set(CANONICAL_AUDIT_WRAPPED_OPS))
-    return Runtime(handlers=[raw, clock, audit])
+    dispatcher = _make_dispatcher_handler()
+    return Runtime(handlers=[raw, clock, audit, dispatcher])
 
 
 __all__ = [

@@ -65,6 +65,7 @@ from persistence.plan._mcts import (
 
 if TYPE_CHECKING:
     from persistence.coder._session import Coder
+    from persistence.plan import SkillLibrary
 
 __all__ = [
     "MAX_BRANCH_EDN_BYTES",
@@ -305,16 +306,28 @@ def _decode_action_from_dict(d: Mapping[str, Any]) -> Action:
     raise ValueError(f"unknown action kind: {kind!r}")
 
 
-def _dry_run_apply_action_safely(plan: Node, action: Action) -> Node | None:
+def _dry_run_apply_action_safely(
+    plan: Node,
+    action: Action,
+    *,
+    skill_library: "SkillLibrary | None" = None,
+) -> Node | None:
     """Apply action to plan in-memory; return new plan or None on rejection.
 
     LD2: rejects proposals whose `apply_action` result would fail
     `validate_plan_for_2_3a` (the strict 2.3a validator). Also rejects
     proposals that raise PlanDepthExceeded / ValueError during
     apply_action itself.
+
+    Phase 2.3c.2 LD6: ``skill_library`` is forwarded to
+    :func:`apply_action` so ``ComposeWithSkillAction`` proposals can
+    dry-run without raising ``_SkillNotRegistered`` at the engine layer.
+    A None ``skill_library`` makes any compose proposal reject at
+    dry-run (matches the 2.3b reject behavior modulo the wrapper-layer
+    drops being lifted).
     """
     try:
-        new_plan = apply_action(plan, action)
+        new_plan = apply_action(plan, action, skill_library=skill_library)
     except Exception:
         return None
     try:
@@ -327,18 +340,28 @@ def _dry_run_apply_action_safely(plan: Node, action: Action) -> Node | None:
 def _parse_expander_tool_response(
     response: Mapping[str, Any],
     seed_plan: Node,
+    *,
+    skill_library: "SkillLibrary | None" = None,
 ) -> Sequence[tuple[Action, float]]:
     """Parse :llm/call tool-use response → softmax-normalized proposals.
 
-    Algorithm:
+    Algorithm (Phase 2.3c.2 LD6 — FD7 lifted):
         1. Extract response["tool_calls"][0]["input"]["proposals"] (list of dicts).
         2. For each dict:
-            a. Drop ComposeWithSkillAction (LD3: 2.3c defer) by kind string.
-            b. Decode via `_decode_action_from_dict` (skip on ValueError/ParseError).
-            c. Belt-and-braces isinstance check on ComposeWithSkillAction (FD7).
-            d. Dry-run via `_dry_run_apply_action_safely` (skip on None).
+            a. Decode via `_decode_action_from_dict` (skip on ValueError/ParseError).
+            b. Dry-run via `_dry_run_apply_action_safely` with
+               ``skill_library`` threaded (skip on None — covers
+               ComposeWithSkillAction with unregistered skill_id, missing
+               skill_library, and engine-layer cycle/depth raises).
         3. Softmax-normalize the surviving raw logits.
         4. Return [(action, prior)] sequence.
+
+    Phase 2.3c.2 LD6: the kind-string drop (was line 361) and isinstance
+    belt-and-braces drop (was line 369) are REMOVED. ComposeWithSkillAction
+    proposals are now allowed through to the dry-run layer where the
+    engine's ``_apply_compose_with_skill`` enforces the skill-library
+    contract (raises ``_SkillNotRegistered`` for unregistered skill_ids
+    or None library; raises ``_PlanCycleDetected`` for self-grafts).
 
     Empty list is acceptable -> MCTS treats as terminal-node signal.
     """
@@ -357,18 +380,13 @@ def _parse_expander_tool_response(
     for d in proposals_raw:
         if not isinstance(d, Mapping):
             continue
-        # Drop ComposeWithSkillAction at the wrapper (LD3).
-        if d.get("kind") == "ComposeWithSkillAction":
-            continue
         try:
             action = _decode_action_from_dict(d)
         except (ValueError, ParseError):
             continue
-        # Belt-and-braces: reject ComposeWithSkillAction by isinstance even
-        # if the LLM mislabeled the kind.
-        if isinstance(action, ComposeWithSkillAction):
-            continue
-        if _dry_run_apply_action_safely(seed_plan, action) is None:
+        if _dry_run_apply_action_safely(
+            seed_plan, action, skill_library=skill_library
+        ) is None:
             continue
         logit = d.get("logit", 0.0)
         if not isinstance(logit, (int, float)) or isinstance(logit, bool):
@@ -383,7 +401,10 @@ def _parse_expander_tool_response(
     )
 
 
-def _make_branch_expander(coder: "Coder") -> LLMExpander:
+def _make_branch_expander(
+    coder: "Coder",
+    skill_library: "SkillLibrary | None" = None,
+) -> LLMExpander:
     """Construct an `LLMExpander` whose provider routes through :llm/call.
 
     LD3 invariant: every expander invocation becomes ONE :llm/call audit
@@ -396,7 +417,16 @@ def _make_branch_expander(coder: "Coder") -> LLMExpander:
     LD2 invariant: the dry-run wrapper rejects proposals whose
     apply_action result would fail validate_plan_for_2_3a (the same
     validator the post-search winner is executed under).
+
+    Phase 2.3c.2 LD6: ``skill_library`` is threaded through to
+    :func:`_parse_expander_tool_response` so the dry-run layer can
+    actually evaluate ``ComposeWithSkillAction`` proposals (vs the
+    2.3b FD7 wrapper-layer drop). Falls back to ``coder.skill_library``
+    if not explicitly supplied — production CLI wiring (2.4a) sets it
+    on the coder at construction time.
     """
+    if skill_library is None:
+        skill_library = getattr(coder, "skill_library", None)
 
     def provider(plan: Node, k: int) -> Sequence[tuple[Action, float]]:
         plan_edn = unparse(plan)
@@ -415,7 +445,9 @@ def _make_branch_expander(coder: "Coder") -> LLMExpander:
             "tools": [EMIT_BRANCH_PROPOSAL_TOOL_SCHEMA],
         }
         response = coder.substrate.effect.perform(":llm/call", request)
-        return _parse_expander_tool_response(response, plan)
+        return _parse_expander_tool_response(
+            response, plan, skill_library=skill_library
+        )
 
     return LLMExpander(provider=provider)
 
@@ -454,7 +486,10 @@ def _parse_evaluator_tool_response(response: Mapping[str, Any]) -> float:
     return score
 
 
-def _make_branch_evaluator(coder: "Coder") -> LLMJudgeEvaluator:
+def _make_branch_evaluator(
+    coder: "Coder",
+    skill_library: "SkillLibrary | None" = None,
+) -> LLMJudgeEvaluator:
     """Construct an `LLMJudgeEvaluator` whose provider routes through :llm/call.
 
     LD3: every evaluator invocation becomes ONE :llm/call audit datom
@@ -463,7 +498,16 @@ def _make_branch_evaluator(coder: "Coder") -> LLMJudgeEvaluator:
 
     FD4: LLMJudgeEvaluator.provider signature is `Callable[[Node],
     float]` (single positional arg).
+
+    Phase 2.3c.2 LD6: ``skill_library`` is accepted as a sibling
+    parameter for symmetry with :func:`_make_branch_expander` even though
+    the evaluator itself does not currently consume it (the evaluator
+    judges already-grafted plans; the skill library was already
+    consumed by the engine at expand time). Reserved for future
+    evaluator-side composition discipline (e.g. 2.4a confidence-tied
+    skill quality scoring).
     """
+    del skill_library  # reserved for future use; unused at 2.3c.2
 
     def provider(plan: Node) -> float:
         plan_edn = unparse(plan)
@@ -524,11 +568,18 @@ def _escalate_branch_body(coder: "Coder", decision: LLMDecision) -> None:
     # Stage 4: resolve MCTSConfig (Stage 4 of ingestion).
     config = _resolve_mcts_config(decision.payload)
 
+    # Phase 2.3c.2 LD6: thread coder.skill_library through to expander +
+    # evaluator factories AND through to mcts_search itself. None is OK
+    # (preserves backward compat for coders constructed without a
+    # skill_library); the engine's _apply_compose_with_skill rejects
+    # proposals at the dry-run layer when skill_library is None.
+    skill_library = getattr(coder, "skill_library", None)
+
     # Stage 5: build LLM-driven expander + evaluator. Providers route through
     # substrate.effect.perform(":llm/call", ...) per LD3 — verified at
     # _searcher.py:_make_branch_expander / _make_branch_evaluator.
-    expander = _make_branch_expander(coder)
-    evaluator = _make_branch_evaluator(coder)
+    expander = _make_branch_expander(coder, skill_library=skill_library)
+    evaluator = _make_branch_evaluator(coder, skill_library=skill_library)
 
     # FD1: mcts_search.started_at_ms must be a positive int (NOT bool, NOT
     # float; enforced at _mcts.py:870-877). 2.4a will route this through
@@ -551,6 +602,7 @@ def _escalate_branch_body(coder: "Coder", decision: LLMDecision) -> None:
             started_at_ms=started_at_ms,
             config=config,
             db=coder.substrate._db,
+            skill_library=skill_library,
         )
     except Exception as exc:
         error_repr = f"{type(exc).__name__}: {exc}"

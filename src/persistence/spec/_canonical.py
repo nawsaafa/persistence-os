@@ -340,6 +340,14 @@ _audit_entry = keys(
         ":audit/policy-id": maybe(_keyword_spec),
         ":audit/run-id": maybe(uuid_()),
         ":audit/parent": maybe(or_(uuid_(), _sha256_spec)),
+        # Phase 2.3c.2 LD5 — call-nesting pointer. Distinct from
+        # :audit/parent (linear-chain pointer mirroring :audit/prev-hash):
+        # this points at the OUTER call's AuditEntry id when the entry
+        # was emitted from a nested dispatch (LLM recursion or composed
+        # skill body). Wire form is always the entry's content hash
+        # (sha256:-prefixed); spec uses the same _sha256_spec slot as
+        # :audit/prev-hash and :audit/result-hash.
+        ":audit/parent-audit-entry-id": maybe(_sha256_spec),
         # Mimir Phase B — Ed25519 signing on audit chain. Both fields are
         # optional and only emitted when a signer is configured on the
         # audit handler. Wire form is "ed25519:<urlsafe_b64>" for the

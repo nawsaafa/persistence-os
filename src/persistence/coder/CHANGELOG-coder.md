@@ -1,5 +1,577 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.3c.2 — 2026-05-08 (`:llm/call` recursion + `ComposeWithSkillAction` proposal acceptance)
+
+Phase 2.3c.2 ships the SECOND half of the 2.3c skill-system rollout,
+completing the trio: registry (2.3c.1) + recursion + composition. Two
+intertwined lifts:
+
+1. **`:llm/call` recursion.** The substrate-side `:llm/call` op is
+   audit-wrapped at the canonical stack (Phase 2.1b precedent); when a
+   registered skill's Plan AST contains a `:llm/call` leaf, the planner
+   walks it and dispatches via `substrate.effect.perform(":llm/call",
+   ...)`. Phase 2.3c.2 specifies + audits the recursion semantics
+   explicitly: a per-iteration `DispatcherContext` ContextVar threads
+   depth + cumulative request_count + cumulative token_count + cycle
+   detection through every nested call. Hard `MAX_LLM_CALL_DEPTH=3`
+   floor + `MAX_RECURSIVE_TOKENS=20_000` soft cap +
+   `MAX_RECURSIVE_REQUESTS=10` soft cap. Budget exhaustion raises
+   `LLMRecursionBudgetExceeded(field="depth"|"tokens"|"requests")`.
+2. **`ComposeWithSkillAction` proposal acceptance.** 2.3b's MCTS
+   expander wrapper REJECTED `ComposeWithSkillAction` proposals at TWO
+   layers (kind-string drop at `_searcher.py:361` + isinstance
+   belt-and-braces at `_searcher.py:369` — FD7 from 2.3b). 2.3c.2 lifts
+   both rejection sites. The MCTS engine's `_apply_compose_with_skill`
+   (`_mcts.py:187-209`) grafts the looked-up skill into the Plan AST
+   during search; winner unparses through 2.3a's `_escalate_plan_body`
+   unchanged. The expander wrapper threads the active SkillLibrary
+   (from `coder.skill_library` field) into the search context, and the
+   `:mcts/iteration` provenance datom records the looked-up skill's
+   content hash in a NEW `composed_skill_content_hash` field for
+   replay-explainability.
+
+This is the LAST major coder-side scope item before harden phases.
+Completing it lands ALL of Phase 2's coder-side maturity per the
+critical-path sequencing (2.3c.2 → 2.3d REPL pause → 2.4a-d harden →
+2.4c lockfile → `v0.9.0a1` tag).
+
+### Locked decisions (LD0–LD7) — design ARIS R1.4 lite PASS (mean 7.68 / min 7.2, hard-mode + W3 honest-rescope per CLAUDE.md 2.0d-at-6.4 precedent)
+
+- **LD0 — SCOPE**: 4 cross-cutting changes — (1) FD7 lift in
+  `_searcher.py` (delete kind-string drop at line 361 + isinstance
+  drop at line 369); (2) thread `skill_library: SkillLibrary` into
+  search context via `_make_branch_expander` /
+  `_make_branch_evaluator` signatures + bridge invocation of
+  `mcts_search(... skill_library=...)`; (3) audit-anchor `:llm/call`
+  recursion via per-dispatch `DispatcherContext` carrying depth +
+  token-counter + cycle set (content-hash-keyed); (4) wire global
+  resource budget at dispatcher boundary — both `:llm/call` recursion
+  AND `ComposeWithSkillAction`-grafted skill body execution feed the
+  same `DispatcherContext` counter (LD4 unified budget).
+- **LD1 — `:llm/call` recursion at dispatcher; per-call DispatcherContext**:
+  new `DispatcherContext` mutable dataclass with fields
+  `depth: int = 0`, `token_count: int = 0`, `request_count: int = 0`,
+  `cycle_path: list[str]` (content-hash-keyed active-path stack;
+  R0-fold B3), `parent_audit_entry_id: str | None = None`, `budget:
+  RecursionBudget`. ContextVar binding via `dispatcher_context(ctx)`
+  context manager mirrors `persistence.effect.runtime.with_runtime`
+  (Token-based set/reset). Lifetime spans full coder iteration cycle
+  (one `coder.run()` step); persists across non-`:llm/call` ops
+  (`:fs/read` / `:shell/exec` / `:git/diff` / etc.) interleaved
+  between calls; reset between coder iterations (T4 wraps each
+  iteration body with `dispatcher_context(DispatcherContext())`).
+  **Depth semantics (R1.1-fold IMPORTANT)**: `ctx.depth` is the count
+  of CURRENTLY-ACTIVE `:llm/call`s on the stack INCLUDING the call
+  about to start. Initial state `0` (no active calls). On entry:
+  increment FIRST, then check `ctx.depth > ctx.budget.max_depth` (`>`
+  strict; equality allowed — with `MAX=3` allowed depths are
+  `{1,2,3}`). On exit: decrement depth; `request_count` +
+  `token_count` are CUMULATIVE across the recursion tree — NOT
+  decremented on exit (LD1 cumulative-counter rule).
+  **4-layer token enforcement (R1-fold B1+I1 corrected)**:
+  - **Layer 1 (best-effort early reject)**: pre-call,
+    `ctx.token_count >= max_tokens` → raise
+    `LLMRecursionBudgetExceeded(field="tokens")` BEFORE provider call.
+  - **Layer 2 (best-effort input estimation)**: pre-call,
+    `len(json.dumps(args.get("messages", []))) // 4` rough estimate;
+    if `ctx.token_count + estimated_input > max_tokens` → raise.
+    Tokenizers undercount for some encodings/role/tool blocks
+    (R1-fold I1); load-bearing safety is Layer 4.
+  - **Layer 3 (output cap injection — provider-honest)**:
+    `args["max_tokens"] = min(args.get("max_tokens", remaining),
+    remaining)`. Demo providers Anthropic + OpenAI both honor
+    `max_tokens` per public APIs. Streaming + arbitrary-provider
+    safety OUT of 2.3c.2 scope (queued v0.9.x).
+  - **Layer 4 (post-call hard accounting — load-bearing)**: after
+    each call, `ctx.token_count += result["usage"]["total_tokens"]`
+    when present; otherwise fall back to
+    `estimated_input + injected_max_tokens` as conservative-overcount
+    substitute (R1.1-fold NICE; runaway-protection becomes
+    "best-effort overcount" for non-usage-reporting providers,
+    queued v0.9.x for tokenizer-aware integration).
+  **Honest claim statement**: any single `:llm/call`'s output is
+  bounded by Layer 3's `max_tokens` cap if and only if the provider
+  honors that field. The cumulative recursion-tree budget is enforced
+  by Layer 4's post-call accounting which catches per-call overshoot
+  before the next nested call. This is "best-effort safety" with a
+  load-bearing recursion-tree cap — NOT "single-call provider
+  runaway is mathematically impossible".
+- **LD2 — Dual-layer cycle detection (R1-fold I2 split)**:
+  - **Layer A — search-time STATIC subtree check** (already shipped
+    at `_mcts.py:213-217`): `_apply_compose_with_skill` checks
+    `if plan.id in skill_ids_in_subtree` and raises
+    `_PlanCycleDetected` if the candidate plan's content-hash already
+    appears as a subtree of the skill being grafted. 2.3c.2 KEEPS
+    this layer unchanged. Detects STRUCTURAL cycles.
+  - **Layer B — execution-time DYNAMIC active-path check** (NEW):
+    `DispatcherContext.cycle_path` tracks **content hashes** as an
+    ACTIVE-PATH STACK (LIST, not global set). T3 ships
+    `push_cycle(ctx, content_hash)` (raises
+    `SkillCycleDetected(_PlanCycleDetected)` on active duplicate)
+    and `pop_cycle(ctx, content_hash)` (LIFO discipline; raises
+    `RuntimeError` on top-of-stack mismatch). The hash key is the
+    FULL `plan.id` (32-hex chars), NOT the 16-hex-char `skill_id`
+    slice — content-addressed registry can have aliases (R0-fold B3
+    callout). Sequential reuse after unwind IS allowed (skill A →
+    completes → skill A again is OK; skill A → skill B → skill A is
+    NOT). The middleware itself does NOT push/pop in 2.3c.2 — T3
+    establishes the API surface; T4 / coder-side call sites own the
+    actual push/pop (currently nowhere because skill-body recursion
+    in 2.3c.2 is sequential at perform layer, not Python-stack-
+    overlapping). The push/pop helpers are reserved for v0.9.x
+    Python-stack reentrancy paths.
+- **LD3 — Composition expansion: search-time RESOLUTION + content-hash
+  PROVENANCE for replay-explainability (R0-fold B4 narrowed claim)**:
+  when MCTS engine applies `ComposeWithSkillAction(skill_id=X)` via
+  `_apply_compose_with_skill`, the looked-up skill plan's content
+  hash (`plan.id`) is recorded in `:mcts/iteration` provenance
+  alongside the existing `skill_id` field, via NEW
+  `composed_skill_content_hash: str` field at
+  `_mcts_datoms.py:_expand_proposal_record`. Replay byte-identity is
+  provided by the WINNER PLAN AST being content-addressed (winner
+  Plan is fully resolved post-graft; no remaining
+  `[:compose-with-skill ...]` references). The pinned hash is
+  REPLAY-EXPLAINABILITY (audit trail of which skill_id resolved to
+  what content_hash + which Plan AST was grafted) — NOT replay
+  byte-identity mechanism. Future-proofs v0.9.x lazy-graft option
+  where the pin would become load-bearing for replay (execution must
+  use pin, not fresh lookup, to avoid skill drift).
+- **LD4 — UNIFIED dispatcher budget (codex DISAGREE-INDEPENDENT on c)**:
+  `:llm/call` recursion AND `ComposeWithSkillAction`-grafted skill
+  execution feed the SAME `DispatcherContext` budget counter.
+  Independent limits would create bypass loopholes (N composed skills
+  each with depth-1 recursion all locally legal but globally exceed
+  depth=N). Cycle detection (LD2) applies to BOTH composition-driven
+  and recursion-driven skill activation.
+- **LD5 — Audit chain: linear append + parent pointer (W3 RESCOPE at
+  T3-PREP, commit `98df051`)**: AuditEntries are appended LINEARLY to
+  the canonical audit chain (existing semantics — prev_hash links
+  each entry to its predecessor regardless of nesting). T2 ships the
+  NEW field `parent_audit_entry_id: str | None = None` at the
+  AuditEntry dataclass + canonical content hash + wire form
+  (`:audit/parent-audit-entry-id` keyword key) + datom round-trip
+  (`:parent-audit-entry-id` provenance slot) + spec
+  (`audit/parent-audit-entry-id` qualified-name). Default `None`
+  preserves field-level backward compatibility with all 2.0a-2.3c.1
+  audit entries; chain-hash drift expected (R0-fold I3 — re-pinned
+  in lockstep at T2). **W3 RESCOPE rationale**: during T3
+  implementation analysis, a four-way constraint set was discovered:
+  (i) G4's "peak depth=2" assertion + (ii) audit middleware's LIFO
+  `try`/`finally` append ordering + (iii) AuditEntry's frozen +
+  content-hashed invariant + (iv) linear prev_hash chain integrity.
+  These four cannot be simultaneously satisfied for nested-Python-
+  stack `:llm/call` cases without either (a) a two-layer audit-chain
+  redesign (~150-200 LOC; pre-compute "header id" at entry, augment
+  with verdict/result at finally) or (b) outer-finally back-patching
+  with cascading hash recomputation. Both exceed phase scope.
+  **Resolution: T2 ships the field; T3 wires DispatcherContext
+  through the middleware for cycle detection (LD2) + budget
+  enforcement (LD1) but leaves `parent_audit_entry_id` always None
+  at the audit middleware layer. Active wiring of non-None values is
+  rescoped to v0.9.x.** G3 reformulated as STRUCTURAL-ONLY (5
+  assertion classes a-e; no middleware-population assertion). G4
+  revised to assert SEQUENTIAL-recursion semantics (depth peaks at 1
+  per call; request_count cumulative=2; depth bound MAX=3 retained
+  as safety cap for hypothetical Python-stack reentrancy via tool-
+  handlers). The depth-2-peak assertion was the original load-bearing
+  G4(c) but is incompatible with sequential recursion at the perform
+  layer; v0.9.x track gets the depth-2-peak Python-stack-reentrancy
+  acceptance signal alongside the active wiring of
+  `parent_audit_entry_id`.
+- **LD6 — FD7 lift: 2 lines deleted in `_searcher.py`**:
+  `_searcher.py:361` (kind-string drop of `ComposeWithSkillAction`
+  pre-decode) + `_searcher.py:369` (isinstance belt-and-braces drop
+  post-decode) BOTH REMOVED. `_dry_run_apply_action_safely` gains
+  `skill_library: SkillLibrary | None = None` parameter forwarding
+  to `apply_action`; without this, `_apply_compose_with_skill` would
+  raise `_SkillNotRegistered` at the engine layer for every compose
+  proposal, defeating the lift's purpose (FD-T5.1).
+  `_make_branch_expander(coder, skill_library)` +
+  `_make_branch_evaluator(coder, skill_library)` gain explicit
+  parameter (falls back to `coder.skill_library` via `getattr`).
+  `_escalate_branch_body` threads `coder.skill_library` into both
+  factories AND into `mcts_search(... skill_library=...)`. The
+  existing 2.3b reject test
+  `test_expander_drops_compose_with_skill_action` is RECAST per LD6
+  option (b) as a NEGATIVE coverage test: with `coder.skill_library
+  = None`, ComposeWithSkillAction proposals still reject, but now via
+  the dry-run layer rather than the wrapper-layer pre-decode bans.
+- **LD7 — SUBSTRATE PREREQS: NONE.** `SkillLibrary` +
+  `_apply_compose_with_skill` + `Action` ADT (incl.
+  `ComposeWithSkillAction`) all already shipped (Phase 2.0c-prime
+  for substrate; 2.3c.1 for coder-side bridge). Audit middleware
+  extension for `parent_audit_entry_id` is INSIDE `audit.py` — not
+  a new substrate primitive, just a new field on AuditEntry.
+  `DispatcherContext` is INSIDE the coder boundary —
+  substrate-side `s.effect.perform` is unchanged.
+
+### Forced spec deviations
+
+1. **FD-T1.1** (T1) — `RecursionBudget` field naming chose short-form
+   lowercase (`max_depth` / `max_tokens` / `max_requests`) per
+   dataclass conventions over uppercase mirroring the
+   `MAX_LLM_CALL_DEPTH` / `MAX_RECURSIVE_TOKENS` /
+   `MAX_RECURSIVE_REQUESTS` module constants. The short→long mapping
+   is documented in the dataclass docstring. Spec-permitted choice
+   per T1 task spec; no design conflict.
+2. **FD-T2.1** (T2) — `repl/_audit.py` symmetric update. Discovery
+   at T2 that `persistence.repl._audit.py` is a THIRD AuditEntry
+   producer (alongside `effect/handlers/audit.py` + the 2.3c.1
+   skill handler emit path). The `parent_audit_entry_id` field add
+   required mirroring there for symmetry; otherwise `:repl/op`
+   AuditEntries would have a different shape than canonical-chain
+   entries. Documented inline at `repl/_audit.py:116`.
+3. **FD-T2.2** (T2) — `parent_audit_entry_id` has NO bare-snake_case
+   dual-namespace alias (the linear-chain pattern reserved this slot).
+   Wire form is `:audit/parent-audit-entry-id` keyword key (matches
+   2.3c.1 `:audit/skill-id` etc. convention). The dataclass field is
+   already snake_case; canonical content hash includes it under the
+   bare key. No additional aliases needed.
+4. **FD-T3.1** (T3) — `_make_dispatcher_handler` reads
+   `dctx.budget.max_tokens` (etc.) via the bound `RecursionBudget`
+   instance, NOT via the module-level `MAX_*` constants. Necessary
+   so test fixtures can exercise tight budgets via
+   `DispatcherContext(budget=RecursionBudget(max_tokens=N, ...))`.
+   The design's intent already had `RecursionBudget` as the override
+   seam, but explicit confirmation in the impl path was required.
+5. **FD-T3.2** (T3) — Layer 4 fallback charges
+   `estimated_input + injected_max_tokens` (NOT just
+   `estimated_input`). Discovered when G2.6's "subsequent-call sees
+   overcount" test exposed that without the injected-cap component,
+   two consecutive no-usage calls under a generous budget would not
+   show cumulative growth (Layer 3 caps output but the fallback
+   without the cap component would under-account). Spec text in
+   design § LD1 R1.1-fold matches the fix exactly.
+6. **FD-T3.3** (T3) — Datom shape returned by `audit_entry_to_datom`
+   is a `dict` keyed via `":datom/provenance"`, NOT a named-tuple
+   with a `.p` attribute as the initial G3.d test sketch assumed.
+   G3.d tests adjusted to access
+   `datom[":datom/provenance"][":parent-audit-entry-id"]`, which is
+   the actual wire form per the existing impl.
+7. **FD-T5.1** (T5) — `_dry_run_apply_action_safely` signature MUST
+   gain a `skill_library` parameter for the FD7 lift to actually
+   function. Without forwarding it to `apply_action`, every
+   `ComposeWithSkillAction` proposal would still reject at the
+   engine layer with `_SkillNotRegistered`, defeating the lift.
+   Design § LD6 estimated `+10/-2` for `_searcher.py` but the actual
+   change is broader (~+92/-34) because of this signature cascade
+   into `_make_branch_expander` / `_make_branch_evaluator` /
+   `_escalate_branch_body` plumbing.
+8. **FD-T5.2** (T5) — `_make_branch_evaluator` gained a
+   `skill_library` parameter for symmetry with
+   `_make_branch_expander` even though the evaluator does NOT
+   currently consume it. Marked `del skill_library` with a comment
+   reserving it for future evaluator-side composition discipline
+   (queued for 2.4a confidence-tied skill quality scoring).
+9. **FD-T5.3** (T5; = design's anticipated FD-A3) —
+   `_apply_compose_with_skill` itself didn't need changes, but
+   `_expand_proposal_record` + `_reject_record` in
+   `_mcts_datoms.py` did (both gain `skill_library: SkillLibrary |
+   None = None` kwarg; emit `composed_skill_content_hash` only when
+   lookup succeeds — emit-only-when-set pattern mirroring
+   `txn_commit`). Three callsites in `_mcts.py` updated to forward
+   `skill_library`: 2 in `_populate_children` (reject path, where
+   `skill_library` was already in scope) and 1 in `mcts_search`
+   (expand-phase loop, where `skill_library` is the function
+   parameter).
+10. **FD-T5.4** (T5) — G5.5 assertion revised under actual graft
+    semantics. The design's literal R1-fold N1 wording asserts
+    `looked_up_plan.id in collected_ids` post-graft, but
+    `_apply_compose_with_skill` at `_mcts.py:218-224` (existing
+    2.3c.1 code, NOT modified by 2.3c.2) constructs a NEW root with
+    `tag=skill_plan.tag`, `attrs=skill_plan.attrs`,
+    `children=(subtree, *skill_plan.children)` — so `skill_plan.id`
+    is NOT preserved (different children → different content hash).
+    Replaced with two equivalent falsifiability assertions: (A)
+    every `skill_body.children` content hash appears in the winner
+    AST, (B) the compose-root carries `skill_body.tag` and
+    `skill_body.attrs` byte-identically with skill children present.
+    Same sophisticated-bug catch ("pin correct, graft wrong" still
+    fails) under the actual graft semantics.
+11. **FD-T6.1** (T6) — G4(b)+(c)'s LITERAL `request_count == 2`
+    only holds on the SIMPLE path (no MCTS). The full MCTS path
+    interleaves multiple expander+evaluator `:llm/call` invocations
+    under the SAME bound `DispatcherContext` (LD4 unified budget
+    claim), pushing request_count to ~6+. Splitting G4 into separate
+    `(a)(b)(c)-simple` and `(e)-mcts` sub-tests honors both design
+    intents cleanly: the simple path gives sharp falsifiability for
+    LD4 unified-counter; the mcts path gives sharp falsifiability
+    for LD3 content-hash provenance pinning.
+12. **FD-T6.2** (T6) — G4(f) replay byte-identity claim narrowed
+    to winner Plan AST content-hash equality across runs, NOT audit
+    chain byte-identity. Coder's `_decide` + `_act` emit wall-clock
+    provenance facts (`:llm/messages`, `:llm/decision`,
+    `:act/result`) BEFORE the audit handler emits, and those facts
+    carry `dt.datetime.now` timestamps not routed through the
+    pinned clock. Full audit-chain byte-identity would require
+    pinning those provenance timestamps too (queued for 2.4a
+    `:sys/now` substrate op). LD3 R0-fold B4 explicitly narrowed
+    the replay-byte-identity claim to the winner Plan AST
+    content-addressing, which IS what G4(f) verifies.
+
+### Test surface
+
+Six new test files under `tests/coder/`, all green:
+
+- `test_recursion_dispatcher.py` — G1 `DispatcherContext` lifecycle
+  + push/pop API surface (T1 + T3 extension): 37 G1 cases (counters
+  / ContextVar binding / fresh-on-outermost / depth + request bound
+  parametrized / `LLMRecursionBudgetExceeded` field validation /
+  `SkillCycleDetected` is `_PlanCycleDetected` subclass) + 8
+  push/pop cases (append / active-duplicate-raises / LIFO discipline
+  / sequential-reuse-after-unwind allowed / content-hash keying not
+  skill_id slice).
+- `test_recursion_budget.py` — G2 budget enforcement at the
+  audit-stack middleware: 26 cases covering all 7 sub-cases (G2.1
+  depth bound, G2.2 token Layer 1+2, G2.3 request bound, G2.4 LD4
+  unified budget, G2.5 Layer 4 post-call accounting, G2.6 Layer 4
+  fallback, G2.7 Layer 3 output-cap injection) + 4 invariant tests
+  (layer-ordering: bounds raise BEFORE provider invoked;
+  pass-through invariant: no max_tokens injection without bound
+  DispatcherContext).
+- `test_recursion_audit_chain.py` — G3 STRUCTURAL-ONLY (per LD5 W3
+  rescope at commit `98df051`): 23 cases across 5 assertion classes
+  a-e (canonical-content-hash participation, field validation,
+  `to_edn` / `from_edn` round-trip, datom round-trip via
+  `:parent-audit-entry-id` provenance slot, middleware-layer None
+  invariant under 2.3c.2 scope). G3.e tests will FAIL when v0.9.x
+  activates `parent_audit_entry_id` wiring (intentional flip — the
+  v0.9.x track's falsifiable acceptance signal).
+- `test_composition_proposal_acceptance.py` — G5 FD7 lift verified:
+  8 cases (G5.1 wrapper accepts proposal when skill_library
+  provided, drops when None, drops when skill_id unregistered;
+  G5.2 bridge passes coder.skill_library to mcts_search; G5.3
+  expand-phase provenance carries `composed_skill_content_hash`
+  equal to `looked_up_plan.id`; G5.4 LOAD-BEARING falsifiability:
+  pinning is 32-hex content_hash NOT 22-char skill_id slice
+  (length-discrimination); G5.5 LOAD-BEARING: post-graft AST
+  contains skill_body's children + carries skill's tag/attrs at
+  compose-root level).
+- `test_recursion_composition_g4.py` — **G4 LOAD-BEARING** end-to-end
+  recursion + composition: 5 tests across 6 falsifiability assertion
+  classes (a-f). Split into (a)(b)(c)-simple-path (single test
+  asserting chain integrity + cumulative request_count==2 + peak
+  depth=1 per call), (d) cycle detection Layer A static + Layer B
+  push/pop, (e) provenance content_hash via full MCTS path, (f)
+  replay byte-identity via winner Plan AST plan.id equality across
+  two pinned-clock runs.
+- `tests/coder/test_searcher_expander.py` — UPDATED per LD6 option
+  (b): `test_expander_drops_compose_with_skill_action` recast as
+  `test_expander_drops_compose_with_skill_action_when_skill_library_absent`
+  — wrapper-layer drops are gone; rejection now happens at the
+  dry-run layer when `skill_library is None` or `skill_id` is
+  unregistered. Negative coverage preserved.
+
+Suite delta: 2562 → roughly 2562 + 122 net new tests across 5 new
+files + 1 modified test file + 4 drift-pin re-pinnings (T2 audit
+shape cascade) + 1 modified expander test (LD6 option (b) recast).
+**122 recursion + composition tests pass** (37 G1 + 8 push/pop + 26
+G2 + 23 G3 + 8 G5 + 15 expander + 5 G4). Full coder + effect + plan
+suite: **1293 passed, 7 skipped, 8 xfailed** (excluding 2 pre-existing
+CLI banner-text failures + 1 pre-existing flaky byte-identity test
+in `test_loop_replay.py` — flake rate unchanged from pre-2.3c.2
+baseline at ~3/5 runs both before and after).
+
+**G4 is the load-bearing gate** per design § 4 codex consensus.
+Falsifiability assertion classes split across 5 sub-tests:
+
+- (a) Audit chain integrity over both `:llm/call` AuditEntries —
+  prev_hash chain walked backward inner→outer matches; broken
+  middleware would fail.
+- (b) `request_count == 2` cumulative under bound DispatcherContext
+  — captured spy snapshots; broken DispatcherContext binding would
+  fail. LITERAL-2 holds only on simple path per FD-T6.1.
+- (c) Peak depth = 1 per call (sequential perform-level recursion)
+  — broken depth decrement would fail.
+- (d) Cycle detection rejects A→A — Layer A direct
+  `_apply_compose_with_skill` raises `_PlanCycleDetected`; Layer B
+  `push_cycle` raises `SkillCycleDetected` on active duplicate.
+- (e) `composed_skill_content_hash == looked_up_plan.id` survives
+  end-to-end through `_escalate_branch_body` — full MCTS path;
+  length-discrimination check (32-hex content hash, NOT 22-char
+  skill_id) catches "fake" pinning.
+- (f) Replay byte-identity via winner Plan AST plan.id equal across
+  two pinned-clock runs (LD3 R0-fold B4: replay byte-identity is
+  provided by content-addressing, NOT by audit-chain byte-identity).
+
+### v0.9.x rescopes queued (per design § 8 W3 honest-rescope)
+
+The R1.4 lite PASS at mean **7.68 / min 7.2** is below the standard
+ARIS soft-mode threshold (mean ≥ 8.0 / min ≥ 7.5). This is a
+hard-mode PASS via the W3 honest-rescope pattern (CLAUDE.md
+2.0d-at-6.4 precedent + 2.3c.1 R1.2 precedent which also froze at
+7.80/7.2). All in-scope findings are closed; the following residuals
+are queued with falsifiable acceptance signals:
+
+1. **LD5 `parent_audit_entry_id` ACTIVE WIRING (T3-PREP rescope at
+   commit `98df051`)** — T2 already shipped the field at the
+   dataclass + chain-hash + wire form + datom round-trip + spec
+   layers; 2.3c.2 leaves the field always `None` at the audit
+   middleware layer per the four-way constraint set surfaced during
+   T3 implementation analysis. **Falsifiable acceptance signal for
+   v0.9.x track**: integration test where a `:llm/call` audit entry
+   produced from a Python-stack-nested dispatch carries
+   `parent_audit_entry_id` referencing the outer dispatch's audit
+   entry id (currently always None at middleware layer). Resolution
+   requires either a two-layer audit-chain redesign (~150-200 LOC;
+   pre-compute "header id" at entry, augment with verdict/result at
+   finally) or outer-finally back-patching with cascading hash
+   recomputation. Both exceed phase scope.
+2. **Tokenizer-aware token counting for arbitrary providers** (LD1
+   Layer 2 + Layer 4 best-effort gap) — current Layer 2 estimation
+   uses `len(json.dumps(messages)) // 4` which under-counts for
+   role/tool blocks per R1-fold I1; current Layer 4 fallback when
+   `usage.total_tokens` is missing uses `estimated_input +
+   injected_max_tokens` conservative-overcount substitute. v0.9.x
+   will need provider-specific tokenizer integration for arbitrary
+   providers.
+3. **Streaming + arbitrary-provider safety beyond Anthropic +
+   OpenAI** (LD1 demo-scope) — 2.3c.2 demo uses Anthropic + OpenAI
+   which BOTH honor `max_tokens` per public APIs; streaming is OUT
+   of demo scope. v0.9.x will need provider-specific honor-checks +
+   streaming safety hooks.
+4. **Replay tooling consumes `parent_audit_entry_id`** — depends on
+   the LD5 v0.9.x activation above. Replay tooling can't consume
+   what middleware doesn't populate.
+5. **Production CLI wiring of recursion-aware dispatcher** — mirrors
+   2.2b deferral pattern (and 2.3c.1's `make_skill_handler`
+   deferral). The dispatcher handler from
+   `_audit_stack._make_dispatcher_handler` is wired by default into
+   `canonical_audit_stack(...)` so any `Substrate.open()` already
+   has it; production CLI wiring of `Coder(skill_library=...)` (so
+   `_escalate_branch_body` threads the live SkillLibrary into MCTS)
+   is the gap. Queued for 2.4a.
+6. **Full audit-chain byte-identity replay (FD-T6.2)** — Coder's
+   `_decide` + `_act` emit wall-clock provenance facts before the
+   audit handler emits; G4(f) only verifies winner Plan AST
+   content-hash equality. Full audit-chain byte-identity requires
+   pinning those provenance timestamps via a `:sys/now` substrate
+   op. Queued for 2.4a.
+
+(All 5 carried v0.9.x rescopes from 2.3c.1 — Case E recovery, A7
+PromotionRecord, multi-process define-races, store-identity-keyed
+SkillLibrary registry, production CLI wiring of `make_skill_handler`
+— remain queued unchanged.)
+
+### Module layout
+
+NEW:
+
+- `src/persistence/coder/_recursion.py` (~376 LOC including
+  comprehensive docstrings) — `DispatcherContext`,
+  `RecursionBudget`, `LLMRecursionBudgetExceeded`,
+  `SkillCycleDetected(_PlanCycleDetected)`, 3 module constants
+  (`MAX_LLM_CALL_DEPTH=3`, `MAX_RECURSIVE_TOKENS=20_000`,
+  `MAX_RECURSIVE_REQUESTS=10`), `_DISPATCHER_CONTEXT` ContextVar +
+  `current_dispatcher_context()` + `dispatcher_context(ctx)`
+  context manager + `enter_call` / `exit_call` bounds-check helpers
+  + `push_cycle` / `pop_cycle` cycle-path helpers (T3 add). T1
+  ships the type plumbing + ContextVar binding + bounds-check
+  helpers; T3 adds push/pop API surface for LD2 Layer B execution-
+  time dynamic active-path check.
+- 5 new test files: `test_recursion_dispatcher.py` (491 LOC),
+  `test_recursion_budget.py` (539 LOC),
+  `test_recursion_audit_chain.py` (318 LOC),
+  `test_composition_proposal_acceptance.py` (659 LOC — T5 G5),
+  `test_recursion_composition_g4.py` (657 LOC — T6 G4
+  LOAD-BEARING).
+
+MODIFIED:
+
+- `src/persistence/effect/handlers/audit.py` (+77 — T2: add
+  `parent_audit_entry_id: str | None = None` field to AuditEntry;
+  validation in `__post_init__`; include in canonical content hash
+  + `to_edn` / `from_edn` round-trip + `audit_entry_to_datom` /
+  `datom_to_audit_entry` round-trip via `:parent-audit-entry-id`
+  provenance slot; ctx-dict read at finally-time always returns
+  `None` per LD5 W3 rescope).
+- `src/persistence/effect/_audit_stack.py` (+199 — T3: add
+  `_make_dispatcher_handler` private factory wrapping `:llm/call`
+  with 4-layer token enforcement + `enter_call`/`exit_call` bounds
+  + ContextVar pass-through when no DispatcherContext bound;
+  insert at OUTERMOST position in `canonical_audit_stack` so budget
+  rejections raise BEFORE AuditEntry would emit).
+- `src/persistence/spec/_canonical.py` (+8 — T2:
+  `audit/parent-audit-entry-id` qualified-name + canonical
+  ordering).
+- `src/persistence/repl/_audit.py` (+9 — T2: symmetric update for
+  the `:repl/op` AuditEntry producer; FD-T2.1).
+- `src/persistence/coder/__init__.py` (+11 — T1: re-export
+  `LLMRecursionBudgetExceeded` + `SkillCycleDetected` as public
+  error surface; private value types stay package-internal).
+- `src/persistence/coder/_session.py` (+30-50 — T4:
+  `dispatcher_context(DispatcherContext())` wrapper around each
+  iteration body in `Coder.run()` so per-iteration fresh ctx + LD3
+  unified budget cycle reset; +6 — T5: `skill_library:
+  SkillLibrary | None = None` field on Coder dataclass).
+- `src/persistence/coder/_planner.py` (+~14 / -2 — T4:
+  `REGISTERED_LEAF_TAGS` extended 12 → 13 with `:llm/call` so the
+  planner can dispatch skill-body `:llm/call` leaves; docstring
+  update).
+- `src/persistence/coder/_searcher.py` (+92 / -34 — T5: FD7 lift +
+  SkillLibrary threading through `_make_branch_expander` /
+  `_make_branch_evaluator` / `_dry_run_apply_action_safely` /
+  `_escalate_branch_body` / `mcts_search` invocation).
+- `src/persistence/plan/_mcts.py` (+13 / -5 — T5 FD-T5.3: 3
+  callsites updated to forward `skill_library` to
+  `_expand_proposal_record` / `_reject_record`).
+- `src/persistence/plan/_mcts_datoms.py` (+42 / -6 — T5: add
+  `composed_skill_content_hash` field via `skill_library`
+  parameter on `_expand_proposal_record` + `_reject_record`;
+  emit-only-when-set pattern mirroring `txn_commit`).
+- `tests/effect/test_audit_*.py` (+N — T2 drift-pin re-pinning
+  across 4 files for the AuditEntry shape change).
+- `tests/coder/test_planner_validate.py` (+/-N — T4 drift-pin from
+  12 → 13 ops for `:llm/call` addition).
+- `tests/coder/test_searcher_expander.py` (+26 — T5 LD6 option
+  (b): negative-case recast for compose proposal drop when
+  `skill_library` is None).
+
+### Implementer pattern (7th use; hybrid + W3 rescope mid-phase)
+
+Persistent semantic owner across the phase (T1, T3, T5, T6, T8) +
+per-task fresh sessions for isolated tickets (T2) + controller-direct
+(T4 coder-side bridge, T3-PREP W3 rescope, T7 SKIPPED). Total
+implementer hand-offs: 5 (T1 → T3 → T5 → T6 → T8) on the persistent
+semantic owner; T2 + T4 + T3-PREP rescope handled directly by
+controller. **T7 SKIPPED** because G6 (cycle detection) is fully
+covered by T3 push/pop unit tests (8 cases incl. content-hash
+keying) + T5 G5.4 (alias case at unit level) + T6 G4(d) (Layer A
+& Layer B end-to-end); G7 (boundary parametrized) is fully covered
+by T1 G1.4 depth boundary + T3 G2 parametrized boundary tests. No
+remaining T7 scope.
+
+Pattern validated: NO 2.3b T6-style death incident across 5 hand-offs
+(matches 2.3c.1 clean-pattern repeat). FD-T3.1 / FD-T5.1 / FD-T5.4
+/ FD-T6.1 / FD-T6.2 all surfaced + closed in-task without
+re-spec-review. FD-T2.1 (`repl/_audit.py` third-producer) was a
+mid-T2 discovery; closed in-task. T3-PREP W3 rescope was a
+mid-phase scope adjustment driven by T3 implementation analysis
+surfacing the four-way constraint set; controller-direct rescope
+of LD5 active-wiring + G3/G4 reformulation kept the rest of T3-T8
+unblocked.
+
+**Subagent-driven-development pattern (7th use, hybrid + rescope):**
+- Persistent implementer: T1, T3, T5, T6, T8
+- Per-task fresh: T2
+- Controller-direct: T4, T3-PREP rescope, T7-skip decision
+
+Calendar: ~5-7 hours controller time across 1 calendar day (T0
+design + T1-T8 ship). 17-20 files in scope (~3000 LOC test
+additions + ~600 LOC src additions including comprehensive
+docstrings).
+
+### Critical-path next
+
+**2.3d** (REPL pause hook) → **2.4a-d harden** (dogfood + production
+CLI + `:sys/now` substrate op for full audit-chain byte-identity per
+FD-T6.2 + production CLI wiring of recursion-aware dispatcher and
+SkillLibrary thread-through to Coder constructor) → **2.4c lockfile**
+(~Fri 2026-06-12) → **`v0.9.0a1` tag** (by 2026-06-14). Phase 2 hard
+cutoff: 2026-06-05; ~28 days runway. Status: **WELL UNDER BUDGET**
+— 2.3c.2 was the LAST major coder-side scope item before harden
+phases.
+
 ## Phase 2.3c.1 — 2026-05-07 (Skill library coder integration — `:skill/define` + `:skill/lookup` audit-anchored ops)
 
 Phase 2.3c.1 ships TWO new audit-wrapped substrate effect ops

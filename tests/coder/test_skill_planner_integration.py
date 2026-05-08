@@ -51,24 +51,26 @@ from persistence.sdk import Substrate
 # ---------------------------------------------------------------------------
 
 
-def test_g5_1_registered_leaf_tags_is_exact_12_tag_set():
+def test_g5_1_registered_leaf_tags_is_exact_13_tag_set():
     """LD6 + LD6 R0-fold I2 single-source-of-truth: the constant equals
-    EXACTLY the 12 expected tags (10 carried from 2.3a/2.3b + the 2
-    skill ops added at 2.3c.1).
+    EXACTLY the 13 expected tags (10 carried from 2.3a/2.3b + the 2 skill
+    ops added at 2.3c.1 + :llm/call added at 2.3c.2 T4 for skill-body
+    recursion).
     """
     expected = frozenset({
         ":fs/read", ":fs/write", ":fs/glob", ":fs/grep",
         ":shell/exec", ":code/run",
         ":git/diff", ":git/status", ":git/log", ":git/commit",
         ":skill/define", ":skill/lookup",
+        ":llm/call",  # Phase 2.3c.2 T4
     })
     assert REGISTERED_LEAF_TAGS == expected, (
         f"REGISTERED_LEAF_TAGS drift detected.\n"
-        f"  expected (12): {sorted(expected)}\n"
+        f"  expected (13): {sorted(expected)}\n"
         f"  actual   ({len(REGISTERED_LEAF_TAGS)}): "
         f"{sorted(REGISTERED_LEAF_TAGS)}"
     )
-    assert len(REGISTERED_LEAF_TAGS) == 12
+    assert len(REGISTERED_LEAF_TAGS) == 13
 
 
 # ---------------------------------------------------------------------------
@@ -76,18 +78,19 @@ def test_g5_1_registered_leaf_tags_is_exact_12_tag_set():
 # ---------------------------------------------------------------------------
 
 
-def test_g5_2_register_substrate_handlers_makes_exactly_12_register_calls():
-    """Spy on ``dispatcher.register`` and verify exactly 12 calls — one
+def test_g5_2_register_substrate_handlers_makes_exactly_13_register_calls():
+    """Spy on ``dispatcher.register`` and verify exactly 13 calls — one
     per tag in ``REGISTERED_LEAF_TAGS``. Each call's first arg must be
-    in the constant (no surprise tags from drift).
+    in the constant (no surprise tags from drift). Phase 2.3c.2 T4
+    bumped the count from 12 → 13 by adding :llm/call.
     """
     mock_dispatcher = MagicMock()
 
     with Substrate.open("memory") as s:
         _register_substrate_handlers(mock_dispatcher, s)
 
-    assert mock_dispatcher.register.call_count == 12, (
-        f"expected 12 dispatcher.register calls, got "
+    assert mock_dispatcher.register.call_count == 13, (
+        f"expected 13 dispatcher.register calls, got "
         f"{mock_dispatcher.register.call_count}"
     )
 

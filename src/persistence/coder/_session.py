@@ -32,6 +32,7 @@ from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.sdk import Substrate
 
 from ._prompt import EMIT_DECISION_TOOL_SCHEMA, build_messages, parse_text_decision
+from ._recursion import DispatcherContext, dispatcher_context
 from ._types import LLMDecision, Observation
 
 
@@ -69,17 +70,23 @@ class Coder:
         self._session_start_dt = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
         for i in range(self.max_iters):
             self._iter_count = i
-            obs = self._observe()
-            decision = self._decide(obs)
-            if self._should_escalate_branch(decision):
-                self._escalate_branch(decision)  # raises CoderStubNotImplemented
-                return
-            if self._should_escalate_plan(decision):
-                self._escalate_plan(decision)  # raises CoderStubNotImplemented
-                return
-            if decision.payload.get("done"):
-                return
-            self._act(decision)
+            # Phase 2.3c.2 LD1 R0-fold I2: DispatcherContext lifetime is
+            # ONE full _decide ↔ _act ↔ _observe cycle. Fresh context per
+            # iteration; counters reset between iterations. The
+            # ContextVar binding lets `_audit_stack._make_dispatcher_handler`
+            # read the live context for budget enforcement + cycle API.
+            with dispatcher_context(DispatcherContext()):
+                obs = self._observe()
+                decision = self._decide(obs)
+                if self._should_escalate_branch(decision):
+                    self._escalate_branch(decision)  # raises CoderStubNotImplemented
+                    return
+                if self._should_escalate_plan(decision):
+                    self._escalate_plan(decision)  # raises CoderStubNotImplemented
+                    return
+                if decision.payload.get("done"):
+                    return
+                self._act(decision)
 
     # --- ReAct primitives — Phase 2.1b/2.2a fill these ---------------
 

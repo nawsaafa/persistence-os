@@ -75,11 +75,12 @@ def test_validate_rejects_unregistered_leaf_tag():
     )
 
 
-def test_registered_leaf_tags_constant_lists_all_12_ops():
+def test_registered_leaf_tags_constant_lists_all_13_ops():
     """Sanity: REGISTERED_LEAF_TAGS frozen set matches design LD5/LD6 enumeration.
 
     Was 10 ops in 2.3a/2.3b; Phase 2.3c.1 LD6 added :skill/define +
-    :skill/lookup. Tags are keyword-form (with leading colon) to match
+    :skill/lookup; Phase 2.3c.2 T4 added :llm/call (skill-body recursion
+    enabler). Tags are keyword-form (with leading colon) to match
     Node.tag after EDN parse — Node.__post_init__ enforces this invariant.
     """
     expected = frozenset({
@@ -88,5 +89,7 @@ def test_registered_leaf_tags_constant_lists_all_12_ops():
         ":git/diff", ":git/status", ":git/log", ":git/commit",
         # Phase 2.3c.1 — skill library coder integration (LD6).
         ":skill/define", ":skill/lookup",
+        # Phase 2.3c.2 — :llm/call recursion in skill bodies (T4).
+        ":llm/call",
     })
     assert REGISTERED_LEAF_TAGS == expected

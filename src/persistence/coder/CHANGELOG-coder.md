@@ -475,9 +475,14 @@ are queued with falsifiable acceptance signals:
    `Exception` catch (T9.1-fold NICE)** — codex Impl R1 NICE
    finding: `_searcher.py:309`'s broad `except Exception` swallows
    unexpected engine bugs alongside the intended drop-malformed-
-   proposals contract. Queued 2.4a: ensure failures are observable
+   proposals contract. **Queued 2.4a** (NOT v0.9.x — observability
+   plumbing belongs in the dogfood/harden phase track alongside
+   production CLI wiring at item #6): ensure failures are observable
    somewhere (metrics/log/telemetry) before silent-drop semantics
-   become production-load-bearing.
+   become production-load-bearing. (Frame note: items #1+#2+#3+#4+#5+#7
+   are v0.9.x-track; items #6 + #8 are 2.4a-track. Section header
+   "v0.9.x rescopes queued" is shorthand — the queued track is per
+   item.)
 
 (All 5 carried v0.9.x rescopes from 2.3c.1 — Case E recovery, A7
 PromotionRecord, multi-process define-races, store-identity-keyed

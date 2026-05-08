@@ -417,7 +417,31 @@ are queued with falsifiable acceptance signals:
    pre-compute "header id" at entry, augment with verdict/result at
    finally) or outer-finally back-patching with cascading hash
    recomputation. Both exceed phase scope.
-2. **Tokenizer-aware token counting for arbitrary providers** (LD1
+2. **LD2 Layer B execution-time RUNTIME WIRING (T9.1-fold rescope at
+   commit on this phase's tail)** — T1 + T3 shipped the API surface
+   (`DispatcherContext.cycle_path` + `push_cycle` + `pop_cycle` +
+   `SkillCycleDetected`) with comprehensive unit-test coverage
+   (T3 push/pop tests, 8 cases incl. content-hash keying + alias case
+   + sequential-reuse-after-unwind). 2.3c.2 leaves the runtime call
+   sites unwired — `_apply_compose_with_skill` does not mark grafted
+   subtrees with skill content hash; planner does not push/pop
+   `cycle_path` on grafted-subtree entry/exit. Layer A
+   (search-time static subtree check at `_mcts.py:213-217`) is FULLY
+   ACTIVE in 2.3c.2 and covers STRUCTURAL cycles — the demo's actual
+   cycle exposure surface, since sequential perform-level recursion
+   does not exhibit Python-stack reentrancy. **Falsifiable acceptance
+   signal for v0.9.x track**: integration test where
+   `_escalate_plan_body`'s grafted-skill-body walk pushes/pops
+   `cycle_path` correctly and runtime cycles raise
+   `SkillCycleDetected` end-to-end (currently API-tested only).
+   Resolution requires marking grafted subtrees in
+   `_apply_compose_with_skill` with the skill's content hash +
+   planner-side push/pop on entry/exit of grafted nodes —
+   substrate-side substantive work that exceeds 2.3c.2's stated
+   scope. Surfaced via codex Impl R1 BLOCKING finding (mean
+   7.84/min 7.4); resolved via T9.1-fold W3 rescope mirroring the
+   LD5 pattern.
+3. **Tokenizer-aware token counting for arbitrary providers** (LD1
    Layer 2 + Layer 4 best-effort gap) — current Layer 2 estimation
    uses `len(json.dumps(messages)) // 4` which under-counts for
    role/tool blocks per R1-fold I1; current Layer 4 fallback when
@@ -425,15 +449,15 @@ are queued with falsifiable acceptance signals:
    injected_max_tokens` conservative-overcount substitute. v0.9.x
    will need provider-specific tokenizer integration for arbitrary
    providers.
-3. **Streaming + arbitrary-provider safety beyond Anthropic +
+4. **Streaming + arbitrary-provider safety beyond Anthropic +
    OpenAI** (LD1 demo-scope) — 2.3c.2 demo uses Anthropic + OpenAI
    which BOTH honor `max_tokens` per public APIs; streaming is OUT
    of demo scope. v0.9.x will need provider-specific honor-checks +
    streaming safety hooks.
-4. **Replay tooling consumes `parent_audit_entry_id`** — depends on
+5. **Replay tooling consumes `parent_audit_entry_id`** — depends on
    the LD5 v0.9.x activation above. Replay tooling can't consume
    what middleware doesn't populate.
-5. **Production CLI wiring of recursion-aware dispatcher** — mirrors
+6. **Production CLI wiring of recursion-aware dispatcher** — mirrors
    2.2b deferral pattern (and 2.3c.1's `make_skill_handler`
    deferral). The dispatcher handler from
    `_audit_stack._make_dispatcher_handler` is wired by default into
@@ -441,12 +465,19 @@ are queued with falsifiable acceptance signals:
    has it; production CLI wiring of `Coder(skill_library=...)` (so
    `_escalate_branch_body` threads the live SkillLibrary into MCTS)
    is the gap. Queued for 2.4a.
-6. **Full audit-chain byte-identity replay (FD-T6.2)** — Coder's
+7. **Full audit-chain byte-identity replay (FD-T6.2)** — Coder's
    `_decide` + `_act` emit wall-clock provenance facts before the
    audit handler emits; G4(f) only verifies winner Plan AST
    content-hash equality. Full audit-chain byte-identity requires
    pinning those provenance timestamps via a `:sys/now` substrate
    op. Queued for 2.4a.
+8. **Observability for `_dry_run_apply_action_safely` broad
+   `Exception` catch (T9.1-fold NICE)** — codex Impl R1 NICE
+   finding: `_searcher.py:309`'s broad `except Exception` swallows
+   unexpected engine bugs alongside the intended drop-malformed-
+   proposals contract. Queued 2.4a: ensure failures are observable
+   somewhere (metrics/log/telemetry) before silent-drop semantics
+   become production-load-bearing.
 
 (All 5 carried v0.9.x rescopes from 2.3c.1 — Case E recovery, A7
 PromotionRecord, multi-process define-races, store-identity-keyed

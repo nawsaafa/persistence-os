@@ -231,9 +231,15 @@ def current_dispatcher_context() -> DispatcherContext | None:
     """Return the currently-bound :class:`DispatcherContext`, or ``None``.
 
     Outside any :func:`dispatcher_context` block, returns ``None``. The
-    audit middleware (T3) uses this to discover whether a ``:llm/call``
-    is happening inside a coder dispatch (in which case it threads
-    parent_audit_entry_id) or stand-alone (no parent).
+    audit middleware (T3 ``_audit_stack._make_dispatcher_handler``) uses
+    this to discover whether a ``:llm/call`` is happening inside a coder
+    dispatch — when bound, the middleware enforces budget bounds
+    (depth + tokens + requests via :func:`enter_call` + 4-layer token
+    enforcement), updates the post-call accounting, and shares the
+    counter with composition (LD4 unified budget). The
+    ``parent_audit_entry_id`` field on :class:`DispatcherContext` ships
+    as plumbing in 2.3c.2 but stays unused at the middleware layer per
+    the LD5 W3 rescope (commit ``98df051``); v0.9.x activates it.
     """
     return _DISPATCHER_CONTEXT.get()
 

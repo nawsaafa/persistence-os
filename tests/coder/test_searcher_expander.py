@@ -88,12 +88,25 @@ def test_expander_provider_routes_through_llm_call():
     assert request["messages"][0]["role"] == "system"
 
 
-def test_expander_drops_compose_with_skill_action():
-    """LD3: ComposeWithSkillAction proposals are dropped at the wrapper
-    layer (deferred to 2.3c). The closure returns 1 valid + 1
-    ComposeWithSkill -> only the valid one survives."""
+def test_expander_drops_compose_with_skill_action_when_skill_library_absent():
+    """Phase 2.3c.2 LD6 option (b) — recast as a NEGATIVE case.
+
+    Original 2.3b LD3: ComposeWithSkillAction proposals were dropped at
+    the wrapper layer (kind-string + isinstance belt-and-braces, FD7).
+    2.3c.2 LIFTS those wrapper-layer drops; rejection now happens at the
+    dry-run layer when (a) skill_library is None or (b) skill_id is
+    unregistered. This test pins case (a): a coder without a
+    skill_library still rejects ComposeWithSkillAction proposals — but
+    via the dry-run path (``_apply_compose_with_skill`` raises
+    ``_SkillNotRegistered``), not the wrapper-layer pre-decode drops.
+
+    The closure returns 1 valid SubstituteLeafAction + 1
+    ComposeWithSkillAction. With ``coder.skill_library is None``, only
+    the valid action survives (compose drops at dry-run).
+    """
     coder = MagicMock()
     coder.model = "claude-test"
+    coder.skill_library = None  # 2.3c.2 — explicit absent skill_library
     coder.substrate.effect.perform.return_value = {
         "tool_calls": [{"input": {"proposals": [
             {
@@ -105,7 +118,7 @@ def test_expander_drops_compose_with_skill_action():
             {
                 "kind": "ComposeWithSkillAction",
                 "target_path": [0],
-                "skill_id": "deferred-to-2.3c",
+                "skill_id": "skill/never-registered",
                 "logit": 5.0,
             },
         ]}}],
@@ -115,7 +128,8 @@ def test_expander_drops_compose_with_skill_action():
     plan = parse('[:seq {} [:fs/read {:path "y.txt"}]]', strict=False)
     proposals = expander.propose(plan, k=4)
 
-    # ComposeWithSkillAction was dropped; only SubstituteLeafAction remains.
+    # ComposeWithSkillAction was dropped at the dry-run layer (no skill
+    # library → _apply_compose_with_skill raises _SkillNotRegistered).
     assert len(proposals) == 1
     action, prior = proposals[0]
     assert isinstance(action, SubstituteLeafAction)

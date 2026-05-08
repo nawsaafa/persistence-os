@@ -26,7 +26,7 @@ import datetime as dt
 import json
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from persistence.effect.canonical import canonical_dumps, canonical_hash
 from persistence.sdk import Substrate
@@ -34,6 +34,9 @@ from persistence.sdk import Substrate
 from ._prompt import EMIT_DECISION_TOOL_SCHEMA, build_messages, parse_text_decision
 from ._recursion import DispatcherContext, dispatcher_context
 from ._types import LLMDecision, Observation
+
+if TYPE_CHECKING:  # pragma: no cover
+    from persistence.plan import SkillLibrary
 
 
 class CoderStubNotImplemented(NotImplementedError):
@@ -55,6 +58,7 @@ class Coder:
     missing_confidence_default: float = 0.5     # base § 3.4 fail-safe (must be < confidence_threshold)
     max_iters: int = 20                          # Phase 2.2a LD2; loop ceiling for run()
     observe_depth: int = 5                       # Phase 2.2a LD3; trailing datom window
+    skill_library: "SkillLibrary | None" = None  # Phase 2.3c.2 LD3+LD6 — threaded into _escalate_branch_body
     _session_start_dt: dt.datetime | None = field(init=False, default=None)  # set by run() — T6
     _iter_count: int = field(init=False, default=0)                          # incremented each loop iter
 

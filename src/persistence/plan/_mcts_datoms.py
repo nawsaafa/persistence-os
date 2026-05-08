@@ -23,6 +23,7 @@ from persistence.plan._ast import Node, _canonical_dict
 
 if TYPE_CHECKING:
     from persistence.plan._mcts import Action
+    from persistence.plan._skill_library import SkillLibrary
 
 
 # --- Schema constants (design §13) -------------------------------------- #
@@ -173,13 +174,30 @@ def _iter_id(
 
 
 def _expand_proposal_record(
-    action: "Action", prior: float
+    action: "Action",
+    prior: float,
+    *,
+    skill_library: "SkillLibrary | None" = None,
 ) -> dict[str, Any]:
     """Per-proposal record inside a ``phase="expand"`` output.
 
     Stores BOTH ``action_hash`` AND canonical Node bytes
     (``new_leaf_canonical`` / ``new_child_canonical``) for synthesized
-    Nodes (W2 M4 closure — the hash alone is one-way)."""
+    Nodes (W2 M4 closure — the hash alone is one-way).
+
+    Phase 2.3c.2 LD3: when ``action`` is a ``ComposeWithSkillAction``
+    AND ``skill_library`` is provided AND the lookup succeeds, the
+    record additionally carries ``composed_skill_content_hash`` —
+    the looked-up skill plan's content-addressed ``plan.id`` (32 hex
+    chars). This is provenance for replay-explainability (audit trail
+    of which skill_id resolved to what content_hash); replay byte-
+    identity itself is provided by the winner Plan AST being content-
+    addressed (R0-fold B4 narrowed claim).
+
+    When ``skill_library`` is None or the skill_id is unregistered, the
+    ``composed_skill_content_hash`` field is omitted (not emitted as
+    None) — matches the ``txn_commit`` emit-only-when-set pattern.
+    """
     # Local imports break the ``_mcts`` ↔ ``_mcts_datoms`` cycle.
     from persistence.plan._mcts import (
         AddStepAction,
@@ -207,6 +225,15 @@ def _expand_proposal_record(
         # Skill plan is recoverable via SkillLibrary.lookup on replay;
         # skill_id is itself content-addressed. No canonical Node needed.
         payload["skill_id"] = action.skill_id
+        # Phase 2.3c.2 LD3 — pin the looked-up skill plan's content
+        # hash for replay-explainability. Omit when lookup is not
+        # possible (no library / unregistered skill_id) so the field
+        # is emit-only-when-set, mirroring txn_commit + parent_audit_entry_id.
+        if skill_library is not None:
+            looked_up = skill_library.lookup(action.skill_id)
+            if looked_up is not None:
+                looked_up_plan, _record = looked_up
+                payload["composed_skill_content_hash"] = looked_up_plan.id
     else:  # pyright: ignore[reportUnreachable]
         raise ValueError(  # pyright: ignore[reportUnreachable]
             f"unknown action kind: {type(action).__name__}"
@@ -222,16 +249,23 @@ def _reject_record(
     *,
     error: BaseException | None = None,
     raw_score: object = None,
+    skill_library: "SkillLibrary | None" = None,
 ) -> dict[str, Any]:
     """``phase="reject"`` output record. Action-side carries full payload
-    (Prop 6); evaluator-side passes ``action=None``."""
+    (Prop 6); evaluator-side passes ``action=None``.
+
+    Phase 2.3c.2 LD3: ``skill_library`` is forwarded to
+    :func:`_expand_proposal_record` so ``ComposeWithSkillAction`` reject
+    records carry ``composed_skill_content_hash`` symmetrically with
+    expand records.
+    """
     if reason not in _REJECT_REASONS:
         raise ValueError(
             f"_reject_record: reason {reason!r} not in {_REJECT_REASONS!r}"
         )
     record: dict[str, Any] = {"plan_id": plan_id, "reason": reason}
     if action is not None:
-        full = _expand_proposal_record(action, 0.0)
+        full = _expand_proposal_record(action, 0.0, skill_library=skill_library)
         record["action_hash"] = full["action_hash"]
         record["action_kind"] = full["action_kind"]
         record["action_payload"] = full["action_payload"]

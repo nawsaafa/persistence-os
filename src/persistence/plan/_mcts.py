@@ -679,8 +679,11 @@ def _populate_children(
             new_plan = apply_action(plan, action, skill_library=skill_library)
         except (ValueError, IndexError, PlanDepthExceeded) as exc:
             reason = _classify_apply_failure(exc)
+            # Phase 2.3c.2 LD3 — forward skill_library so reject records
+            # of ComposeWithSkillAction carry composed_skill_content_hash.
             output_value = _datoms._reject_record(
-                action, node.plan_id, reason, error=exc
+                action, node.plan_id, reason, error=exc,
+                skill_library=skill_library,
             )
             inputs_hash = _datoms._hash_payload({
                 "plan_id": node.plan_id,
@@ -987,9 +990,13 @@ def mcts_search(
                     )
                 expander_cache[node.plan_id] = proposals
                 # phase="expand": full-payload proposal records (W2 M4
-                # canonical Node bytes for synthesized Nodes).
+                # canonical Node bytes for synthesized Nodes). Phase
+                # 2.3c.2 LD3 — forward skill_library so
+                # ComposeWithSkillAction proposals carry the looked-up
+                # plan's content hash in provenance for replay-explainability.
                 expand_output = [
-                    _datoms._expand_proposal_record(a, p) for a, p in proposals
+                    _datoms._expand_proposal_record(a, p, skill_library=skill_library)
+                    for a, p in proposals
                 ]
                 expand_group = _datoms._make_iter_facts(
                     search_id=search_id, iter_index=iter_index,

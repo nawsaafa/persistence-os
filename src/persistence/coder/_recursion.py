@@ -312,6 +312,53 @@ def exit_call(ctx: DispatcherContext) -> None:
     ctx.depth -= 1
 
 
+# ---------------------------------------------------------------------------
+# cycle_path push/pop — LD2 Layer B execution-time API surface (T3 add)
+# ---------------------------------------------------------------------------
+
+
+def push_cycle(ctx: DispatcherContext, content_hash: str) -> None:
+    """Push ``content_hash`` onto ``ctx.cycle_path`` (LD2 Layer B entry).
+
+    Raises :class:`SkillCycleDetected` if the hash is ALREADY in
+    ``cycle_path`` (the hash is currently active up the call chain
+    — re-entering it would form a runtime cycle).
+
+    The hash KEY is the FULL ``plan.id`` (32-hex chars) per LD2 R0-fold
+    B3 — content-addressed registry can have aliases, so skill_id-only
+    keying would miss legitimate cycle cases.
+
+    T3 ships the API surface here; T4 wires the actual call sites
+    (coder-side, when a grafted plan body's ``:llm/call`` leaf is
+    dispatched). The audit-stack middleware does NOT push/pop because it
+    doesn't know which skill body the ``:llm/call`` originated from at
+    that layer.
+    """
+    if content_hash in ctx.cycle_path:
+        raise SkillCycleDetected(
+            f"skill cycle detected: content_hash {content_hash!r} "
+            f"is already active in cycle_path {ctx.cycle_path!r}"
+        )
+    ctx.cycle_path.append(content_hash)
+
+
+def pop_cycle(ctx: DispatcherContext, content_hash: str) -> None:
+    """Pop the matching ``content_hash`` from ``ctx.cycle_path`` (LD2 Layer B exit).
+
+    LIFO discipline — the top-of-stack MUST equal the popped hash.
+    Mismatch raises :class:`RuntimeError` because it indicates a caller
+    bug in the push/pop pairing (T4 must keep the pairs balanced even
+    across exception paths via try/finally).
+    """
+    if not ctx.cycle_path or ctx.cycle_path[-1] != content_hash:
+        top = ctx.cycle_path[-1] if ctx.cycle_path else None
+        raise RuntimeError(
+            f"cycle_path stack discipline violated: top={top!r} "
+            f"pop={content_hash!r}"
+        )
+    ctx.cycle_path.pop()
+
+
 __all__ = [
     "DispatcherContext",
     "LLMRecursionBudgetExceeded",
@@ -324,4 +371,6 @@ __all__ = [
     "dispatcher_context",
     "enter_call",
     "exit_call",
+    "push_cycle",
+    "pop_cycle",
 ]

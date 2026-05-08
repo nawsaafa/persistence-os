@@ -40,6 +40,8 @@ from persistence.coder._recursion import (
     dispatcher_context,
     enter_call,
     exit_call,
+    pop_cycle,
+    push_cycle,
 )
 from persistence.plan._mcts import _PlanCycleDetected
 
@@ -396,3 +398,94 @@ def test_token_count_field_initial_zero_and_mutable() -> None:
     # Mutable dataclass — direct increment is the post-call accounting path
     ctx.token_count += 500
     assert ctx.token_count == 500
+
+
+# ---------------------------------------------------------------------------
+# T3-added — cycle_path push/pop API surface (LD2 Layer B)
+# ---------------------------------------------------------------------------
+
+
+def test_push_cycle_appends_to_cycle_path() -> None:
+    """push_cycle adds the content_hash to ctx.cycle_path."""
+    ctx = DispatcherContext()
+    push_cycle(ctx, "sha256:hash-A")
+    assert ctx.cycle_path == ["sha256:hash-A"]
+    push_cycle(ctx, "sha256:hash-B")
+    assert ctx.cycle_path == ["sha256:hash-A", "sha256:hash-B"]
+
+
+def test_push_cycle_raises_on_active_duplicate() -> None:
+    """push_cycle raises SkillCycleDetected when hash already in cycle_path."""
+    ctx = DispatcherContext()
+    push_cycle(ctx, "sha256:hash-A")
+    push_cycle(ctx, "sha256:hash-B")
+    with pytest.raises(SkillCycleDetected) as exc_info:
+        push_cycle(ctx, "sha256:hash-A")  # already active
+    assert "sha256:hash-A" in str(exc_info.value)
+    # Original path unchanged after raise
+    assert ctx.cycle_path == ["sha256:hash-A", "sha256:hash-B"]
+
+
+def test_push_cycle_skill_cycle_detected_is_plan_cycle_subclass() -> None:
+    """The raised exception is catchable as _PlanCycleDetected (LD2 type
+    relation — search loop's existing except covers it)."""
+    ctx = DispatcherContext()
+    push_cycle(ctx, "sha256:hash-A")
+    with pytest.raises(_PlanCycleDetected):
+        push_cycle(ctx, "sha256:hash-A")
+
+
+def test_pop_cycle_lifo_discipline() -> None:
+    """pop_cycle removes the matching top-of-stack hash."""
+    ctx = DispatcherContext()
+    push_cycle(ctx, "sha256:hash-A")
+    push_cycle(ctx, "sha256:hash-B")
+    pop_cycle(ctx, "sha256:hash-B")
+    assert ctx.cycle_path == ["sha256:hash-A"]
+    pop_cycle(ctx, "sha256:hash-A")
+    assert ctx.cycle_path == []
+
+
+def test_pop_cycle_raises_on_mismatch() -> None:
+    """pop_cycle raises RuntimeError on stack discipline violation."""
+    ctx = DispatcherContext()
+    push_cycle(ctx, "sha256:hash-A")
+    with pytest.raises(RuntimeError, match="cycle_path stack discipline"):
+        pop_cycle(ctx, "sha256:hash-WRONG")
+    # cycle_path unchanged — pop did not occur
+    assert ctx.cycle_path == ["sha256:hash-A"]
+
+
+def test_pop_cycle_raises_on_empty_path() -> None:
+    """pop_cycle on empty cycle_path is a stack discipline violation."""
+    ctx = DispatcherContext()
+    with pytest.raises(RuntimeError, match="cycle_path stack discipline"):
+        pop_cycle(ctx, "sha256:hash-anything")
+
+
+def test_push_pop_allows_reuse_after_unwind() -> None:
+    """LD2 G6.3 sequential reuse: A → completes → A again is OK."""
+    ctx = DispatcherContext()
+    push_cycle(ctx, "sha256:hash-A")
+    pop_cycle(ctx, "sha256:hash-A")
+    # A is no longer in cycle_path; pushing again must NOT raise
+    push_cycle(ctx, "sha256:hash-A")
+    assert ctx.cycle_path == ["sha256:hash-A"]
+
+
+def test_push_cycle_keys_full_content_hash_not_skill_id() -> None:
+    """LD2 R0-fold B3 — keying is FULL plan.id (32-hex), not 16-hex skill_id slice.
+
+    Two distinct skill_ids that share the same content_hash MUST be
+    treated as the same cycle key. Here we simulate by using the same
+    content_hash with different "skill_id-shaped" probes — push_cycle
+    only sees the content_hash argument so the alias case is naturally
+    covered.
+    """
+    ctx = DispatcherContext()
+    full_hash = "sha256:" + "f" * 64
+    push_cycle(ctx, full_hash)
+    # A re-entry attempt with the SAME content_hash (regardless of
+    # which skill_id alias requested it) MUST raise.
+    with pytest.raises(SkillCycleDetected):
+        push_cycle(ctx, full_hash)

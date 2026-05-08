@@ -60,6 +60,21 @@ class AuditEntry:
     principal: dict[str, Any] = field(default_factory=dict)
     run_id: str | None = None
     parent: str | None = None
+    parent_audit_entry_id: str | None = None
+    """SHA-256 hash (``"sha256:..."``) of the OUTER call's AuditEntry id
+    when this entry was emitted from a *nested* dispatch — Phase 2.3c.2
+    LD5. Distinct from :attr:`parent` (which mirrors :attr:`prev_hash`,
+    pointing at the *previous* entry in linear chain order regardless of
+    nesting); ``parent_audit_entry_id`` recovers the parent/child call
+    structure for replay/debug. Default ``None`` for any non-nested
+    entry, preserving backward compatibility with v0.5.x..v0.9.0a1
+    chains. Always part of the canonical content hash (even when
+    ``None``) so prev-hash chain integrity covers it.
+
+    Wired at runtime by the dispatcher middleware (T3) via
+    ``persistence.coder._recursion.DispatcherContext``. T2 adds the
+    plumbing path; T3 supplies the live value.
+    """
     txn_commit: str | None = None
     """UUID of the dosync commit that produced this entry, when the
     audited intent was replayed via ``persistence.txn`` at commit time.
@@ -117,6 +132,25 @@ class AuditEntry:
                 f"AuditEntry.op {op!r} contains a literal dot — collides "
                 "with the audit datom's '/' → '.' encoding"
             )
+
+        # Phase 2.3c.2 LD5 — parent_audit_entry_id, when set, must be a
+        # SHA-256-prefixed string (it points at the OUTER call's AuditEntry
+        # id, which is itself a content hash with a ``"sha256:"`` prefix).
+        # ``None`` is the backward-compatible default for any non-nested
+        # entry; ``None`` is included in the canonical content hash so
+        # prev-hash chain integrity covers it.
+        paeid = self.parent_audit_entry_id
+        if paeid is not None:
+            if not isinstance(paeid, str):
+                raise ValueError(
+                    "AuditEntry.parent_audit_entry_id must be a string "
+                    f"or None, got {type(paeid).__name__}"
+                )
+            if not paeid.startswith("sha256:"):
+                raise ValueError(
+                    f"AuditEntry.parent_audit_entry_id {paeid!r} must "
+                    "be a 'sha256:'-prefixed content hash"
+                )
 
         # ARIS Round 5 W5-audit-canonicalize — canonicalise sibling
         # keyword-keyed fields at construction time (closes R1 N7 +
@@ -262,6 +296,12 @@ class AuditEntry:
                 edn[":audit/run-id"] = self.run_id
         if self.parent is not None:
             edn[":audit/parent"] = self.parent
+        # Phase 2.3c.2 LD5 — :audit/parent-audit-entry-id is the wire-form
+        # mirror of :attr:`AuditEntry.parent_audit_entry_id`; emit only
+        # when non-None to keep wire shape tight (mirrors the
+        # :audit/parent / :audit/run-id emit-when-set rule above).
+        if self.parent_audit_entry_id is not None:
+            edn[":audit/parent-audit-entry-id"] = self.parent_audit_entry_id
         # Mimir Phase B: emit Ed25519 signature + signer-id when set.
         # Both fields are optional in the spec; unsigned entries omit
         # them entirely, preserving wire compatibility with v0.8.0a1.
@@ -326,6 +366,7 @@ class AuditEntry:
             principal=_keyword_map_to_principal(edn.get(":audit/principal", {})),
             run_id=run_id,
             parent=edn.get(":audit/parent"),
+            parent_audit_entry_id=edn.get(":audit/parent-audit-entry-id"),
             signature=edn.get(":audit/signature"),
             signer_id=edn.get(":audit/signer-id"),
         )
@@ -532,6 +573,16 @@ def make_audit_handler(
                 "principal": dict(ctx.get("principal", {})),
                 "run_id": ctx.get("run_id"),
                 "parent": prev_hash,
+                # Phase 2.3c.2 LD5 — read the OUTER call's AuditEntry id
+                # from the dispatcher context. T2 ships the field-add and
+                # plumbing (always None at this layer until T3 wires
+                # ``DispatcherContext`` into ``_audit_stack.py`` and
+                # populates ``ctx["parent_audit_entry_id"]`` per dispatch).
+                # Including the key (even with None) ensures the canonical
+                # content hash covers the new field from this commit
+                # forward — the global chain-hash drift documented in
+                # CHANGELOG-effect.md.
+                "parent_audit_entry_id": ctx.get("parent_audit_entry_id"),
             }
             # v0.5.1 W1 fix-pass — MAJOR-1 (R1): only insert ``txn_commit``
             # into the hashed content when set, mirroring the wire-form
@@ -774,6 +825,17 @@ def audit_entry_to_datom(entry: AuditEntry) -> dict[str, Any]:
         # v0.5.1 N2: symmetric with ``:episode``. Emit only when set so
         # entries from non-txn ``perform`` calls keep a tight wire shape.
         provenance[":effect/txn-commit"] = entry.txn_commit
+    if entry.parent_audit_entry_id is not None:
+        # Phase 2.3c.2 LD5 — emit the outer-call audit entry id under a
+        # bare colon-keyword in the provenance map (symmetric with
+        # ``:effect/txn-commit`` and ``:episode``: emit only when set so
+        # non-nested entries keep a tight wire shape). The corresponding
+        # bare-snake_case dual-namespace alias used by Provenance
+        # TypedDict readers (``parent_provenance_hash``) is reserved for
+        # the *prev_hash* chain pointer per the docstring's policy
+        # paragraph; ``parent_audit_entry_id`` is a *call-nesting* pointer
+        # and lives under its own colon-keyword slot.
+        provenance[":parent-audit-entry-id"] = entry.parent_audit_entry_id
     value = {
         "verdict": _verdict_as_edn(entry.verdict),
         "args_hash": entry.args_hash,
@@ -838,6 +900,11 @@ def datom_to_audit_entry(datom: dict[str, Any]) -> AuditEntry:
         principal=_keyword_map_to_principal(provenance.get(":principal", {})),
         run_id=provenance.get(":episode"),
         parent=provenance.get(":prev-hash"),
+        # Phase 2.3c.2 LD5 — symmetric with audit_entry_to_datom: read the
+        # call-nesting pointer back from its colon-keyword slot. Returns
+        # ``None`` for entries written before the field add or for any
+        # non-nested entry, preserving backward compatibility.
+        parent_audit_entry_id=provenance.get(":parent-audit-entry-id"),
         txn_commit=provenance.get(":effect/txn-commit"),
     )
 
@@ -921,6 +988,16 @@ def rebind_audit_datom_prev_hash(
     # provenance writing + ``:datom/e`` / ``:datom/tx`` / signature
     # updates in one place — we don't need to reach into individual
     # provenance keys here.
+    #
+    # Phase 2.3c.2 LD5: ``entry.parent_audit_entry_id`` is preserved
+    # through this round-trip — :func:`datom_to_audit_entry` reads
+    # ``provenance[':parent-audit-entry-id']`` into the field, the
+    # rebuilt :class:`AuditEntry` carries it forward via
+    # :meth:`AuditEntry.to_dict`, the canonical content hash
+    # incorporates it, and :func:`audit_entry_to_datom` re-emits the
+    # same colon-keyword slot on the rebound datom. The rebind only
+    # mutates ``prev_hash`` / ``parent``; call-nesting structure is
+    # untouched.
     entry = datom_to_audit_entry(datom)
 
     # Build a new content dict with the new prev_hash + matching

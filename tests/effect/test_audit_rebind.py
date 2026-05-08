@@ -55,6 +55,14 @@ def _build_entry(
         "principal": {"token_id": "tok", "session_id": "ses"},
         "run_id": run_id,
         "parent": prev_hash,
+        # Phase 2.3c.2 LD5 — Re-pinned 2026-05-08 for parent_audit_entry_id
+        # field add. Production ``make_audit_handler`` always writes the
+        # key (None for non-nested entries) and ``to_dict()`` keeps it,
+        # so the helper input shape mirrors that. Otherwise the
+        # helper-side content hash (used to assign ``entry.id``) would
+        # diverge from ``verify_chain``'s recomputed hash via
+        # ``to_dict()``, breaking the rebind round-trip.
+        "parent_audit_entry_id": None,
     }
     canonical = _canonicalise_content(content)
     return AuditEntry(id=_content_hash(canonical), **canonical)

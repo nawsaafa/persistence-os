@@ -204,6 +204,11 @@ class TestFromEdnRoundTripPreservesVerifyChain:
             principal={":agent": "dfi"},
             run_id=str(uuid.uuid4()),
             parent=None,
+            # Phase 2.3c.2 LD5 — Re-pinned 2026-05-08 for parent_audit_entry_id
+            # field add. The factory always writes the key (None for
+            # non-nested entries) and ``to_dict()`` keeps it — including
+            # ``None`` here matches the post-2.3c.2 production shape.
+            parent_audit_entry_id=None,
             # v0.5.1 W1 fix-pass — MAJOR-1: ``txn_commit`` omitted on
             # purpose. The factory inserts the key only when set, and
             # ``to_dict()`` strips the key when None, so both sides skip

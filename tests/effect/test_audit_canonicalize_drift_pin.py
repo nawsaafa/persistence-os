@@ -62,6 +62,16 @@ def _base_content(**overrides) -> dict:
         principal={},
         run_id=str(uuid.uuid4()),
         parent=None,
+        # Phase 2.3c.2 LD5 — Re-pinned 2026-05-08 for parent_audit_entry_id
+        # field add. ``make_audit_handler`` always writes
+        # ``"parent_audit_entry_id": ctx.get("parent_audit_entry_id")``
+        # into ``content`` (None for non-nested entries; T3 will populate
+        # the live value via DispatcherContext), and
+        # ``AuditEntry.to_dict()`` keeps the key (no None-strip — unlike
+        # ``txn_commit``). Including ``None`` here matches the post-2.3c.2
+        # factory shape exactly. The helper-vs-dataclass byte-lockstep
+        # invariant is preserved.
+        parent_audit_entry_id=None,
         # v0.5.1 W1 fix-pass — MAJOR-1: ``txn_commit`` is intentionally
         # OMITTED. The factory now inserts ``"txn_commit": commit_id``
         # only when set (mirrors the wire-form ``:effect/txn-commit``

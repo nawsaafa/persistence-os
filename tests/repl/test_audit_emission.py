@@ -233,6 +233,9 @@ class TestVerifyChainContinuity:
             "principal": {"actor": "alice"},
             "run_id": None,
             "parent": None,
+            # Phase 2.3c.2 LD5 — Re-pinned 2026-05-08 for parent_audit_entry_id
+            # field add. Mirrors production make_audit_handler shape.
+            "parent_audit_entry_id": None,
         }
         canonical = _canonicalise_content(prog_content)
         prog_entry = AuditEntry(id=_content_hash(canonical), **canonical)

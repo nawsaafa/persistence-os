@@ -113,6 +113,15 @@ def emit_repl_op_audit(
         "principal": principal,
         "run_id": None,
         "parent": prev_hash,
+        # Phase 2.3c.2 LD5 — :repl/op AuditEntries are never emitted from
+        # a nested LLM/skill dispatch (the REPL op surface is the OUTER
+        # boundary, not a child of any other call), so this is always
+        # ``None``. The key MUST be present in the content dict so the
+        # hash matches ``to_dict()``'s output (which always includes
+        # ``parent_audit_entry_id``, unlike ``txn_commit`` which is
+        # popped when None). Mirrors the audit.py:make_audit_handler
+        # always-write rule introduced in T2.
+        "parent_audit_entry_id": None,
     }
     # ``txn_commit`` intentionally OMITTED — see audit.py:174-186 for the
     # symmetry: ``to_dict()`` pops ``None`` txn_commit before hashing in

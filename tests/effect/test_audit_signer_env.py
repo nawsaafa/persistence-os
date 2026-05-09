@@ -28,8 +28,10 @@ Tests (4):
   3. ``test_tamper_breaks_signature_verification`` — Class-A
      falsifiability: rebuild an entry with a swapped ``args_hash`` that
      keeps the surface fields but contradicts the signed id →
-     verify_chain returns False. Also verify direct signature check
-     against the public key fails.
+     ``verify_chain`` returns False (content-hash mismatch detected by
+     the chain verifier; the per-entry signature itself is left
+     untouched on the rebuilt entry, so the failure is detected at
+     content-binding rather than at raw signature verification).
 
   4. ``test_unknown_uri_scheme_systemexits`` — env set to
      ``pem:abc123`` → ``_load_audit_signer_from_env`` raises

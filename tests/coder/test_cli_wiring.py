@@ -42,9 +42,14 @@ Falsifiability:
        and observing the test transition from PASS to FAILED.
   G2 (Class B) — if `__main__.py`'s `_build_substrate_and_handlers` calls
        `Substrate.open(uri, audit=False)`, the canonical_audit_stack is
-       never installed → no dispatcher middleware → 4-deep succeeds →
-       test fails. (Verified empirically via the same monkeypatch-based
-       flip used to confirm Class A.)
+       never installed → no dispatcher middleware → ctx.depth never
+       increments (ctx itself stays bound from _session.py:87) →
+       call_fn's `ctx.depth >= nesting_target_depth - 1` bail-out check
+       never trips → runaway recursion until Python's default recursion
+       limit raises RecursionError → `pytest.raises(LLMRecursionBudgetExceeded)`
+       doesn't match → test fails. Different exception shape than Class
+       A's "DID NOT RAISE", but the test catches both regression classes.
+       (Codex Impl R1 IMPORTANT-1 surfaced this nuance, 2026-05-09.)
 
 Forced spec deviations:
   FD-T1.1: design § G1 prescribes invoking ``main(argv=[..., "--provider",
@@ -177,8 +182,13 @@ def test_cli_run_enforces_recursion_budget(
 
     Falsifiability — Class B (``audit=False`` regression in
     ``_build_substrate_and_handlers``): canonical_audit_stack is not
-    installed → no dispatcher middleware → recursion succeeds → test
-    fails. Same observable.
+    installed → no dispatcher middleware → ``ctx.depth`` never
+    increments (ctx itself stays bound from ``_session.py:87``) →
+    call_fn's ``ctx.depth >= nesting_target_depth - 1`` bail-out check
+    never trips → runaway recursion → Python's default recursion limit
+    raises ``RecursionError`` → ``pytest.raises(LLMRecursionBudgetExceeded)``
+    does not match → test fails. Different exception shape than Class
+    A but same outcome: test catches the regression.
     """
     # Stable echo-floor for the bootstrap step (avoids depending on the
     # test machine's claude-agent-sdk / ANTHROPIC_API_KEY availability).

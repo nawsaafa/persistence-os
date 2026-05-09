@@ -1,5 +1,256 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.4a — 2026-05-09/10 (Production CLI wiring + env-keyed Ed25519 signer plumbing)
+
+Phase 2.4a is the FIRST harden-track phase. It wires the production CLI
+(`python -m persistence.coder`) so an end-user invocation installs the
+same handler stack the test fixtures install, and so audit-chain
+tamper-evidence (Mimir Phase B AuditEntry signing) reaches CLI users via
+an `ANTHROPIC_API_KEY`-style env handle. Closes 4 queued rescopes from
+2.3c.1 / 2.3c.2 / 2.3d / vertical-data-corpus LD-9.
+
+**Critical-path sequencing:** 2.4a → 2.4b (`:sys/now` op + observability
++ `--confidence-threshold` CLI surface) → 2.4c lockfile (~Fri
+2026-06-12) → `v0.9.0a1` tag (by 2026-06-14). Hard cutoff 2026-06-05;
+runway WELL UNDER BUDGET.
+
+### Locked decisions (LD-1 … LD-4) — design ARIS R0.1 lite PASS (mean 8.46 / min 7.8) → Impl R1 PASS (mean 8.48 / min 7.6)
+
+- **LD-1 — Skill handler at CLI bootstrap.** `__main__.main()` extracts a
+  `_build_substrate_and_handlers(args) -> Substrate` helper that opens
+  the substrate, then installs `make_skill_handler(skill_lib, name="skill")`
+  at `position="bottom"` BEFORE the LLM provider handler. `install_handler`
+  is idempotent on `name` (`sdk/_facade.py:143-166`) so skill +
+  provider co-exist at `handlers[0]`/`handlers[1]` (each routes its own
+  ops). Mirrors 2.3c.1 fixture pattern at
+  `tests/coder/test_loop_replay.py:137`.
+- **LD-2 — Recursion-aware dispatcher (FD-LD2 collapsed in T0).** No
+  production change. Recursion-budget enforcement already lives inside
+  `canonical_audit_stack` at `effect/_audit_stack.py:250-303`, gated on
+  a bound `DispatcherContext` (`_recursion.py:230`). `Coder.run()` binds
+  `dispatcher_context(DispatcherContext())` per iteration at
+  `_session.py:87`. End-to-end CLI → Coder.run → DispatcherContext →
+  enforcement chain is automatic for any `Substrate.open(audit=True)`
+  (the default). G2 is an assertion test only.
+- **LD-3 — `:sys/now` substrate-time op (FD-LD3 W3-rescoped to 2.4b).**
+  T0 receipts confirmed `Transaction.now()` is dosync-frozen and
+  `_steering.branch()` is not in dosync, so a one-line default-arg flip
+  isn't possible — landing `:sys/now` requires substrate-level scope
+  (new op + handler), which doesn't fit 2.4a's "production CLI wiring"
+  theme. **Path B locked:** keep wall-clock fork_at default in
+  `_steering.py:299`; re-point 4 W3-rescope comments (lines 271, 297,
+  299, 305-306) from `2.4a` → `2.4b`; add a strict-xfail test in
+  `tests/coder/test_steering_sys_now.py` whose `reason` string
+  explicitly requires 2.4b's spine to remove the decorator. The
+  XPASS-strict failure mode catches incomplete 2.4b ships (op + wiring
+  landed but marker not removed).
+- **LD-4 — Env-keyed Ed25519 signer plumbed through Substrate.open.**
+  Mimir Phase B already landed `make_audit_handler(signer: tuple[str, bytes] | None = None)`
+  at `effect/handlers/audit.py:488-518`. T4 adds the two missing
+  passthrough layers: `Substrate.open(uri, *, audit=True, audit_signer=None)`
+  threads to `canonical_audit_stack(entries, *, signer=audit_signer)`
+  which forwards to `make_audit_handler(entries, wraps=..., signer=signer)`.
+  `__main__.py` reads `PERSISTENCE_AUDIT_KEY=file:///<absolute>/<key>.pem`
+  (RFC 8089 three-slash form), loads PEM, derives raw 32-byte private
+  key bytes via `cryptography.serialization.load_pem_private_key` +
+  `private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())` (per
+  FD-T4.2), and computes a stable `signer_id = "ed25519:" + sha256(pem_bytes).hexdigest()[:16]`.
+  Unknown URI schemes → `SystemExit` at CLI bootstrap. Mirrors
+  `ANTHROPIC_API_KEY` precedent at `_provider.py:43` — zero new CLI
+  flags. **FD-LD4-signer-shape RESOLVED** — no Signer Protocol needed
+  because `tuple[str, bytes]` is already the API contract.
+
+### Test gates (G1 … G4)
+
+- **G1 — `tests/coder/test_cli_wiring.py::test_main_installs_skill_handler`**.
+  Builds substrate via `_build_substrate_and_handlers` with synthesized
+  argparse `Namespace` + monkeypatched `detect_or_explicit` (FD-T1.1),
+  performs `:skill/lookup` for an unknown skill. Asserts `SkillNotFound`
+  (handler IS installed). Falsifiability: omit LD-1 wiring →
+  `Unhandled("op ':skill/lookup' reached the bottom of the stack")`
+  instead of `SkillNotFound` → assertion fails.
+- **G2 — `tests/coder/test_cli_wiring.py::test_cli_run_enforces_recursion_budget`**.
+  Replaces the bootstrap's raw-echo provider in place via `name="raw-echo"`
+  (FD-T2.1, `install_handler` idempotent contract). Recursive `call_fn`
+  triggers depth-4 nested `:llm/call`. Asserts
+  `LLMRecursionBudgetExceeded(field="depth", limit=3, observed=4)`
+  raised through `Coder.run()`. **Class A falsifiability**: drop
+  `dispatcher_context(...)` wrap from `_session.py:87` → `ctx is None`
+  at perform-time → middleware pass-through → recursion runs to bail-out
+  return → `pytest.raises` reports DID NOT RAISE → test fails (verified
+  manually at impl time). **Class B falsifiability**: `audit=False`
+  regression in `_build_substrate_and_handlers` → ctx still bound by
+  Coder.run but `ctx.depth` never increments → call_fn's bail-out check
+  never trips → runaway recursion → Python's recursion limit raises
+  `RecursionError` → `pytest.raises(LLMRecursionBudgetExceeded)` fails
+  to match → test fails. Different exception shape, same regression
+  catch (codex Impl R1 IMPORTANT-1 nuance, folded into both module +
+  test docstrings).
+- **G3 — `tests/coder/test_steering_sys_now.py::test_branch_default_fork_at_is_substrate_now`**.
+  `pytest.mark.xfail(strict=True)` with explicit "DECORATOR MUST BE
+  REMOVED in 2.4b" reason string. Body asserts
+  `:coder/branch` datom's `fork_at` falls within
+  `[s.effect.perform(":sys/now", {}) before, after]` sandwich. Today:
+  XFAIL because `:sys/now` op doesn't exist + `_steering.branch()` is
+  wall-clock. 2.4b spine must (a) land `:sys/now` op, (b) wire
+  `_steering.branch()` default to it, (c) REMOVE the xfail decorator,
+  (d) drop the W3 comments at `_steering.py:271,297,299,305-306`.
+  Falsifiability mechanism = the xfail-strict + the spine action item:
+  XPASS-strict triggers if 2.4b lands op+wiring but forgets the
+  decorator removal; suite fails. Sandwich assertion is sharp enough
+  that a wall-clock fallback wouldn't satisfy it incidentally.
+- **G4 — `tests/effect/test_audit_signer_env.py` (5 tests)**.
+  - `test_env_keyed_signer_signs_audit_entries` — generate ephemeral
+    Ed25519 keypair, write PEM to `tmp_path`, set
+    `PERSISTENCE_AUDIT_KEY=file:///...`, build substrate, perform 2-3
+    `:llm/call`s, assert each `AuditEntry.signature` is non-None and
+    `signer_id == "ed25519:<sha256(pem)[:16]>"`, then verify chain via
+    `verify_chain(entries, public_keys=...)` returns True.
+  - `test_env_unset_produces_unsigned_entries` — env-unset → entries
+    have `signature is None` and `signer_id is None` (pre-2.4a backward
+    compat).
+  - `test_tamper_breaks_signature_verification` — Class-A falsifiability
+    (FD-T4.3): rebuild a frozen `AuditEntry` with a swapped `args_hash`
+    that keeps the surface signature/id but contradicts the signed
+    content → `verify_chain` returns False at the content-hash check.
+  - `test_unknown_uri_scheme_systemexits` — `PERSISTENCE_AUDIT_KEY=pem:abc123`
+    → `_load_audit_signer_from_env` raises `SystemExit` naming the
+    unsupported scheme.
+  - `test_missing_pem_file_systemexits` — `file:///nonexistent/path.pem`
+    → `SystemExit` with FileNotFoundError context.
+  Falsifiability spot-check at impl time: temporarily replace
+  `signer=signer` with `signer=None` in `canonical_audit_stack` →
+  G4.1 fails with `AssertionError: entry.signature is None — LD-4
+  kwarg-passthrough is broken (signer didn't reach make_audit_handler)`,
+  pinpointing the exact `_audit_stack → make_audit_handler` hop. Line
+  restored.
+
+### Forced spec deviations (FDs)
+
+- **FD-LD2** (CONFIRMED in T0): recursion-budget enforcement already
+  inside `canonical_audit_stack` (`_audit_stack.py:250-303`). LD-2
+  collapsed to assertion test only.
+- **FD-LD3** (CONFIRMED in T0): `Transaction.now()` is dosync-frozen
+  (`txn/transaction.py:95-99`), `_steering.branch()` is not in dosync.
+  `:sys/now` is substrate-level scope. Path B (W3-rescope to 2.4b)
+  locked.
+- **FD-LD4-key-format**: `file:///absolute/path/to/key.pem` (RFC 8089
+  three slashes) chosen over raw-PEM-in-env to leave room for a future
+  `pem:` form.
+- **FD-LD4-signer-shape RESOLVED** in T0: `make_audit_handler(signer:
+  tuple[str, bytes] | None = None)` already landed by Mimir Phase B
+  (`audit.py:488-518`). No Signer Protocol needed; `tuple[str, bytes]`
+  IS the contract.
+- **FD-T1.1**: G1 test uses synthesized `argparse.Namespace` +
+  monkeypatched `detect_or_explicit` instead of `--provider echo`
+  (`_cli.build_parser` rejects `echo`; choices are
+  `{auto, anthropic, claude-code}`).
+- **FD-T2.1**: G2 test installs replacement provider with
+  `name="raw-echo"` to displace bootstrap handler in place. Required
+  because `install_handler` resolves multiple `:llm/call`-wrapping
+  handlers in outer→innermost order; bootstrap's `raw-echo` would
+  intercept before the recursive callable. Idempotent name-replacement
+  is the documented contract at `sdk/_facade.py:149-150`.
+- **FD-T4.1**: spec mentioned `verify_audit_chain`; actual helper at
+  `effect/handlers/audit.py:429` is `verify_chain` (re-exported as
+  `persistence.effect.verify_chain`). Accepts
+  `public_keys: dict[str, bytes]`. No new helper added.
+- **FD-T4.2**: `_signing.sign` (`effect/_signing.py:60-74`) requires
+  RAW 32-byte Ed25519 private key bytes, not PEM. CLI extracts raw via
+  `cryptography.serialization` at the boundary; substrate-internal
+  contract stays raw-only. PEM is the on-disk operator surface; raw is
+  the internal wire shape.
+- **FD-T4.3**: tamper test reconstructs `AuditEntry` with a
+  contradictory `args_hash` rather than mutating in place
+  (`@dataclass(frozen=True)` blocks mutation). The reconstructed entry
+  keeps the original `id` + `signature` so the failure is detected at
+  content-binding via `verify_chain`, not at raw signature
+  verification.
+
+### W3 rescopes queued
+
+- **2.4b** — `:sys/now` substrate-time op + `_steering.branch()`
+  wiring. Falsifiable acceptance signal: G3 xfail-strict in
+  `tests/coder/test_steering_sys_now.py` flips PASS when 2.4b lands the
+  op + wiring + removes the decorator. (FD-LD3 W3 marker.)
+- **2.4b** — observability for `_dry_run_apply_action_safely` broad-Exception
+  catch (queued from 2.3c.2 rescope #8).
+- **2.4b** — `--confidence-threshold` CLI surface (deferred from 2.2a
+  CP2 + 2.3b).
+- **v0.9.x** — RSA / HSM-backed signer schemes (Ed25519 only in 2.4a).
+- **v0.9.x** — multi-key signer rotation.
+- **v0.9.x** — `pem:` URI scheme for raw-PEM-in-env (deferred until a
+  real use case).
+- **v0.9.x** — percent-decode `urlparse(...).path` if operator paths
+  with spaces / escaped chars become a real use case (codex Impl R1
+  NICE-TO-HAVE-1).
+
+### Subagent pattern (9th use, hybrid)
+
+Persistent implementer `impl-2.4a` for T1-T4 via SendMessage; controller-direct
+T0/T9.1. Mirrors the 2.3c.1 / 2.3d hybrid pattern. Clean across all 4
+hand-offs (no session-restart incidents). T0 receipts surfaced
+FD-LD2 collapse + FD-LD3 W3-rescope before R0; codex R0 surfaced 5
+BLOCKING + 3 IMPORTANT + 1 NICE which were folded inline before R0.1
+lite PASS 8.46/7.8.
+
+### Files changed
+
+- **MODIFIED** `src/persistence/coder/__main__.py` — `_build_substrate_and_handlers`
+  helper extraction, LD-1 skill handler install, LD-4 env-parse +
+  Substrate.open audit_signer kwarg threading. (~108 LOC net.)
+- **MODIFIED** `src/persistence/sdk/_facade.py` — `Substrate.open(audit_signer=...)`
+  kwarg + thread to canonical_audit_stack. (~30 LOC.)
+- **MODIFIED** `src/persistence/effect/_audit_stack.py` —
+  `canonical_audit_stack(*, signer=...)` kwarg + forward to
+  make_audit_handler. (~18 LOC.)
+- **MODIFIED** `src/persistence/coder/_steering.py` — 4 W3-rescope
+  comment edits (lines 271, 297, 299, 305-306) re-pointing `2.4a` →
+  `2.4b`. No semantic change.
+- **NEW** `tests/coder/test_cli_wiring.py` — G1 + G2 (2 tests, ~270 LOC
+  including comprehensive falsifiability docstrings).
+- **NEW** `tests/coder/test_steering_sys_now.py` — G3 xfail-strict W3
+  marker (1 test, 140 LOC).
+- **NEW** `tests/effect/test_audit_signer_env.py` — G4 round-trip +
+  tamper + URI-scheme + missing-PEM (5 tests, 297 LOC).
+
+### ARIS journey
+
+- **R0** (codex, 2026-05-09 evening): PASS-WITH-FIXES, mean 7.19 / min 6.0.
+  5 BLOCKING + 3 IMPORTANT + 1 NICE.
+- **R0-fold** (controller, inline): all 9 findings closed. FD-LD2
+  collapse documented, FD-LD3 W3-rescope to 2.4b documented, LD-4
+  surface re-anchored to receipts (Mimir Phase B's
+  `make_audit_handler(signer=...)` already exists), G2/G3 falsifiability
+  rewrites with explicit XPASS-strict mechanism, signer URI form
+  normalized to RFC 8089 three-slash, handler-ordering ambiguity
+  resolved.
+- **R0.1 lite** (codex re-review): **PASS, mean 8.46 / min 7.8** —
+  cleanest first-pass-after-fold on the track since 2.3a (8.46/7.8).
+  All 9 findings closed cleanly.
+- **Impl R1** (codex, post-T4): **PASS, mean 8.48 / min 7.6** — 0
+  BLOCKING, 2 IMPORTANT (doc-only) + 1 NICE-TO-HAVE (deferred to
+  v0.9.x). The 2 IMPORTANT findings were folded inline at T9.1 (G2
+  Class B failure-mode clarification + G4 module docstring alignment).
+  Codex verdict: "Merge-ready into `feat/v0.9-persistence-coder`."
+
+### Calendar
+
+| Task | Budget | Actual |
+|---|---|---|
+| T0 receipts + ARIS R0 + R0-fold + R0.1 lite | 2.0h | ~2.0h |
+| T1 G1 skill handler wiring | 0.5h | ~0.5h |
+| T2 G2 recursion-budget assertion test | 0.5h | ~0.4h |
+| T3 G3 `:sys/now` xfail + comment edits | 0.25h | ~0.35h |
+| T4 G4 signer plumbing (3 prod files + 5 tests) | 1.0h | ~1.0h |
+| T9.1 codex Impl R1 + I1+I2 fold + CHANGELOG + merge | 1.0h | ~0.7h |
+| **Total** | **~5.25h** | **~5.0h** |
+
+Sub-1 calendar day. Hard cutoff 2026-06-05; ~26 days runway after
+2.4a, ~5× the 2.4a budget remaining for 2.4b + 2.4c.
+
+---
+
 ## Phase 2.3d — 2026-05-09 (REPL Steering Integration — `_CoderSteeringSession` 7-op live debugger)
 
 Phase 2.3d ships the operator-facing surface that turns the

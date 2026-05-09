@@ -63,6 +63,12 @@ def test_canonical_audit_stack_covers_phase_2_ops():
         ":code/run", ":git/diff", ":git/status", ":git/log", ":git/commit",
         # Phase 2.3c.1 additions:
         ":skill/define", ":skill/lookup",
+        # Phase 2.3d additions: REPL steering audit-only ops (LD-4 — each
+        # public op on _CoderSteeringSession emits :repl/request before
+        # action + :repl/response after, producing a replayable stream).
+        # :coder/branch is the agent-side commit datom emitted by branch()
+        # on the parent's audit chain.
+        ":repl/request", ":repl/response", ":coder/branch",
     }
     assert set(CANONICAL_AUDIT_WRAPPED_OPS) == expected_wrapped
 
@@ -86,3 +92,10 @@ def test_canonical_audit_stack_covers_phase_2_ops():
     new_ops_2_3c_1 = {":skill/define", ":skill/lookup"}
     assert not (new_ops_2_3c_1 & set(CANONICAL_AUDIT_RAW_OPS)), \
         ":skill/* ops MUST NOT be in CANONICAL_AUDIT_RAW_OPS (substantive-return per LD5)"
+
+    # Phase 2.3d: :repl/request + :repl/response + :coder/branch are
+    # audit-only — the request datom IS the audit signal; raw terminator
+    # covers them. Mirrors 2.1c.6 :claim/emit / :blob/put pattern.
+    new_ops_2_3d = {":repl/request", ":repl/response", ":coder/branch"}
+    assert new_ops_2_3d <= set(CANONICAL_AUDIT_RAW_OPS), \
+        ":repl/* + :coder/branch ops MUST be in CANONICAL_AUDIT_RAW_OPS (audit-only per LD-4)"

@@ -43,7 +43,7 @@ from persistence.effect.canonical import canonical_dumps
 # qualifier is a v0.7.x explicit change — a v0.7.0a1 ``Capability`` cannot
 # silently grant one. See §12 risks "Cap-set forward-compat" and the test
 # ``test_caps_forward_compat_strict``.
-OP_NAMES: tuple[str, ...] = ("inspect", "edit", "rewind", "branch", "auth")
+OP_NAMES: tuple[str, ...] = ("inspect", "edit", "rewind", "branch", "auth", "coder")
 
 QUALIFIERS_BY_OP: dict[str, frozenset[str]] = {
     "inspect": frozenset({"read", "audit-tail"}),
@@ -51,6 +51,14 @@ QUALIFIERS_BY_OP: dict[str, frozenset[str]] = {
     "rewind": frozenset({"any", "branch-only"}),
     "branch": frozenset({"fork", "fork-from-cursor"}),
     "auth": frozenset({"login"}),
+    # Phase 2.3d LD-3 (R0-fold B5): coder steering capability — extends the
+    # ADR-3 closed Capability primitive so a REPL operator can grant
+    # read-only / write-only / union access to a _CoderSteeringSession.
+    # Mapping (from design doc LD3 table):
+    #   pause/resume/snapshot/context_at -> (coder, read)
+    #   branch/fold/commit               -> (coder, write)
+    #   union                             -> (coder, any) grants both
+    "coder": frozenset({"read", "write", "any"}),
 }
 
 ALL_CAPS: frozenset[tuple[str, str]] = frozenset(

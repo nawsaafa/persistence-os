@@ -11,6 +11,7 @@ G1 lockfile contract test lands in 2.1c).
 """
 
 from ._session import Coder, CoderStubNotImplemented
+from ._steering import _CoderSteeringSession
 from ._planner_errors import (
     PlanExecutionFailed,
     PlanPayloadValidation,
@@ -32,6 +33,7 @@ from ._recursion import (
 __all__ = [
     "Coder",
     "CoderStubNotImplemented",
+    "_CoderSteeringSession",
     "PlanExecutionFailed",
     "PlanPayloadValidation",
     "BranchPayloadValidation",

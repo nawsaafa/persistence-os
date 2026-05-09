@@ -1,5 +1,307 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.3d — 2026-05-09 (REPL Steering Integration — `_CoderSteeringSession` 7-op live debugger)
+
+Phase 2.3d ships the operator-facing surface that turns the
+persistence-coder ReAct loop into a **live debugger**. A new
+`_CoderSteeringSession` class composes a `Coder` reference and exposes
+seven ops over the existing v0.7.0a1 Module 7 REPL surface:
+**pause / resume / snapshot / context_at / branch / fold / commit**.
+Every op is audit-anchored — `:repl/request` opens the boundary, the
+action body executes (with `:coder/branch` agent-side commit datom
+emitted from `branch()` between the request/response pair), and
+`:repl/response` closes the boundary. Branches are per-session-durable
+in-memory via the existing `db.branch(fork_at, [Δ])` substrate
+primitive (LD-1 codex consensus, 1-pass clean fold); `commit(branch_id)`
+is a session-level pointer swap, not a substrate merge.
+
+This is the LAST coder-side scope item before harden phases.
+Completing 2.3d closes the Phase 2 coder-side maturity arc per the
+critical-path sequencing (2.3c.2 recursion+composition → **2.3d REPL
+steering** → 2.4a-d harden → 2.4c lockfile → `v0.9.0a1` tag by
+2026-06-14, hard cutoff 2026-06-05; ~27 days runway, WELL UNDER
+BUDGET).
+
+### Locked decisions (LD0–LD5) — design ARIS R1 PASS (mean 8.31 / min 8.0)
+
+- **LD-0 — SCOPE**: 7 ops (pause/resume/snapshot/context_at/branch/fold/
+  commit). NO substrate touches. Concurrency invariants documented in
+  the dataclass docstring (LD-2 set=go/clear=block; multi-pause/multi-
+  resume idempotent; single-thread coder loop assumption).
+- **LD-1 — Branch durability via `db.branch()` (codex consensus-locked,
+  1-pass clean fold)**: substrate-true counterfactual branching using
+  the existing `db.branch(fork_at, [directive_assertion])` primitive at
+  `src/persistence/fact/db.py:543-582`. Branched DBs registered in
+  `_CoderSteeringSession.branches: dict[str, DB]` keyed by deterministic
+  `branch_id = sha256(parent_branch_id, fork_at.isoformat(),
+  canonical_dumps(directive))[:16]`. NO new substrate primitive. NO
+  in-memory dict, no new bitemporal `:branch/*` shape, no `s.txn.fork`
+  reuse. Codex adversarial review converged single-pass — `db.branch()`
+  IS the right primitive.
+- **LD-2 — Pause attach point at iter head; threading.Event(set=go,
+  clear=block)** (R0-fold B1): `Coder.run()` calls
+  `self._steering_session._check_pause()` at the FIRST line of each
+  `for i in range(self.max_iters)` iteration, BEFORE the
+  `dispatcher_context(...)` block. `_pause_event` default state is SET
+  (NOT paused — `wait()` returns immediately); `pause()` calls
+  `clear()`, `resume()` calls `set()`. The `test_pause_blocks_then_
+  resume_unblocks` G1 test MUST FAIL if the semantics are inverted —
+  this is the load-bearing falsifiability for B1.
+- **LD-3 — Capability tokens via `Capability(op="coder",
+  qualifier="read|write|any")`** (R0-fold B5): extends ADR-3's closed
+  Capability primitive. Mapping table:
+  - `pause`/`resume`/`snapshot`/`context_at` → `(coder, read)`
+  - `branch`/`fold`/`commit`                  → `(coder, write)`
+  - any of the above grant via                 → `(coder, any)` union
+  Schema-level representability test FIRST in G6 (R0-fold B5),
+  then per-op denial parametrize. `cap_set=None` is the trusted
+  in-process caller default — no check (production REPL adapters wire
+  a real `CapabilitySet` at session construction).
+- **LD-4 — Dual-datom audit (`:repl/request` + `:repl/response`) per
+  op; `:coder/branch` agent-side commit datom on parent for
+  `branch()`**: each public op emits `:repl/request` BEFORE the action
+  body executes and `:repl/response` AFTER, bracketing the action so
+  the pair forms a clean replay boundary. R0-fold I3: `:repl/request`
+  payload for `branch()` records `fork_at` explicitly. R0-fold I4: G5
+  filters to `:repl/* + :coder/branch` only. T9.1-fold B3: the
+  `branch()` filtered delta is exactly `[":repl/request",
+  ":coder/branch", ":repl/response"]` in that order.
+- **LD-5 (FD-LD5) — `coder.fold(probe)` is session-side dict iteration,
+  NOT `s.txn.fold`**: deviates from base Phase 2 design § 3.6 line 241
+  ("uses #145 surface `s.txn.fold`"). Rationale: `s.txn.fold` emits
+  facts on every iteration (foldl-with-emission semantic);
+  `coder.fold(probe)` is read-only scoring and cannot use the
+  substrate fold primitive without polluting the audit chain. Parent
+  is registered first under reserved key `"parent"` (R0-fold B4);
+  children iterate in `branches` dict insertion order. v0.10.x
+  rescope: substrate primitive change to allow `s.txn.fold` with
+  NULL fact-list path.
+
+### Forced spec deviations
+
+- **FD-LD5 (planned)** — session-side fold deviation; v0.10.x rescope.
+- **FD-T2.1 (impl-time)** — `canonical_dumps` rejects dataclasses
+  per `src/persistence/effect/canonical.py:5` ("rejects non-JSON
+  types so the hash is never silently lossy") + `Datom` has no
+  `to_dict()` method. Tests use direct `list(s._db.log())` equality
+  for active-DB-invariance assertions. Structural — `Datom` is
+  `@dataclass(frozen=True, slots=True)` so list-equality is correct.
+- **FD-T2.2 (impl-time)** — test `call_fn` signatures match
+  `make_callable_llm_handler`'s actual kwarg shape: `def call_fn(*,
+  model, messages, tools=None, temperature=None, max_tokens=None)`.
+  The plan's draft used required `tools` which `make_callable_llm_
+  handler` always passes as `args.get("tools")` (potentially None).
+- **FD-T6.1 (impl-time, pathway choice)** — Option A: add
+  `:repl/request`, `:repl/response`, `:coder/branch` to BOTH
+  `CANONICAL_AUDIT_WRAPPED_OPS` AND `CANONICAL_AUDIT_RAW_OPS` in
+  `src/persistence/effect/_audit_stack.py`. The audit middleware
+  automatically wraps these ops on `substrate.effect.perform`; the
+  raw terminator (audit-only no-op clauses built from `RAW_OPS`)
+  provides the bottom-of-stack handler so `perform` doesn't raise
+  `Unhandled`. Mirrors the established 2.1c.6 `:claim/emit` /
+  `:blob/put` pattern (audit-only ops where the request datom IS
+  the audit signal). Drift-pin test in
+  `tests/effect/test_canonical_audit_stack.py` updated to include
+  the 3 new ops in `expected_wrapped` and the 2.3d-RAW assertion.
+- **FD-T6.2 (impl-time, test concurrency)** — T1's
+  `test_pause_blocks_then_resume_unblocks` uses `threading.Timer(0.15,
+  session.resume)` to fire `resume()` after a delay. With T6's audit
+  emission, `resume()` performs `:repl/request` + `:repl/response`
+  via the audit ring, which uses the `_active` ContextVar via
+  `mask()`. CPython threads spawned by `threading.Timer` start with a
+  fresh empty context and don't inherit ContextVars. Fix: wrap the
+  Timer target in `contextvars.copy_context().run(session.resume)`,
+  mirroring the existing pattern on the worker thread.
+  TEST-SIDE update only — production code paths don't have this
+  issue because `_CoderSteeringSession` operations are called on
+  the main thread in normal usage.
+- **FD-T7.1 (impl-time, _caps.py shape)** — `src/persistence/repl/
+  _caps.py` uses `OP_NAMES: tuple[str, ...]` + `QUALIFIERS_BY_OP:
+  dict[str, frozenset[str]]` + `ALL_CAPS: frozenset[tuple[str,
+  str]]` derived auto-from `QUALIFIERS_BY_OP`. The plan's draft
+  expected a `Literal` type on `op`/`qualifier`. Adapter: just add
+  `"coder"` to `OP_NAMES` AND `"coder": frozenset({"read", "write",
+  "any"})` to `QUALIFIERS_BY_OP`. `__post_init__` already validates
+  via `(op, qualifier) in ALL_CAPS`. Also: `CapabilitySet` takes
+  `caps: frozenset[Capability]` (NOT `list`); test uses
+  `CapabilitySet(caps=frozenset())` for empty-cap-set scenarios.
+- **FD-T7.2 (impl-time, lazy import)** — `persistence.repl._ws`
+  imports `aiohttp` at module load. Eager import of `_OpError` from
+  `_ws.py` in `_steering.py` would pull aiohttp into the coder
+  package's import-graph. Solution: lazy-import `Capability`,
+  `ERR_CAPABILITY_DENIED`, and `_OpError` inside `_check_cap()` body.
+  The `CapabilitySet` annotation on the `cap_set` field uses a
+  `TYPE_CHECKING` string forward-ref so PEP 563 deferred evaluation
+  handles type hints without runtime import.
+
+### W3 rescopes queued
+
+- **v0.9.x — SQLite-backed branch persistence** so branches survive
+  REPL session restart (acceptance: xfail-strict marker on a test
+  that round-trips a branched DB across `Substrate.open` calls and
+  asserts `as_of(fork_at).datoms` equality post-restart).
+- **v0.9.x — Concurrent-operator-thread support** beyond the current
+  single-connection assumption (multi-WS-client cap_set isolation +
+  mutual-exclusion on `commit()`).
+- **v0.9.x — Audit-driven replay driver** consuming captured stream,
+  re-performing recorded ops via the recorded payloads, asserting
+  result-hash parity end-to-end. Current G5 covers determinism +
+  tamper-evidence + Merkle-chain integrity, which together close the
+  BLOCKING regression classes codex Impl R1 surfaced; the full
+  driver is a separate workstream.
+- **v0.10.x — `db.merge(branch_db, into=main_db)`** substrate-level
+  merge primitive that would let `commit(branch_id)` actually
+  retarget the running `Coder`'s substrate DB (codex Impl R1 I2:
+  current `commit()` is a session pointer swap only).
+- **2.4a — `:sys/now` routing for `fork_at`** joins the existing
+  `:sys/now` bundle from 2.3b/c.2. Required for full byte-identity
+  replay (currently `fork_at` is sourced from agent-side wall-clock).
+
+### Test gates (G1–G6) — all green at the load-bearing falsifiability
+
+- **G1 — pause/resume threading correctness** (3 tests in
+  `tests/coder/test_steering_pause_resume.py`):
+  pause-blocks-then-resume-unblocks (load-bearing falsifies B1
+  inversion); no-pause-no-block; idempotent pause/resume (concurrency
+  invariant N2).
+- **G2 — `db.branch()` isolation + fork_at determinism** (4 tests
+  in `tests/coder/test_steering_branch.py`, codex-revised version
+  from consensus skill R1 verdict): branch_id returned + registered
+  + non-parent; parent isolation (writes on branch never leak —
+  `db.branch()` builds a fresh `InMemoryStore` with deepcopied
+  datoms per `db.py:554-571`); fork_at determinism (two branches
+  from same fork_at have byte-identical seeds);
+  branch_ids unique across calls.
+- **G3 — snapshot/context_at active_db invariance** (6 tests in
+  `tests/coder/test_steering_snapshot.py`, R0-fold B3): both ops
+  read-only — `db.log()` returns an iterator over the immutable
+  store; `db.as_of(t)` builds a fresh `DBView` from a filter over
+  the store. R0-fold I2: `branch_id` kwarg defaults to `"active"`,
+  resolves to `"parent"` until first `commit()`.
+- **G4 — fold parent inclusion + commit pointer swap** (4 + 4 tests
+  in `test_steering_fold.py` + `test_steering_commit.py`, R0-fold
+  B4): fold returns `len(scores) == len(self.branches) + 1` with
+  reserved `"parent"` key first; FD-LD5 session-side iteration;
+  commit is a pointer swap (`KeyError` on unknown branch_id, parent
+  DB unmodified through any number of branch+commit cycles).
+- **G5 — audit-chain integration with replay-meaningful
+  falsifiability** (6 tests in `test_steering_replay.py`,
+  T9.1-fold-strengthened):
+  - `test_branch_emits_repl_request_then_coder_branch_then_response`
+    (B3): exact filtered delta = `[":repl/request", ":coder/branch",
+    ":repl/response"]`.
+  - `test_pause_emits_repl_request_then_response_in_order`: same
+    ordering for the read-only ops.
+  - `test_branch_args_hash_changes_when_fork_at_changes` (B2 tamper
+    falsifiability): same directive + DIFFERENT pinned fork_at MUST
+    produce different `:repl/request.args_hash`. If impl drops
+    fork_at from payload, both hashes collapse → test fails.
+  - `test_branch_args_hash_matches_canonical_expected` (B2 exact
+    shape): precomputed `canonical_hash` of expected payload
+    `{"op": "branch", "payload": {"directive": directive, "fork_at":
+    pinned.isoformat()}}` matches runtime `:repl/request.args_hash`.
+  - `test_audit_stream_determinism_under_pinned_fork_at` (B1): with
+    pinned `fork_at`, two runs of branch+fold+commit produce
+    byte-identical `(op, args_hash)` sequences over the filtered
+    `:repl/* + :coder/branch` stream — falsifies any payload drift
+    or emission reorder.
+  - `test_audit_stream_merkle_chain_is_intact` (B1): each entry's
+    `prev_hash` references the previous entry's `id` over the FULL
+    captured log; tampering breaks the chain.
+- **G6 — capability schema + per-op denial** (8 tests in
+  `tests/coder/test_steering_capability.py`, R0-fold B5): schema
+  representability + unknown-qualifier raises (FIRST in test
+  ordering); 6 per-op denial parametrize; cap denial fires BEFORE
+  audit emission (denied ops never happened on the audit chain).
+
+### Suite delta
+
+`tests/coder/` 373 → 407 passed (+34 net: 33 new across 6 G-gates +
+2 new in T9.1-fold replacing 4 old, minus 1 stub-converted-to-skip
+in T1). `tests/effect/test_canonical_audit_stack.py` drift-pin
+updated for `:repl/request`/`:repl/response`/`:coder/branch`. Full
+repo: 2676 passed unchanged. Pre-existing 2 banner-text failures
+(2.3b leakage) and 18 pre-existing repl-stack failures (aiohttp/
+asyncio environment) verified unchanged via stash-test.
+
+### ARIS history
+
+- **Codex consensus on LD-1 branch durability**: PASS 1-pass clean
+  fold (2026-05-09 — confirmed `db.branch()` is the right primitive;
+  in-memory dict and new `:branch/*` shape both rejected).
+- **Design ARIS R0**: PASS-WITH-FIXES mean 7.50 / min 6.5; 5
+  BLOCKING + 4 IMPORTANT + 2 NICE folded inline at `8619154`.
+- **Design ARIS R1**: PASS mean 8.31 / min 8.0 — DESIGN FROZEN at
+  `edcb61d`.
+- **Codex Impl R1**: PASS-WITH-FIXES mean 7.96 / min 7.0; 3 BLOCKING
+  (B1 replay-isn't-replay + B2 fork_at-not-actually-asserted + B3
+  branch-emission-ordering) + 3 IMPORTANT (deferred to v0.9.x).
+- **Codex Impl R1.1 lite (post-fold)**: PASS mean 8.21 / min 7.8
+  (clears soft-mode threshold 8.0 / 7.5). All 3 BLOCKING closed; no
+  new findings. T9.1-fold lifted falsifiability across B1+B2+B3 +
+  IMPORTANT I1 boundary semantics (split request-before /
+  response-after across all 7 ops).
+
+### Subagent-driven-development pattern (8th use, hybrid)
+
+Persistent implementer (`impl-2.3d`) for T1-T7 via SendMessage
+across 7 task hand-offs; T1.1 fixup commit for early Pyright
+diagnostics; controller-direct T9.1 fold + CHANGELOG. NO
+session-restart incident this phase (clean across all 7 hand-offs;
+contrast with 2.3b T6 RECOVERY incident).
+
+### Files in scope (NEW + MODIFIED)
+
+- **NEW** `src/persistence/coder/_steering.py` (~410 LOC) — single
+  module holding `_CoderSteeringSession`. 7 ops + helpers
+  (`_check_pause` / `_check_cap` / `_resolve_db` /
+  `_derive_branch_id` / `_emit_repl_request` /
+  `_emit_repl_response`).
+- **NEW** 6 test files in `tests/coder/`: `test_steering_pause_
+  resume.py` (G1) + `test_steering_snapshot.py` (G3) +
+  `test_steering_branch.py` (G2) + `test_steering_fold.py` (G4) +
+  `test_steering_commit.py` (G4-extended) + `test_steering_
+  replay.py` (G5) + `test_steering_capability.py` (G6).
+- **MODIFIED** `src/persistence/coder/_session.py` — added
+  `_steering_session` field + `_check_pause()` call at iter head
+  in `Coder.run()`.
+- **MODIFIED** `src/persistence/coder/__init__.py` — exports
+  `_CoderSteeringSession`.
+- **MODIFIED** `src/persistence/repl/_caps.py` — extended ADR-3
+  closed Capability primitive (`OP_NAMES` + `QUALIFIERS_BY_OP`
+  with `"coder"` entry).
+- **MODIFIED** `src/persistence/effect/_audit_stack.py` — added
+  `:repl/request` / `:repl/response` / `:coder/branch` to
+  `CANONICAL_AUDIT_WRAPPED_OPS` + `CANONICAL_AUDIT_RAW_OPS`.
+- **MODIFIED** `tests/coder/test_session_stubs.py` — retired
+  `_check_pause` stub entry (filled in T1).
+- **MODIFIED** `tests/effect/test_canonical_audit_stack.py` —
+  drift-pin test extended for the 3 new audit ops.
+
+### Branch + commits
+
+Worktree branch `feat/v0.9-2.3d-repl-steering` off
+`feat/v0.9-persistence-coder` parent at `54dca57` (2.3c.2 merge):
+
+- `bfe5a0a` T0: design doc — REPL Steering Integration (LD0-LD5)
+- `8619154` R0-fold: close 5 BLOCKING + 4 IMPORTANT + 2 NICE
+- `edcb61d` R1-fix: DESIGN FROZEN (ARIS R1 8.31/8.0)
+- `c877594` plan: T1-T7 + T9.1 implementation plan
+- `8f24519` T1: `_CoderSteeringSession` skeleton + pause/resume
+- `5af6d50` T1.1: fix Pyright unused-import diagnostics
+- `9f1730b` T2: snapshot + context_at (read-side ops)
+- `97c8b3e` T3: branch via `db.branch()` (LD-1 codex-consensus)
+- `460aad3` T4: fold(probe) — session-side parent + children
+- `d9f5346` T5: commit(branch_id) — session pointer swap
+- `88fd623` T6: `:repl/request` + `:repl/response` audit emission
+- `6105898` T7: capability gating — `Capability(op="coder", ...)`
+- `02abc88` T9.1-fold: close codex Impl R1 BLOCKING B1+B2+B3
+
+Critical-path next: 2.4a-d harden → 2.4c lockfile (~Fri 2026-06-12)
+→ `v0.9.0a1` tag (by 2026-06-14). Hard cutoff Phase 2: 2026-06-05.
+
+---
+
 ## Phase 2.3c.2 — 2026-05-08 (`:llm/call` recursion + `ComposeWithSkillAction` proposal acceptance)
 
 Phase 2.3c.2 ships the SECOND half of the 2.3c skill-system rollout,

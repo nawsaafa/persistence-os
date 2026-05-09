@@ -8,7 +8,6 @@ the downstream sub-phase that fills it.
 import pytest
 
 from persistence.coder import Coder, CoderStubNotImplemented
-from persistence.effect.handlers import make_callable_llm_handler
 from persistence.sdk import Substrate
 
 
@@ -73,7 +72,14 @@ def test_stub_subtype_inherits_from_not_implemented_error():
         # _should_escalate_branch removed — filled in Phase 2.2a T6, no longer a stub.
         # _escalate_plan removed — filled in Phase 2.3a T7, no longer a stub.
         # _escalate_branch removed — filled in Phase 2.3b T8, no longer a stub.
-        ("_check_pause",            "Phase 2.3d — :repl/request datom check + pause/resume"),
+        # _check_pause removed — filled in Phase 2.3d T1, no longer a stub.
+        # All stubs filled — parametrize list intentionally empty.
+        # When a new phase adds a stub, add it here with its phase tag.
+        pytest.param(
+            "_PLACEHOLDER_NO_STUBS_REMAINING",
+            "",
+            marks=pytest.mark.skip(reason="no remaining stubs — list kept for extensibility"),
+        ),
     ],
 )
 def test_each_stub_raises_with_exact_message(
@@ -82,10 +88,7 @@ def test_each_stub_raises_with_exact_message(
     coder = Coder(task="hi", substrate=substrate)
     method = getattr(coder, method_name)
     with pytest.raises(CoderStubNotImplemented) as exc:
-        if method_name in ("_check_pause",):
-            method()
-        else:
-            method(None)
+        method()
     assert str(exc.value) == expected_message
 
 

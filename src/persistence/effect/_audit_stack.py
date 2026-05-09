@@ -140,6 +140,21 @@ CANONICAL_AUDIT_WRAPPED_OPS: tuple[str, ...] = (
     # CANONICAL_AUDIT_RAW_OPS (substantive return; LD5 design doc).
     ":skill/define",
     ":skill/lookup",
+    # Phase 2.3d — REPL steering integration; audit-only ops (request +
+    # response per public op on _CoderSteeringSession). Each public op
+    # (pause, resume, snapshot, context_at, branch, fold, commit) emits
+    # one :repl/request before action + one :repl/response after,
+    # producing a replayable stream filterable to :repl/* + :coder/branch.
+    # ADDED to CANONICAL_AUDIT_RAW_OPS below — no further side effect; the
+    # request datom IS the audit signal (mirrors 2.1c.6 :claim/emit /
+    # :blob/put pattern). LD-4.
+    ":repl/request",
+    ":repl/response",
+    # Phase 2.3d — agent-side commit datom emitted by branch() on the
+    # parent's audit chain. Lets a downstream replayer reconstruct the
+    # branch graph from the parent's log alone (the branch DBs themselves
+    # are session-scoped). Audit-only; raw terminator returns None.
+    ":coder/branch",
 )
 
 
@@ -160,6 +175,17 @@ CANONICAL_AUDIT_RAW_OPS: tuple[str, ...] = (
     ":claim/emit",
     ":blob/put",
     # NOT ":llm/call" — see CANONICAL_AUDIT_WRAPPED_OPS above.
+    # Phase 2.3d — REPL steering audit-only ops; raw terminator returns
+    # None. The :repl/request and :repl/response datoms ARE the audit
+    # signal (no further side effect to perform). LD-4. NOT to be added
+    # for any op that has a substantive return; the steering session
+    # uses these solely to produce the replayable :repl/* stream.
+    ":repl/request",
+    ":repl/response",
+    # Phase 2.3d — :coder/branch agent-side commit datom; audit-only. The
+    # branch DB itself is registered in session.branches; the audit
+    # entry on the parent's chain is the durable record of the fork.
+    ":coder/branch",
 )
 
 

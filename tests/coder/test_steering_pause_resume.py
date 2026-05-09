@@ -43,7 +43,12 @@ def test_pause_blocks_then_resume_unblocks():
         t0 = time.monotonic()
         session.pause()  # clears event; next _check_pause() will block
         # Resume after 150 ms from another thread.
-        threading.Timer(0.15, session.resume).start()
+        # T6 update: session.resume() now performs :repl/request + :repl/response
+        # via the audit ring, which depends on the effect runtime ContextVar.
+        # Wrap the timer target in copy_context().run so the timer's worker
+        # thread sees the same _active runtime as the main thread.
+        timer_ctx = contextvars.copy_context()
+        threading.Timer(0.15, lambda: timer_ctx.run(session.resume)).start()
 
         # Run coder in a worker so we can timer-resume from the main thread.
         # Use copy_context().run so the effect runtime ContextVar (_active) is

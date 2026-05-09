@@ -60,15 +60,19 @@ class _CoderSteeringSession:
         """Clear the event so the next _check_pause() call blocks at iter head.
 
         Idempotent: calling pause() when already paused is a no-op.
+        Emits :repl/request + :repl/response per LD-4.
         """
         self._pause_event.clear()
+        self._emit_repl_request_response("pause", {}, None)
 
     def resume(self) -> None:
         """Set the event so any _check_pause() currently blocked unblocks.
 
         Idempotent: calling resume() when not paused is a no-op.
+        Emits :repl/request + :repl/response per LD-4.
         """
         self._pause_event.set()
+        self._emit_repl_request_response("resume", {}, None)
 
     def _check_pause(self) -> None:
         """Called from Coder.run() at iteration head, BEFORE _observe().
@@ -77,6 +81,43 @@ class _CoderSteeringSession:
         returns immediately while the event is set (default / resumed state).
         """
         self._pause_event.wait()
+
+    # ---- LD-4: :repl/request + :repl/response audit emission -------------
+
+    def _emit_repl_request_response(
+        self,
+        op_name: str,
+        payload: "dict[str, Any]",
+        result: "Any | None" = None,
+    ) -> None:
+        """Emit :repl/request + :repl/response audit entries for a steering op.
+
+        LD-4: each public op emits this pair through the substrate's audit
+        ring. Replay re-injects the recorded payload at the same iteration
+        boundary. Does NOT silently swallow exceptions — if the audit pathway
+        fails, the op fails (this is core to the steerability contract).
+
+        FD-T6.1 (pathway choice): Option A — Add :repl/request and
+        :repl/response to CANONICAL_AUDIT_WRAPPED_OPS + CANONICAL_AUDIT_RAW_OPS.
+        The audit middleware automatically wraps these ops on
+        substrate.effect.perform; the raw terminator (audit-only no-op
+        clause) provides the bottom-of-stack handler so perform doesn't
+        raise Unhandled. This is the established 2.1c.6 :claim/emit /
+        :blob/put pattern (audit-only ops where the request datom IS the
+        audit signal).
+
+        Args:
+            op_name: bare op name (e.g. "branch"); appears in the audit
+                entry args as ``"op": op_name``.
+            payload: arbitrary JSON-serializable dict — written into
+                ``:repl/request.args`` so its content_hash is canonical.
+            result: optional result summary written into
+                ``:repl/response.args`` (None when the op has no return
+                value, e.g. pause/resume/commit).
+        """
+        runtime = self.coder.substrate.effect
+        runtime.perform(":repl/request", {"op": op_name, "payload": payload})
+        runtime.perform(":repl/response", {"op": op_name, "result": result})
 
     # ---- LD-0 LD-2: snapshot + context_at (read-side, branch_id kwarg) ----
 
@@ -112,7 +153,13 @@ class _CoderSteeringSession:
         """
         db = self._resolve_db(branch_id)
         all_datoms = list(db.log())
-        return all_datoms[-n:]
+        result = all_datoms[-n:]
+        self._emit_repl_request_response(
+            "snapshot",
+            {"n": n, "branch_id": branch_id},
+            {"n_returned": len(result)},
+        )
+        return result
 
     def context_at(self, t: dt.datetime, branch_id: str = "active") -> "DBView":
         """Return the ``DBView`` at transaction time ``t`` for the
@@ -125,7 +172,13 @@ class _CoderSteeringSession:
         R0-fold I2: ``branch_id`` kwarg as in :meth:`snapshot`.
         """
         db = self._resolve_db(branch_id)
-        return db.as_of(t)
+        view = db.as_of(t)
+        self._emit_repl_request_response(
+            "context_at",
+            {"t": t.isoformat(), "branch_id": branch_id},
+            {"n_datoms": len(view.datoms)},
+        )
+        return view
 
     # ---- LD-1: branch via db.branch() ------------------------------------
 
@@ -212,6 +265,32 @@ class _CoderSteeringSession:
         new_db = source_db.branch(fork_at, [directive_assertion])
 
         self.branches[branch_id] = new_db
+
+        # LD-4: agent-side commit datom on parent's audit chain. Recorded as
+        # :coder/branch fact so a downstream replayer can reconstruct the
+        # branch graph from the parent's log alone (the branch DBs themselves
+        # are session-scoped). Performed via substrate.effect.perform so the
+        # audit middleware emits an AuditEntry with op=":coder/branch"; there
+        # is no separate handler, so we add :coder/branch to the canonical
+        # audit ops alongside :repl/*. If the audit pathway fails, the
+        # branch() call fails — the steerability contract.
+        self.coder.substrate.effect.perform(
+            ":coder/branch",
+            {
+                "branch_id": branch_id,
+                "fork_at": fork_at.isoformat(),
+                "directive": directive_str,
+            },
+        )
+
+        # LD-4 + R0-fold I3: :repl/request payload records fork_at explicitly
+        # for byte-identity replay (full byte-identity W3-rescoped to 2.4a
+        # per :sys/now).
+        self._emit_repl_request_response(
+            "branch",
+            {"directive": directive, "fork_at": fork_at.isoformat()},
+            {"branch_id": branch_id},
+        )
         return branch_id
 
     # ---- LD-5 (FD-LD5): fold(probe) — session-side, NOT s.txn.fold ------
@@ -241,6 +320,15 @@ class _CoderSteeringSession:
         # Children in self.branches insertion order.
         for branch_id, branch_db in self.branches.items():
             scores[branch_id] = probe(branch_db)
+        # LD-4: emit :repl/request + :repl/response. The probe is a Python
+        # callable that doesn't survive serialization; we record only the
+        # branch_ids covered + the resulting score keys. Replay must
+        # re-derive the probe at the boundary (out-of-scope for 2.3d).
+        self._emit_repl_request_response(
+            "fold",
+            {"branch_ids": list(scores.keys())},
+            {"n_scores": len(scores)},
+        )
         return scores
 
     # ---- LD-1: commit(branch_id) — session pointer swap ------------------
@@ -259,3 +347,8 @@ class _CoderSteeringSession:
         if branch_id != "parent" and branch_id not in self.branches:
             raise KeyError(f"unknown branch_id: {branch_id!r}")
         self.active_branch_id = branch_id
+        self._emit_repl_request_response(
+            "commit",
+            {"branch_id": branch_id},
+            None,
+        )

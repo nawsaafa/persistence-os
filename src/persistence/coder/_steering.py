@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any, Callable
 if TYPE_CHECKING:
     from persistence.fact.db import DB, DBView
     from persistence.coder._session import Coder
+    from persistence.repl._caps import CapabilitySet
 
 
 @dataclass
@@ -44,6 +45,7 @@ class _CoderSteeringSession:
     coder: "Coder"
     branches: dict[str, "DB"] = field(default_factory=dict)
     active_branch_id: str = "parent"  # default: agent runs in parent branch
+    cap_set: "CapabilitySet | None" = None  # LD-3 / R0-fold B5: None = trusted in-process
     _pause_event: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
@@ -60,8 +62,9 @@ class _CoderSteeringSession:
         """Clear the event so the next _check_pause() call blocks at iter head.
 
         Idempotent: calling pause() when already paused is a no-op.
-        Emits :repl/request + :repl/response per LD-4.
+        Requires (coder, read). Emits :repl/request + :repl/response per LD-4.
         """
+        self._check_cap("read")
         self._pause_event.clear()
         self._emit_repl_request_response("pause", {}, None)
 
@@ -69,8 +72,9 @@ class _CoderSteeringSession:
         """Set the event so any _check_pause() currently blocked unblocks.
 
         Idempotent: calling resume() when not paused is a no-op.
-        Emits :repl/request + :repl/response per LD-4.
+        Requires (coder, read). Emits :repl/request + :repl/response per LD-4.
         """
+        self._check_cap("read")
         self._pause_event.set()
         self._emit_repl_request_response("resume", {}, None)
 
@@ -81,6 +85,40 @@ class _CoderSteeringSession:
         returns immediately while the event is set (default / resumed state).
         """
         self._pause_event.wait()
+
+    # ---- LD-3 (R0-fold B5): capability gating ----------------------------
+
+    def _check_cap(self, qualifier: str) -> None:
+        """Verify the session's ``cap_set`` permits this op qualifier.
+
+        Raises ``_OpError(ERR_CAPABILITY_DENIED)`` if missing.
+        ``cap_set=None`` is the trusted in-process caller default — no
+        check (production REPL adapters wire a real CapabilitySet at
+        session construction; in-process unit tests + 2.3d-local code
+        paths construct without one).
+
+        R0-fold B5: closed-set ``Capability(op="coder", qualifier=...)``
+        on top of ADR-3's ``QUALIFIERS_BY_OP``. The union ``"any"`` grants
+        both ``"read"`` and ``"write"``. Lazy-imports the REPL types so
+        ``_steering.py`` does NOT pull aiohttp / repl-stack into the
+        coder package's import-graph at module load.
+
+        IMPORTANT: cap denial fires BEFORE audit emission — denied ops
+        never happened on the audit chain.
+        """
+        if self.cap_set is None:
+            return
+        from persistence.repl._caps import Capability
+        from persistence.repl._protocol import ERR_CAPABILITY_DENIED
+        from persistence.repl._ws import _OpError
+
+        cap = Capability(op="coder", qualifier=qualifier)
+        cap_any = Capability(op="coder", qualifier="any")
+        if cap not in self.cap_set.caps and cap_any not in self.cap_set.caps:
+            raise _OpError(
+                ERR_CAPABILITY_DENIED,
+                f"missing coder/{qualifier} capability",
+            )
 
     # ---- LD-4: :repl/request + :repl/response audit emission -------------
 
@@ -150,7 +188,10 @@ class _CoderSteeringSession:
 
         R0-fold I2: ``branch_id`` selects ``"active"`` (default),
         ``"parent"``, or a registered child key in ``self.branches``.
+
+        Requires (coder, read).
         """
+        self._check_cap("read")
         db = self._resolve_db(branch_id)
         all_datoms = list(db.log())
         result = all_datoms[-n:]
@@ -170,7 +211,10 @@ class _CoderSteeringSession:
         unchanged.
 
         R0-fold I2: ``branch_id`` kwarg as in :meth:`snapshot`.
+
+        Requires (coder, read).
         """
+        self._check_cap("read")
         db = self._resolve_db(branch_id)
         view = db.as_of(t)
         self._emit_repl_request_response(
@@ -236,7 +280,10 @@ class _CoderSteeringSession:
         Returns:
             branch_id: 16-hex-char deterministic id; key into
                 ``self.branches``.
+
+        Requires (coder, write).
         """
+        self._check_cap("write")
         from persistence.effect.canonical import canonical_dumps
 
         if _fork_at_override is not None:
@@ -313,7 +360,12 @@ class _CoderSteeringSession:
         Read-only: probe is expected to inspect each DB without mutating
         it. The session does not enforce immutability — that contract is
         the caller's responsibility.
+
+        Requires (coder, write) — even though probes are read-only, fold
+        is a search/scoring primitive that operators classify as write
+        per the LD-3 mapping table.
         """
+        self._check_cap("write")
         scores: dict[str, Any] = {}
         # Parent first (reserved key).
         scores["parent"] = probe(self.coder.substrate._db)
@@ -343,7 +395,10 @@ class _CoderSteeringSession:
 
         Raises ``KeyError`` if ``branch_id`` is unknown (not ``"parent"``
         and not a registered key in ``self.branches``).
+
+        Requires (coder, write).
         """
+        self._check_cap("write")
         if branch_id != "parent" and branch_id not in self.branches:
             raise KeyError(f"unknown branch_id: {branch_id!r}")
         self.active_branch_id = branch_id

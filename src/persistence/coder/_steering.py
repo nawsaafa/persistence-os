@@ -126,3 +126,90 @@ class _CoderSteeringSession:
         """
         db = self._resolve_db(branch_id)
         return db.as_of(t)
+
+    # ---- LD-1: branch via db.branch() ------------------------------------
+
+    def _derive_branch_id(
+        self,
+        directive: dict,
+        fork_at: dt.datetime,
+    ) -> str:
+        """Deterministic branch_id from (parent_branch_id, fork_at, directive).
+
+        Replay-pinable: same (parent, fork_at, directive) always derives the
+        same branch_id. 16-hex-char prefix of SHA-256.
+        """
+        import hashlib
+
+        from persistence.effect.canonical import canonical_dumps as _cd
+
+        directive_canon = _cd(directive)
+        directive_str = (
+            directive_canon if isinstance(directive_canon, str)
+            else directive_canon.decode("utf-8")
+        )
+        seed = f"{self.active_branch_id}:{fork_at.isoformat()}:{directive_str}"
+        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
+
+    def branch(
+        self,
+        directive: dict,
+        *,
+        _fork_at_override: "dt.datetime | None" = None,
+    ) -> str:
+        """Open a counterfactual branch via ``db.branch(fork_at,
+        [directive_assertion])``.
+
+        LD-1 (codex consensus): substrate-true branch using the existing
+        ``db.branch()`` primitive at ``db.py:543-582``. Branched DB is
+        registered in ``self.branches`` by a deterministic ``branch_id``
+        derived from ``(parent_branch_id, fork_at, directive)``.
+
+        R0-fold I3: ``fork_at`` is read from agent-side wall-clock at THIS
+        entry point (transition to substrate ``:sys/now`` W3-rescoped to
+        2.4a, joining the existing ``:sys/now`` bundle from 2.3b). Recorded
+        in ``:repl/request`` for byte-identity replay (T6).
+
+        Args:
+            directive: dict payload describing what the operator wants the
+                agent to consider in the branch. Inserted as a fact via
+                ``db.branch(fork_at, [{"e": "directive-<id>",
+                "a": ":directive", "v": canonical_dumps(directive),
+                "valid_from": fork_at}])``.
+            _fork_at_override: TEST-ONLY hook for determinism tests.
+                Production callers must NOT pass this; it's part of the
+                test surface only.
+
+        Returns:
+            branch_id: 16-hex-char deterministic id; key into
+                ``self.branches``.
+        """
+        from persistence.effect.canonical import canonical_dumps
+
+        if _fork_at_override is not None:
+            fork_at = _fork_at_override
+        else:
+            # R0-fold I3: source from agent-side wall-clock until :sys/now lands
+            # (W3 rescope to 2.4a, joining existing :sys/now bundle).
+            fork_at = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — :sys/now W3 rescope to 2.4a
+
+        branch_id = self._derive_branch_id(directive, fork_at)
+
+        directive_canon = canonical_dumps(directive)
+        directive_str = (
+            directive_canon if isinstance(directive_canon, str)
+            else directive_canon.decode("utf-8")
+        )
+        directive_assertion = {
+            "e": f"directive-{branch_id}",
+            "a": ":directive",
+            "v": directive_str,
+            "valid_from": fork_at,
+        }
+
+        # Source DB: the currently-active branch (defaults to parent).
+        source_db = self._resolve_db(self.active_branch_id)
+        new_db = source_db.branch(fork_at, [directive_assertion])
+
+        self.branches[branch_id] = new_db
+        return branch_id

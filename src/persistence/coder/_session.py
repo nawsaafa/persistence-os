@@ -37,6 +37,7 @@ from ._types import LLMDecision, Observation
 
 if TYPE_CHECKING:  # pragma: no cover
     from persistence.plan import SkillLibrary
+    from persistence.coder._steering import _CoderSteeringSession
 
 
 class CoderStubNotImplemented(NotImplementedError):
@@ -61,6 +62,7 @@ class Coder:
     skill_library: "SkillLibrary | None" = None  # Phase 2.3c.2 LD3+LD6 — threaded into _escalate_branch_body
     _session_start_dt: dt.datetime | None = field(init=False, default=None)  # set by run() — T6
     _iter_count: int = field(init=False, default=0)                          # incremented each loop iter
+    _steering_session: "_CoderSteeringSession | None" = field(init=False, default=None)  # Phase 2.3d — set by _CoderSteeringSession.__post_init__
 
     # main entry — Phase 2.2a T6: max-iters loop
     def run(self) -> None:
@@ -74,6 +76,9 @@ class Coder:
         self._session_start_dt = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
         for i in range(self.max_iters):
             self._iter_count = i
+            # Phase 2.3d — REPL pause hook. _check_pause() blocks if a
+            # _CoderSteeringSession has called pause(); no-op otherwise.
+            self._check_pause()
             # Phase 2.3c.2 LD1 R0-fold I2: DispatcherContext lifetime is
             # ONE full _decide ↔ _act ↔ _observe cycle. Fresh context per
             # iteration; counters reset between iterations. The
@@ -294,9 +299,17 @@ class Coder:
     # --- REPL pause hook — Phase 2.3d fills this ---------------------
 
     def _check_pause(self) -> None:
-        raise CoderStubNotImplemented(
-            "Phase 2.3d — :repl/request datom check + pause/resume"
-        )
+        """Phase 2.3d — REPL pause hook. Delegates to _CoderSteeringSession
+        if one is attached (set by _CoderSteeringSession.__post_init__);
+        no-op otherwise so all 2.2a/2.3a/2.3b/2.3c tests continue to pass
+        without a session attached.
+
+        LD-2 / R0-fold B1: threading.Event semantics — the session's
+        _pause_event.wait() blocks when cleared (paused) and returns
+        immediately when set (default / resumed state).
+        """
+        if self._steering_session is not None:
+            self._steering_session._check_pause()
 
 
 def _summarize_result(r: Any) -> Any:

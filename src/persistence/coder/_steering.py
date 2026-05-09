@@ -242,3 +242,20 @@ class _CoderSteeringSession:
         for branch_id, branch_db in self.branches.items():
             scores[branch_id] = probe(branch_db)
         return scores
+
+    # ---- LD-1: commit(branch_id) — session pointer swap ------------------
+
+    def commit(self, branch_id: str) -> None:
+        """Promote a branch (or ``"parent"``) as the new active branch.
+
+        LD-1 substrate-true: session-level pointer swap, NOT a substrate
+        merge. The previous active branch's DB stays alive in
+        ``self.branches`` (or as parent), so it remains addressable via
+        ``context_at(branch_id=...)`` for the rest of the session.
+
+        Raises ``KeyError`` if ``branch_id`` is unknown (not ``"parent"``
+        and not a registered key in ``self.branches``).
+        """
+        if branch_id != "parent" and branch_id not in self.branches:
+            raise KeyError(f"unknown branch_id: {branch_id!r}")
+        self.active_branch_id = branch_id

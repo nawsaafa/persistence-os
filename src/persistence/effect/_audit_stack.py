@@ -376,7 +376,11 @@ def _make_dispatcher_handler() -> Handler:
     )
 
 
-def canonical_audit_stack(entries: list[AuditEntry]) -> Runtime:
+def canonical_audit_stack(
+    entries: list[AuditEntry],
+    *,
+    signer: tuple[str, bytes] | None = None,
+) -> Runtime:
     """Return a :class:`Runtime` with the canonical audit handler stack.
 
     The stack covers every audit-emitting op shipped through Phase 2.0a /
@@ -391,11 +395,21 @@ def canonical_audit_stack(entries: list[AuditEntry]) -> Runtime:
     a context is bound; pass-through otherwise. See
     :func:`_make_dispatcher_handler` for layer-by-layer semantics.
 
+    Phase 2.4a LD-4: the optional ``signer`` kwarg is forwarded verbatim
+    to :func:`make_audit_handler`. When set, every emitted AuditEntry
+    carries an Ed25519 ``signature`` + ``signer_id`` over its content
+    hash; ``None`` (default) preserves pre-2.4a unsigned behaviour. The
+    Mimir Phase B contract at ``handlers/audit.py:488-518`` is the
+    source of truth for the tuple shape ``(signer_id, raw_32_byte_priv)``.
+
     Args:
         entries: caller-owned list to receive :class:`AuditEntry` records.
             ``Substrate.open`` passes ``Substrate._audit_entries`` here so
             ``s.audit.entries()`` and ``s.audit.verify_chain()`` see the
             same chain.
+        signer: optional Ed25519 signing tuple ``(signer_id,
+            private_key_bytes)`` — see :func:`make_audit_handler`. None
+            (default) emits unsigned entries.
 
     Returns:
         :class:`Runtime` ready to be activated via
@@ -413,7 +427,11 @@ def canonical_audit_stack(entries: list[AuditEntry]) -> Runtime:
     """
     raw = _make_canonical_raw_terminator()
     clock = make_system_clock_handler()
-    audit = make_audit_handler(entries, wraps=set(CANONICAL_AUDIT_WRAPPED_OPS))
+    audit = make_audit_handler(
+        entries,
+        wraps=set(CANONICAL_AUDIT_WRAPPED_OPS),
+        signer=signer,
+    )
     dispatcher = _make_dispatcher_handler()
     return Runtime(handlers=[raw, clock, audit, dispatcher])
 

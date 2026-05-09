@@ -1457,7 +1457,13 @@ class Substrate:
     # Lifecycle
     # ------------------------------------------------------------------
     @classmethod
-    def open(cls, uri: str = "memory", *, audit: bool = True) -> "Substrate":
+    def open(
+        cls,
+        uri: str = "memory",
+        *,
+        audit: bool = True,
+        audit_signer: tuple[str, bytes] | None = None,
+    ) -> "Substrate":
         """Open a substrate against the given store URI.
 
         Per ADR-9 the URI may be:
@@ -1489,11 +1495,27 @@ class Substrate:
         :class:`persistence.txn.AuditStackMissing` will fire at commit
         time (W1 fail-fast guard).
 
+        **Phase 2.4a LD-4 — env-keyed Ed25519 signer.** When
+        ``audit_signer`` is supplied (non-None), it is threaded verbatim
+        to :func:`persistence.effect.canonical_audit_stack` which
+        forwards to :func:`make_audit_handler`'s ``signer`` kwarg. Every
+        emitted :class:`AuditEntry` then carries an Ed25519 signature
+        over its content hash plus the supplied ``signer_id``. ``None``
+        (default) preserves the pre-2.4a unsigned behaviour. Production
+        callers (``persistence.coder.__main__``) derive this tuple from
+        ``PERSISTENCE_AUDIT_KEY=file:///<abs>/<key>.pem`` per the
+        2.4a CLI bootstrap; library callers may construct it directly.
+
         Args:
             uri: store URI per ADR-9; default ``"memory"``.
             audit: install the canonical audit handler stack by
                 default. Pass ``False`` only when Merkle-chain
                 enforcement is undesirable. Default ``True``.
+            audit_signer: optional ``(signer_id, raw_32_byte_priv)``
+                tuple. When set AND ``audit=True``, every AuditEntry is
+                Ed25519-signed. Default ``None`` (unsigned). Has no
+                effect when ``audit=False`` — the canonical stack is
+                not installed in that regime.
 
         Returns:
             a fresh :class:`Substrate` ready for use.
@@ -1519,7 +1541,13 @@ class Substrate:
         audit_entries: list[Any] = []
         if audit:
             canonical_entries = _MirroringEntryList(mirror=audit_entries)
-            runtime = canonical_audit_stack(canonical_entries)
+            # Phase 2.4a LD-4: thread the optional Ed25519 signer through
+            # to the audit middleware. None preserves pre-2.4a unsigned
+            # behaviour.
+            runtime = canonical_audit_stack(
+                canonical_entries,
+                signer=audit_signer,
+            )
             # Activate for the substrate's lifetime. The token is
             # released in :meth:`close`. We do NOT use the
             # ``with_runtime`` context manager here — the substrate is

@@ -8,7 +8,6 @@ the downstream sub-phase that fills it.
 import pytest
 
 from persistence.coder import Coder, CoderStubNotImplemented
-from persistence.effect.handlers import make_callable_llm_handler
 from persistence.sdk import Substrate
 
 

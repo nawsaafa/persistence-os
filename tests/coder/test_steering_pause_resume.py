@@ -4,8 +4,6 @@ import contextvars
 import threading
 import time
 
-import pytest
-
 from persistence.coder import Coder, _CoderSteeringSession
 from persistence.sdk import Substrate
 from persistence.effect.handlers import make_callable_llm_handler

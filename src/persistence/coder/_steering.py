@@ -269,7 +269,7 @@ class _CoderSteeringSession:
 
         R0-fold I3: ``fork_at`` is read from agent-side wall-clock at THIS
         entry point (transition to substrate ``:sys/now`` W3-rescoped to
-        2.4a, joining the existing ``:sys/now`` bundle from 2.3b). Recorded
+        2.4b, joining the existing ``:sys/now`` bundle from 2.3b). Recorded
         in ``:repl/request`` for byte-identity replay (T6).
 
         Args:
@@ -295,15 +295,15 @@ class _CoderSteeringSession:
             fork_at = _fork_at_override
         else:
             # R0-fold I3: source from agent-side wall-clock until :sys/now lands
-            # (W3 rescope to 2.4a, joining existing :sys/now bundle).
-            fork_at = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — :sys/now W3 rescope to 2.4a
+            # (W3 rescope to 2.4b, joining the :sys/now bundle in 2.4b's spine).
+            fork_at = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — :sys/now W3 rescope to 2.4b
 
         branch_id = self._derive_branch_id(directive, fork_at)
 
         # T9.1-fold B3: emit :repl/request FIRST so the audit stream reads
         # request → action (db.branch + :coder/branch) → response. R0-fold I3:
         # :repl/request payload records fork_at explicitly for byte-identity
-        # replay (full byte-identity W3-rescoped to 2.4a per :sys/now).
+        # replay (full byte-identity W3-rescoped to 2.4b per :sys/now).
         self._emit_repl_request(
             "branch",
             {"directive": directive, "fork_at": fork_at.isoformat()},

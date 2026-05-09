@@ -15,12 +15,13 @@ LD-5 (FD-LD5): coder.fold is session-side dict iteration, NOT s.txn.fold.
 """
 from __future__ import annotations
 
+import datetime as dt
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from persistence.fact.db import DB
+    from persistence.fact.db import DB, DBView
     from persistence.coder._session import Coder
 
 
@@ -76,3 +77,52 @@ class _CoderSteeringSession:
         returns immediately while the event is set (default / resumed state).
         """
         self._pause_event.wait()
+
+    # ---- LD-0 LD-2: snapshot + context_at (read-side, branch_id kwarg) ----
+
+    def _resolve_db(self, branch_id: str) -> "DB":
+        """Resolve ``branch_id`` to the DB.
+
+        - ``"active"`` → resolves to ``self.active_branch_id`` (the
+          currently-selected branch; defaults to ``"parent"``).
+        - ``"parent"`` → reserved for the original substrate DB
+          (``self.coder.substrate._db``).
+        - any other string → key in ``self.branches`` registered by
+          ``branch()`` (LD-1; T4).
+
+        Raises ``KeyError`` on unknown branch ids.
+        """
+        if branch_id == "active":
+            branch_id = self.active_branch_id
+        if branch_id == "parent":
+            return self.coder.substrate._db
+        if branch_id not in self.branches:
+            raise KeyError(f"unknown branch_id: {branch_id!r}")
+        return self.branches[branch_id]
+
+    def snapshot(self, n: int = 50, branch_id: str = "active") -> list[Any]:
+        """Return the last ``n`` datoms emitted on the selected branch.
+
+        R0-fold B3 invariant: read-only — does NOT mutate any DB. The
+        underlying ``DB.log()`` returns an iterator over the immutable
+        store; we materialize it and slice the tail.
+
+        R0-fold I2: ``branch_id`` selects ``"active"`` (default),
+        ``"parent"``, or a registered child key in ``self.branches``.
+        """
+        db = self._resolve_db(branch_id)
+        all_datoms = list(db.log())
+        return all_datoms[-n:]
+
+    def context_at(self, t: dt.datetime, branch_id: str = "active") -> "DBView":
+        """Return the ``DBView`` at transaction time ``t`` for the
+        selected branch.
+
+        R0-fold B3 invariant: read-only — ``DB.as_of(t)`` builds a fresh
+        ``DBView`` from a filter over the store; the underlying store is
+        unchanged.
+
+        R0-fold I2: ``branch_id`` kwarg as in :meth:`snapshot`.
+        """
+        db = self._resolve_db(branch_id)
+        return db.as_of(t)

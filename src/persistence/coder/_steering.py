@@ -18,7 +18,7 @@ from __future__ import annotations
 import datetime as dt
 import threading
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from persistence.fact.db import DB, DBView
@@ -213,3 +213,32 @@ class _CoderSteeringSession:
 
         self.branches[branch_id] = new_db
         return branch_id
+
+    # ---- LD-5 (FD-LD5): fold(probe) — session-side, NOT s.txn.fold ------
+
+    def fold(self, probe: Callable[["DB"], Any]) -> dict[str, Any]:
+        """Run ``probe(db)`` over parent + all child branches; return a dict
+        of scores keyed by branch_id.
+
+        FD-LD5: deviates from § 3.6 line 241 ("uses #145 surface
+        ``s.txn.fold``"). Session-side dict iteration. Rationale:
+        ``s.txn.fold`` emits facts on every iteration; ``coder.fold`` is
+        read-only scoring, so we cannot use the substrate fold primitive
+        here. v0.10.x rescope: substrate primitive change to allow
+        ``s.txn.fold`` with NULL fact-list path.
+
+        R0-fold B4: the parent IS included via the reserved ``"parent"``
+        key. Returns a deterministic dict — Python 3.7+ dict iteration
+        order is insertion order, and ``"parent"`` is inserted FIRST.
+
+        Read-only: probe is expected to inspect each DB without mutating
+        it. The session does not enforce immutability — that contract is
+        the caller's responsibility.
+        """
+        scores: dict[str, Any] = {}
+        # Parent first (reserved key).
+        scores["parent"] = probe(self.coder.substrate._db)
+        # Children in self.branches insertion order.
+        for branch_id, branch_db in self.branches.items():
+            scores[branch_id] = probe(branch_db)
+        return scores

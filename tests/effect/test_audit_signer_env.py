@@ -179,7 +179,7 @@ def test_env_keyed_signer_signs_audit_entries(
     )
 
     args = _make_args()
-    substrate = _build_substrate_and_handlers(args)
+    substrate, _ = _build_substrate_and_handlers(args)
     try:
         _trigger_audit_entries(substrate, n=3)
 
@@ -232,7 +232,7 @@ def test_env_unset_produces_unsigned_entries(
     assert _load_audit_signer_from_env() is None
 
     args = _make_args()
-    substrate = _build_substrate_and_handlers(args)
+    substrate, _ = _build_substrate_and_handlers(args)
     try:
         _trigger_audit_entries(substrate, n=3)
 
@@ -281,7 +281,7 @@ def test_tamper_breaks_signature_verification(
     )
 
     args = _make_args()
-    substrate = _build_substrate_and_handlers(args)
+    substrate, _ = _build_substrate_and_handlers(args)
     try:
         _trigger_audit_entries(substrate, n=2)
 

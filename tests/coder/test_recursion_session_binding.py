@@ -27,7 +27,10 @@ from persistence.coder._recursion import (
     current_dispatcher_context,
 )
 from persistence.coder._session import Coder
+from persistence.effect import with_runtime
 from persistence.effect.handlers.callable import make_callable_llm_handler
+from persistence.effect.handlers.clock import make_system_clock_handler
+from persistence.effect.handlers.sys_now import make_sys_now_handler
 from persistence.sdk import Substrate
 
 
@@ -69,12 +72,24 @@ def test_dispatcher_context_bound_during_iteration() -> None:
 
     handler = make_callable_llm_handler(call_fn=call_fn)
     s.effect.install_handler(handler, position="bottom")
+    # Phase 2.4b LD-1+LD-4 site 3: _session.py:_decide now performs
+    # :sys/now for valid_from provenance; install the clock + sys_now
+    # handlers so the audit=False custom stack covers the op.
+    s.effect.install_handler(make_system_clock_handler(), position="bottom")
+    s.effect.install_handler(make_sys_now_handler(), position="bottom")
 
     # Pre-condition: no DispatcherContext bound outside coder.run()
     assert current_dispatcher_context() is None
 
     coder = Coder(task="smoke", substrate=s, max_iters=1)
-    coder.run()
+    # Phase 2.4b LD-1: make_sys_now_handler's clause nested-performs
+    # :clock/now via the MODULE-LEVEL perform() which reads the active
+    # runtime ContextVar. Under audit=True (Substrate.open default) the
+    # facade sets _active automatically; under audit=False it does NOT,
+    # so we wrap the coder.run() call in with_runtime(s._runtime).
+    # Mirrors test_loop_replay.py:185 and test_recursion_composition_g4.py:285.
+    with with_runtime(s._runtime):
+        coder.run()
 
     assert len(captured) == 1, (
         f"expected 1 :llm/call captured; got {len(captured)}"

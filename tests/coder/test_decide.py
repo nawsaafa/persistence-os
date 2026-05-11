@@ -212,7 +212,14 @@ def test_decide_messages_datom_persists_when_perform_raises():
 
 def test_decide_does_not_invoke_effect_ops_other_than_llm_call():
     """G6: AST-walk through _session.py — _decide method body contains
-    exactly one s.effect.perform call, and its op string is ':llm/call'."""
+    exactly the expected ``effect.perform`` callsites.
+
+    Phase 2.4b LD-4 site 3: ``_decide`` now also performs ``:sys/now``
+    once (for ``valid_from`` provenance on the :llm/messages datom).
+    The "decision/action split" contract this test pins is preserved
+    — ``:sys/now`` is a substrate-time read, orthogonal to action
+    dispatch. ``:llm/call`` remains the only LLM-tier effect.
+    """
     import ast
     import inspect
     from persistence.coder import _session
@@ -242,9 +249,16 @@ def test_decide_does_not_invoke_effect_ops_other_than_llm_call():
                 and isinstance(node.args[0].value, str)):
             perform_ops.append(node.args[0].value)
 
-    assert perform_ops == [":llm/call"], (
-        f"_decide must perform exactly :llm/call; got {perform_ops!r}"
+    # Order-independent set comparison — :sys/now precedes :llm/call in
+    # the source (provenance write happens BEFORE the call), but the
+    # contract is about WHICH ops, not their textual order.
+    assert set(perform_ops) == {":llm/call", ":sys/now"}, (
+        f"_decide must perform exactly {{:llm/call, :sys/now}}; got {perform_ops!r}"
     )
+    # Sanity: :llm/call appears exactly once (no accidental duplication
+    # from a refactor). :sys/now likewise once.
+    assert perform_ops.count(":llm/call") == 1
+    assert perform_ops.count(":sys/now") == 1
 
 
 # ---------- G2.1b-a: parse_decision is total (Hypothesis) ----------

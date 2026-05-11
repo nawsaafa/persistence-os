@@ -131,7 +131,7 @@ class Coder:
         messages = build_messages(self.task, obs)
         tools = [EMIT_DECISION_TOOL_SCHEMA]
         call_id = uuid.uuid4().hex  # noqa: wall-clock — entity-id (txn precedent)
-        now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts; routes through :sys/now in 2.4a
+        now = self.substrate.effect.perform(":sys/now", {})
 
         # Provenance BEFORE the call — captured even if perform() raises.
         self.substrate.fact.transact([

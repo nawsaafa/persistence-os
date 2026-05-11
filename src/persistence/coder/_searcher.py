@@ -676,7 +676,7 @@ def _emit_search_failure_act_result(
     of the latency metrics work (gated by the `started_at_ms` int-ms
     contract that drove site 6 deferral; see Phase 2.4b design §LD-4).
     """
-    now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts
+    now = coder.substrate.effect.perform(":sys/now", {})
     coder.substrate.fact.transact([{
         "e": uuid.uuid4().hex,  # noqa: wall-clock — entity-id (mirrors _session.py:213 _act._record precedent)
         "a": ":act/result",

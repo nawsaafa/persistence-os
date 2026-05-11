@@ -500,11 +500,20 @@ def _escalate_plan_body(coder: Any, decision: "LLMDecision") -> None:
       int-ms contract; see Phase 2.4b design §LD-4).
     """
     substrate = coder.substrate
-    valid_from = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock
 
     # Step 1+2: build + validate. Stage-1/2/3 raise PlanPayloadValidation.
+    # MUST run BEFORE the :sys/now read so the G6 reject-path contract
+    # (substrate.effect.perform NEVER invoked on reject paths;
+    # tests/coder/test_planner_rejection.py spy fixture) holds even
+    # after the 2.4b LD-4 site-4 migration. Pre-2.4b the wall-clock
+    # call was incidentally invisible to the spy; with :sys/now it
+    # is now an effect.perform call, so it MUST be deferred until
+    # after validation succeeds.
     plan = _build_plan_from_payload(decision.payload)
     validate_plan_for_2_3a(plan)
+
+    # Phase 2.4b LD-4 site 4: substrate-time op for provenance valid_from.
+    valid_from = substrate.effect.perform(":sys/now", {})
 
     # Step 3: pre-walk — build id→Node map for leaf attribution.
     # FD3: walk() returns list[str] (node IDs), not list[Node].

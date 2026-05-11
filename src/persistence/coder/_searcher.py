@@ -672,8 +672,9 @@ def _emit_search_failure_act_result(
     see a uniform shape regardless of which path failed.
 
     `latency_ms=0` is a deliberate FD — per-leaf wall-clock latency
-    tracking is queued for 2.4a along with the rest of the latency
-    metrics work (`:sys/now` substrate op).
+    tracking is W3-rescoped to a follow-up phase along with the rest
+    of the latency metrics work (gated by the `started_at_ms` int-ms
+    contract that drove site 6 deferral; see Phase 2.4b design §LD-4).
     """
     now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts
     coder.substrate.fact.transact([{

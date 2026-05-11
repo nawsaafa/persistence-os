@@ -496,7 +496,8 @@ def _escalate_plan_body(coder: Any, decision: "LLMDecision") -> None:
 
     Forced spec deviation — latency_ms:
       Plan leaves report latency_ms=0 at 2.3a. Per-leaf wall-clock
-      tracking deferred to 2.4a (:sys/now / :clock/now route).
+      tracking W3-rescoped to a follow-up phase (gated by site-6
+      int-ms contract; see Phase 2.4b design §LD-4).
     """
     substrate = coder.substrate
     valid_from = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock

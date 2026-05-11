@@ -95,9 +95,11 @@ def test_branch_default_fork_at_is_substrate_now() -> None:
         coder = Coder(substrate=s, task="t", model="m", max_iters=1)
         session = _CoderSteeringSession(coder=coder)
 
-        # Sanity probe: :sys/now must resolve and return the FIXED
-        # datetime. Today raises Unhandled (op missing) — xfail-strict
-        # absorbs. After LD-1: returns expected_fork_at exactly.
+        # Sanity probe: :sys/now resolves from canonical_audit_stack
+        # (T2 installed make_sys_now_handler between clock and audit)
+        # and delegates to :clock/now → returns fromtimestamp(FIXED_EPOCH).
+        # If this fails, LD-1's delegation pattern is broken before we
+        # even reach the wiring assertion.
         sys_now_probe = s.effect.perform(":sys/now", {})
         assert sys_now_probe == expected_fork_at, (
             f":sys/now returned {sys_now_probe!r}, expected "

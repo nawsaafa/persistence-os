@@ -2,6 +2,67 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## Phase 2.4b — 2026-05-11 (`:sys/now` substrate-time op via thin view over `:clock/now`)
+
+Phase 2.4b lands the `:sys/now` substrate-time op — the W3 rescope from
+2.4a LD-3. The op is implemented as a thin view handler that
+nested-performs `:clock/now` and returns a bare UTC-aware
+`dt.datetime`. Installed in `canonical_audit_stack` between `clock` and
+`audit`. NOT in `CANONICAL_AUDIT_WRAPPED_OPS` (mirrors `:clock/now`'s
+exclusion — avoids audit-tier recursion).
+
+LD-1 was codex-consensus-locked (REJECT-FOR-NEW-OPTION-Z) over the
+controller's initial proposal (extend `make_system_clock_handler` with
+a second clause). Decider arguments: (1) G1 contract test asserts BARE
+datetime (not `{"now": datetime}`); (2) single source of truth for
+replay sequencing — `make_replay_clock_handler` continues to serve
+`:clock/now` deterministically, and `make_sys_now_handler` delegation
+propagates that determinism for free without a parallel
+`make_replay_sys_now_handler` family; (3) preserves the "only
+`clock.py` calls `time.time()`" module-contract.
+
+### Added
+
+- **`persistence.effect.handlers.sys_now.make_sys_now_handler()`** —
+  factory returning a `Handler(name="sys_now", wraps={":sys/now"},
+  clauses={":sys/now": <view-of-clock>})`. Clause body performs
+  `:clock/now` and converts the float epoch via
+  `dt.datetime.fromtimestamp(ts, tz=dt.timezone.utc)`. Exported from
+  `persistence.effect.handlers` and `persistence.effect` (top-level).
+
+- **Canonical stack composition** at `_audit_stack.py:canonical_audit_stack`
+  now `[raw, clock, sys_now, audit, dispatcher]` (was
+  `[raw, clock, audit, dispatcher]`). Module docstring + factory
+  docstring updated to reflect new stack order (R0-fold I1).
+
+### Test gates
+
+- **G4** — `tests/effect/test_sys_now_handler.py::test_sys_now_resolvable_from_canonical_stack`
+  asserts `:sys/now` is callable from default `Substrate.open("memory")`
+  stack, returns tz-aware UTC `dt.datetime`.
+
+- **G2** — `tests/effect/test_sys_now_handler.py::test_sys_now_delegates_to_replay_clock`
+  is the LD-1 falsifiability anchor: installs
+  `make_replay_clock_handler([100.0, 200.0])` + `make_sys_now_handler()`
+  in a minimal `Runtime`, asserts two consecutive `:sys/now` calls
+  return the corresponding `fromtimestamp(...)` values. Manual probe
+  during T3 confirmed FAIL with 56-year delta when delegation is
+  broken; SHA-256 byte-identity restoration verified against T1 blob.
+
+- **Return-shape guard** — `test_sys_now_returns_bare_datetime_not_dict`
+  asserts bare `dt.datetime` return (regression guard for any future
+  attempt to wrap in `{"now": ...}` dict).
+
+### Caveat (queued for v0.9.x refactor)
+
+`make_sys_now_handler`'s clause body uses module-level
+`perform(":clock/now")` which reads the `_active` ContextVar. Default
+`Substrate.open()` (`audit=True`) sets `_active` automatically. Under
+`audit=False`, callers must wrap in `with with_runtime(s._runtime):`
+(matches existing `test_loop_replay`, `test_recursion_composition_g4`
+convention). Refactoring to `k`-continuation invocation is queued as a
+v0.9.x improvement (Codex Impl R1 I3, design doc §W3 rescopes).
+
 ## Phase 2.3c.2 T2 — 2026-05-08 (AuditEntry.parent_audit_entry_id field add — chain-hash drift)
 
 Phase 2.3c.2 LD5 introduces a new optional field on `AuditEntry` that

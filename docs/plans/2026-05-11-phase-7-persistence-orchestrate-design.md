@@ -88,15 +88,22 @@ Ship `persistence-orchestrate` as an Anthropic-Skill-shaped marketplace artifact
 │ Layer 2 (emitted by user invocations): downstream orchestrator  │
 │ ─────────────────────────────────────────────────────────────── │
 │  <emitted-out-dir>/                                             │
-│      ├─ SKILL.md         (markdown; tells Claude Code how to    │
-│      │                    run the chain via shell-out to        │
-│      │                    `uv run python -m persistence.coder`) │
+│      ├─ SKILL.md         (markdown; tells Claude Code to        │
+│      │                    `python ./orchestrate.py` to run it)  │
 │      ├─ chain.edn        (the user's chain, canonicalized)      │
-│      └─ preflight.toml   (capabilities + ops required,          │
-│                           derived from tests/preflight_manifest │
-│                           shipped in 2.4c)                      │
+│      ├─ preflight.toml   (capabilities + ops required,          │
+│      │                    derived from tests/preflight_manifest │
+│      │                    shipped in 2.4c)                      │
+│      └─ orchestrate.py   (the "thin orchestrator that calls the │
+│                           curated SDK surface" — codex A-prime  │
+│                           verbatim. Pure Python; reads chain.edn│
+│                           and uses Substrate.open + s.effect    │
+│                           per step; no Coder involvement.       │
+│                           Template-rendered by the emitter.)    │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+**Why a 4-file emitted dir (T0 design clarification, 2026-05-11):** the design's "shell out to `python -m persistence.coder`" prose was technically incoherent — `persistence.coder` is LLM-driven (ReAct on `--task`), it doesn't interpret chain.edn. The codex A-prime locked decision was "emit a thin orchestrator that calls the curated SDK surface" — that orchestrator IS the emitted `orchestrate.py`. This resolves FD-CODER-RUN-CHAIN-API as NOT NEEDED (no changes to Coder); the runner lives in the emitted dir, not in persistence-os src/. Substrate stays substrate; runtime stays in the emitted artifact.
 
 The emitter is **not** runtime orchestration code — it is a Python codegen (stdlib for emit string-building + the existing `edn_format` parser dep for chain reading; no new dependencies) that converts a chain.edn into a downstream Anthropic Skill directory. The substrate (`persistence.coder` CLI shipped 2.4a) does all runtime work when the emitted skill is invoked.
 
@@ -239,7 +246,9 @@ No vendoring. No alternate distribution channels. Marketplace artifact carries n
 | `src/persistence/orchestrate/__init__.py` | Module entrypoint; exposes `emit_orchestrator_skill(chain: Chain, out_dir: Path)` as the single public function. |
 | `src/persistence/orchestrate/__main__.py` | CLI: `python -m persistence.orchestrate emit --chain <path> --out <dir>`. Argparse-shaped, mirrors `persistence.coder.__main__` conventions. |
 | `src/persistence/orchestrate/_schema.py` | EDN chain parser + validator. Uses `edn_format` (already in base deps). Defines `Chain`, `Step`, `Capability` typed-tuple shapes. |
-| `src/persistence/orchestrate/_emit.py` | String-building emit functions: `emit_skill_md(chain) -> str`, `emit_chain_edn(chain) -> str`, `emit_preflight_toml(chain) -> str`. Pure stdlib, deterministic. |
+| `src/persistence/orchestrate/_emit.py` | String-building emit functions: `emit_skill_md(chain) -> str`, `emit_chain_edn(chain) -> str`, `emit_preflight_toml(chain) -> str`, `emit_orchestrate_py(chain) -> str`. Pure stdlib, deterministic. The `emit_orchestrate_py` renders a Python module exposing `run_chain(substrate, granted_capabilities)` that calls `s.effect.perform(op, args)` per step. |
+| `src/persistence/tools/__init__.py` | New module marker (T0 receipt: tools/ didn't exist). |
+| `src/persistence/tools/mintkey.py` | Thin CLI wrapping `persistence.effect._signing.generate_keypair()`; writes PEM to `--out` path. Resolves FD-MINTKEY-CLI inline at T1. ~30 LOC. Entrypoint: `python -m persistence.tools.mintkey --out <path>`. |
 | `src/persistence/orchestrate/examples/capability-denial-chain.edn` | Canned demo chain 1: 2 steps; step 2 capability missing; halts. Exercises Ed25519 signing + Capability lattice + audit replay. |
 | `src/persistence/orchestrate/examples/pause-resume-sysnow-chain.edn` | Canned demo chain 2: multi-step with pause checkpoint + `:sys/now` read. Exercises kill switch + substrate time + signing. |
 | `src/persistence/CHANGELOG-orchestrate.md` | Per-module changelog matching other persistence modules. Initial entry: v0.9.0a1 Phase 7 ship. |
@@ -346,24 +355,32 @@ def test_emits_orchestrator_that_runs_signed_replayable_trace(tmp_path) -> None:
     out_dir = tmp_path / "emitted-skill"
     emit_orchestrator_skill(chain, out_dir)
 
-    # (i) Emitted directory shape
+    # (i) Emitted directory shape (4 files; T0 design clarification adds orchestrate.py)
     assert (out_dir / "SKILL.md").is_file()
     assert (out_dir / "chain.edn").is_file()
     assert (out_dir / "preflight.toml").is_file()
+    assert (out_dir / "orchestrate.py").is_file()
 
-    # Step 2: run the emitted chain in-process under canonical audit stack
+    # Step 2: run the emitted orchestrator in-process — import the emitted
+    # orchestrate.py module and call its run_chain(substrate) function. The
+    # emitter renders orchestrate.py as a pure-Python module exposing a
+    # run_chain(substrate) callable that wraps the chain.edn into substrate
+    # calls. No Coder involvement; Coder remains LLM-driven and unchanged.
     priv, _pub = generate_keypair()
     signer = ("test-key-001", priv)
 
-    with Substrate.open("memory", audit_signer=signer) as s:
-        # The emitted chain executes step-by-step under Coder; step 2's
-        # capability is not granted, so Capability lattice (2.3d) denies
-        # it before side effect. Granted capabilities derived from
-        # chain.edn step 1's :capability field only.
-        coder = Coder(substrate=s, granted_capabilities=_first_step_caps(chain))
-        coder.run_chain_from_edn(out_dir / "chain.edn",
-                                  llm_handler=make_callable_llm_handler(_done_call_fn()))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("emitted_orchestrate",
+                                                    out_dir / "orchestrate.py")
+    emitted = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emitted)
 
+    with Substrate.open("memory", audit_signer=signer) as s:
+        # The emitted run_chain executes step-by-step using s.effect.perform.
+        # Step 2's capability is not granted; Capability lattice (2.3d) denies
+        # before side effect. Granted capabilities derived from chain.edn
+        # step 1's :capability field only.
+        emitted.run_chain(s, granted_capabilities=_first_step_caps(chain))
         audit_entries = list(s._audit_entries)
 
     # (ii) Trace contains signed denial datom for step 2
@@ -388,7 +405,7 @@ def test_emits_orchestrator_that_runs_signed_replayable_trace(tmp_path) -> None:
 
 **Falsifies if:** any of the LD-1 invariants break — emitted skill misses files, side effect occurs despite denial, denial entry unsigned, replay produces a different canonical hash. **No subprocess coupling, no stdout JSON contract, no provider env dependency.**
 
-**Note (FD-CODER-RUN-CHAIN-API):** `Coder.run_chain_from_edn(...)` and `Coder.replay_audit_entries(...)` are new methods on `persistence.coder.Coder` that this design assumes. Verify in T0 receipts; if absent, T1 adds them as thin wrappers around `Coder.run()` + the existing canonical-replay path. The methods are pure Python (no new deps).
+**Note (FD-CODER-RUN-CHAIN-API):** **RESOLVED at T0 as NOT NEEDED.** Initial design assumed new `Coder.run_chain_from_edn(...)` / `Coder.replay_audit_entries(...)` methods on `persistence.coder.Coder`. T0 receipts confirmed Coder is LLM-driven (`Coder.run()` is the ReAct loop, no chain interpretation). Codex A-prime explicitly approved "emit a thin orchestrator that calls the curated SDK surface" — the runner is the EMITTED `orchestrate.py`, NOT a method on Coder. Coder stays unchanged. The emitted `orchestrate.py` exposes `run_chain(substrate, granted_capabilities)` using `s.effect.perform()` directly.
 
 ### G4 — SKILL.md prereqs verbatim (LD-4 falsifier) — REDESIGNED marker-extraction (R0-fold I2)
 

@@ -365,11 +365,15 @@ agent-vs-human identity per the v0.9.0a1 positioning § 1. Velocity-memory:
 8-10h estimate → 2.5h actual.
 
 `make_audit_handler(signer: tuple[str, bytes] | None = None)` accepts a
-signer tuple `(signer_id, ed25519_private_key_pem_bytes)`; if `None`, audit
-entries remain unsigned (dev mode, `unset PERSISTENCE_AUDIT_KEY`). Audit
-entries gain `signer_id` + `signature` fields. `verify_chain` validates
-both the prev_hash chain AND each entry's signature against the recorded
-`signer_id`.
+signer tuple `(signer_id, raw_32_byte_private_key)`. PEM is the operator-surface
+format (`PERSISTENCE_AUDIT_KEY=file:///path/to/key.pem`); the substrate uses
+**raw 32-byte Ed25519 keys** internally per `effect/_signing.py:19-20` —
+extraction from PEM happens at the env-decode boundary. If `signer` is `None`,
+audit entries remain unsigned (dev mode, `unset PERSISTENCE_AUDIT_KEY`). Audit
+entries gain `signer_id` + `signature` fields. `verify_chain(entries)`
+validates the prev_hash chain by default; pass
+`public_keys={signer_id: raw_pub_bytes}` to additionally validate each entry's
+Ed25519 signature.
 
 Phase B-demo screencast (`docs/examples/audit-tamper.md`) demonstrates
 tamper detection: flip one byte in an audit entry; `verify_chain` returns

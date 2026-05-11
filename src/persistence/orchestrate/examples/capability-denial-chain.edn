@@ -2,10 +2,10 @@
   :name "capability-denial-demo"
   :description "G3 falsifier — step 2's capability is not granted; halts."
   :steps [(:step :id 1
-                :op :fs/read
-                :args {:path "input.md"}
+                :op :claim/emit
+                :args {:subject "input.md" :predicate "read"}
                 :capability (:Capability :op "coder" :qualifier "read"))
           (:step :id 2
-                :op :fs/write
-                :args {:path "output.md" :content "result"}
+                :op :plan/edit
+                :args {:plan-id "demo-plan" :edit "add-step"}
                 :capability (:Capability :op "coder" :qualifier "write"))])

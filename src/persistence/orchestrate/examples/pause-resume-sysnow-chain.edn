@@ -6,6 +6,6 @@
                 :args {}
                 :capability (:Capability :op "coder" :qualifier "read"))
           (:step :id 2
-                :op :fs/read
-                :args {:path "input.md"}
+                :op :claim/emit
+                :args {:subject "input.md" :predicate "read"}
                 :capability (:Capability :op "coder" :qualifier "read"))])

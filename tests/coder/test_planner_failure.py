@@ -95,8 +95,17 @@ _TWO_LEAF_EDN = '[:seq {} [:fs/read {:path "x.txt"}] [:code/run {:source "boom()
 
 
 def _make_perform_with_failure(failing_op: str, exc: Exception):
-    """Return fake perform that succeeds for all ops EXCEPT failing_op."""
+    """Return fake perform that succeeds for all ops EXCEPT failing_op.
+
+    Phase 2.4b LD-4: ``_escalate_plan_body`` now reads ``valid_from`` via
+    ``substrate.effect.perform(":sys/now", {})``. Special-case the op so
+    a wall-clock ``dt.datetime`` is returned regardless of the failure
+    target — the test cares about handler-failure shape, not the time
+    read.
+    """
     def perform(op, args=None):
+        if op == ":sys/now":
+            return dt.datetime.now(dt.timezone.utc)
         if op == failing_op:
             raise exc
         return {"stubbed": True, "op": op}

@@ -96,8 +96,15 @@ def _scripted_perform(by_op):
 
     Used by the IMPORTANT-1 / IMPORTANT-2 regression tests to script per-op
     handler returns (e.g. {":git/log": {"tag": "v0.9.0a1", ...}}).
+
+    Phase 2.4b LD-4: ``_escalate_plan_body`` reads ``valid_from`` via
+    ``substrate.effect.perform(":sys/now", {})``. Auto-route that to a
+    real wall-clock datetime so existing scripted-op dicts don't need
+    to enumerate it.
     """
     def perform(op, args=None):
+        if op == ":sys/now":
+            return dt.datetime.now(dt.timezone.utc)
         return by_op[op]
     return perform
 
@@ -123,7 +130,13 @@ def test_escalate_plan_emits_act_result_per_leaf_in_walk_order(s):
     session_start = dt.datetime.now(dt.timezone.utc)
 
     # Stub effect.perform to return predictable results.
+    # Phase 2.4b LD-4: ``_escalate_plan_body`` reads ``valid_from`` via
+    # ``substrate.effect.perform(":sys/now", {})``; pass-through to a
+    # real wall-clock datetime so the substrate transact path receives
+    # a coercible datetime (not the generic stub dict).
     def fake_perform(op, args=None):
+        if op == ":sys/now":
+            return dt.datetime.now(dt.timezone.utc)
         return {"stubbed": True, "op": op}
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
@@ -159,6 +172,8 @@ def test_escalate_plan_act_result_carries_plan_context_keys(s):
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
+        if op == ":sys/now":  # Phase 2.4b LD-4 — see top fake_perform comment
+            return dt.datetime.now(dt.timezone.utc)
         return {"file_content": "hello"}
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
@@ -209,6 +224,8 @@ def test_escalate_plan_emits_plan_done_provenance_datom(s):
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
+        if op == ":sys/now":  # Phase 2.4b LD-4 — see top fake_perform comment
+            return dt.datetime.now(dt.timezone.utc)
         return None
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
@@ -269,6 +286,8 @@ def test_escalate_plan_emits_zero_llm_decision_datoms(s):
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
+        if op == ":sys/now":  # Phase 2.4b LD-4 — see top fake_perform comment
+            return dt.datetime.now(dt.timezone.utc)
         return {"ok": True}
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]
@@ -296,6 +315,8 @@ def test_escalate_plan_returns_none_on_success(s):
     session_start = dt.datetime.now(dt.timezone.utc)
 
     def fake_perform(op, args=None):
+        if op == ":sys/now":  # Phase 2.4b LD-4 — see top fake_perform comment
+            return dt.datetime.now(dt.timezone.utc)
         return {"content": "# README"}
 
     s.effect.perform = fake_perform  # type: ignore[method-assign]

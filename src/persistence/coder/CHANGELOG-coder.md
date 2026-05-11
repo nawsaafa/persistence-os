@@ -1,5 +1,174 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.4b — 2026-05-11 (`:sys/now` wiring + provenance-site migration)
+
+Phase 2.4b lands `:sys/now` (substrate-time op — see
+`CHANGELOG-effect.md` Phase 2.4b for the handler) and migrates five
+wall-clock provenance sites to route through it. Closes the W3 rescope
+from 2.4a LD-3 and removes five `# noqa: wall-clock — routes through
+:sys/now in 2.4a` exemption promises that were overdue by one phase.
+
+**Critical-path sequencing:** 2.4a → 2.4b (this phase) → 2.4c lockfile
+(~Fri 2026-06-12) → `v0.9.0a1` tag (by 2026-06-14). Hard cutoff
+2026-06-05; runway WELL UNDER BUDGET.
+
+### Changed
+
+- **`_steering.py:299` (LD-2)** — `_CoderSteeringSession.branch()`'s
+  default `fork_at` now sources from
+  `self.coder.substrate.effect.perform(":sys/now", {})` (was
+  `dt.datetime.now(dt.timezone.utc)`). Four W3-rescope comments
+  dropped (FD-LD2-comment-cleanup: -8 / +1 LOC). Full byte-identity
+  replay is now achieved (the prior comment-acknowledged gap).
+
+- **`_session.py:134` (LD-4 site 3)** — `:llm/messages` provenance
+  `valid_from` now routes through `:sys/now`. Provenance-before-call
+  semantics preserved.
+
+- **`_planner.py:503` (LD-4 site 4)** — `_escalate_plan_body`'s
+  `valid_from` now routes through `:sys/now`. **G6 reject-path
+  ordering fix folded inline:** `valid_from` read moved from BEFORE
+  `_build_plan_from_payload` + `validate_plan_for_2_3a` to AFTER, to
+  preserve Phase 2.3a's G6 contract that `substrate.effect.perform`
+  is never called on reject paths. Documented inline; all 9
+  `test_planner_rejection.py` tests pass.
+
+- **`_searcher.py:679` (LD-4 site 5)** — `_emit_search_failure_act_result`'s
+  `valid_from` now routes through `:sys/now`. **R0-fold I2 catch** —
+  this site was missed in receipts during T0 and surfaced by codex
+  ARIS R0.
+
+- **HTTP routes** — `blob.py:71` (LD-4 site 1) and `claim.py:157`
+  (LD-4 site 2) `valid_from` provenance migrations. The
+  fact-write-then-effect-perform ordering pattern is preserved
+  (Phase 2.1c.6 — provenance datoms survive any subsequent audit-perform
+  failure).
+
+- **`_steering.py` docstring + comments** — dropped the
+  R0-fold-I3 "2.4b W3-rescope" narrative around lines 270-273,
+  297-299, 305-306 entirely. Per FD-LD2-comment-cleanup: -8 / +1
+  comment LOC.
+
+### Test gates
+
+- **G1** — `tests/coder/test_steering_sys_now.py::test_branch_default_fork_at_is_substrate_now`
+  **FLIPPED** from xfail-strict → PASS. The W3 rescope from 2.4a LD-3
+  is closed. **R0-fold B1 sharpened the falsifiability**: original
+  sandwich `before ≤ recorded ≤ after` was non-falsifying because
+  `:sys/now` and `dt.datetime.now()` share the same `time.time()`
+  source. Rewritten with FIXED-CLOCK EQUALITY (install
+  `make_fixed_clock_handler(ts=42.0)`; assert `recorded_fork_at ==
+  fromtimestamp(42.0, UTC)`). T4 manual probe confirmed the assertion
+  fails with 56-year delta on wiring revert.
+
+- **G1 Test B** — `test_no_wall_clock_in_steering_branch` AST ban for
+  `dt.datetime.now()` / `dt.datetime.utcnow()` in `_steering.py`.
+  Belt-and-suspenders catch for static-code regression. T4 manual
+  probe confirmed AST scan trips with the exact offender line on
+  wiring revert.
+
+- **G3** — `tests/test_wall_clock_ban_sys_now_sweep.py::test_no_wall_clock_in_migrated_provenance_sites`
+  alias-aware AST ban over the 5 migrated modules. R0-fold N1 widened
+  the matcher from narrow `dt.datetime.now(` to `.now()` AND `.utcnow()`
+  across `dt`/`datetime` leftmost names. Includes `# noqa: wall-clock`
+  opt-out logic for the 3 legitimate non-migration sites in
+  `_session.py:76, 223, 226` (paired with site-6 latency-tracking
+  rescope — same gate).
+
+- **G5** — `tests/coder/test_mcts_started_at_ms_sys_now.py::test_mcts_started_at_ms_deterministic_under_fixed_clock`
+  is the W3 acceptance marker for site 6 (`_searcher.py:591`
+  `started_at_ms` via `time.time_ns() // 1_000_000`). XFAIL today
+  because `time.time_ns()` bypasses the clock handler. Flips PASS when
+  a future phase lands int-only ms conversion routing through `:sys/now`
+  (or a new `:sys/now-ms` substrate op).
+
+### Test-fixture cascade (R0-fold receipt-step gap)
+
+LD-4 was scoped to 5 production migrations + 1 G3 test in the design
+doc. The actual scope expanded to 6 test-fixture file updates because
+`audit=False` tests with custom-handler-composition fixtures depend on
+the migrated code paths' handler-coverage assumptions:
+
+- `test_recursion_composition_g4.py` — install `make_sys_now_handler`
+  in canonical-stack fixture (mirrors stack order).
+- `test_recursion_session_binding.py` — install clock + sys_now; wrap
+  `coder.run()` in `with_runtime(s._runtime)` because `audit=False`
+  doesn't activate `_active`.
+- `test_loop_replay.py` — install `make_sys_now_handler` alongside
+  pinned fixed clock; replay determinism PRESERVED via delegation.
+- `test_planner_execute.py` + `test_planner_failure.py` — inline
+  scripted-perform stubs short-circuit `:sys/now` to
+  `dt.datetime.now(dt.timezone.utc)` for tests not exercising the full
+  substrate stack.
+- `test_decide.py` (G6 AST contract) — updated from strict
+  `[":llm/call"]` → `{":llm/call", ":sys/now"}` set comparison +
+  count=1 each. The decision/action split contract is preserved
+  (`:sys/now` is a substrate-time read, orthogonal to action dispatch).
+
+This is the receipts-step gap pattern from MEMORY.md auto-memory:
+receipts focused on migration sites but not on the audit=False test
+fixtures depending on those sites' handler-coverage assumptions. Folded
+inline at T5 with documentation.
+
+### Line-number drift (FYI for future archaeology)
+
+Between T0 design (2026-05-11 morning) and T5 implementation (2026-05-11
+afternoon), R0-fold materialization edits shifted line numbers in the
+design doc's site-list:
+
+- `_planner.py:502` → `_planner.py:503` (site 4)
+- `_searcher.py:674` → `_searcher.py:679` (site 5)
+- `_searcher.py:587` → `_searcher.py:591` (site 6, deferred)
+
+Used actual line numbers in impl. Design doc references retained for
+historical receipts.
+
+### ARIS journey
+
+| Stage | Verdict | Mean / Min |
+|---|---|---|
+| Design R0 | FAIL | 8.19 / 7.0 |
+| R0-fold + materialization (controller) | 1B+2I+1N closed | — |
+| Design R0.1 lite | PASS-WITH-FIXES | **8.33 / 8.0** |
+| Codex Impl R1 | PASS-WITH-FIXES | **8.12 / 7.6** |
+| Codex Impl R1 fold (T9.1, inline) | 0B + 3I + 1N closed | — |
+
+### W3 rescopes queued
+
+- **2.4c+** — `started_at_ms` int-only conversion for `_searcher.py:591`
+  (site 6 deferred from this phase). Acceptance: G5 xfail-strict marker
+  flips PASS. Option space: introduce `:sys/now-ms` int-direct op, or
+  document `int(perform(":sys/now").timestamp() * 1000)` with explicit
+  floor/round policy + near-boundary replay test.
+- **v0.9.x** — `:sys/now-ns` nanosecond op (not load-bearing today).
+- **v0.9.x** — optional `:sys/now` audit-wrapping for time-read
+  observability traces (requires audit-middleware recursion analysis).
+- **v0.9.x** — refactor `make_sys_now_handler` to `k`-continuation
+  invocation, eliminating the `_active` ContextVar dependency that
+  forces audit=False tests to wrap in `with_runtime(s._runtime)`
+  (Codex Impl R1 I3).
+
+### Calendar
+
+Design + impl + Impl R1 fold + CHANGELOG: ~5h actual vs 4.5h budgeted
+(within the 1-phase-per-day calibration; small overrun from T5 scope
+expansion).
+
+### Pre-existing test failures surfaced during 2.4b verification
+
+NOT introduced by 2.4b — verified pre-existing on `daf1170` (2.4a
+merge) and on `d50739f` (2.3d merge). Queued for separate
+investigation:
+
+- `tests/coder/test_cli_smoke.py::test_cli_runs_skeleton_and_emits_banner_on_first_stub`
+- `tests/coder/test_main_provider_install.py::test_main_auto_no_providers_prints_echo_warning_and_exits_one`
+- Multiple `tests/plan/` (dspy-dep subprocess) + `tests/repl/`
+  (token-validation / inspect-entity / ws-auth handshake) failures.
+
+Two phases of codex Impl R1 (2.3d's and 2.4a's) plus local pytest
+verification missed these — likely because narrower scopes were used
+during impl. Add broader `tests/` sweep to 2.4c verification checklist.
+
 ## Phase 2.4a — 2026-05-09/10 (Production CLI wiring + env-keyed Ed25519 signer plumbing)
 
 Phase 2.4a is the FIRST harden-track phase. It wires the production CLI

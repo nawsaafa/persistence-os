@@ -21,6 +21,7 @@ from persistence.effect.handlers.skill import (  # noqa: F401
     SkillLookupValidation,
     SkillNotFound,
 )
+from persistence.effect.handlers.sys_now import make_sys_now_handler  # noqa: F401
 
 __all__ = [
     "make_callable_llm_handler",
@@ -43,4 +44,6 @@ __all__ = [
     "SkillNotFound",
     "SkillDefineValidation",
     "SkillLookupValidation",
+    # Phase 2.4b — :sys/now substrate-time view handler (LD-1).
+    "make_sys_now_handler",
 ]

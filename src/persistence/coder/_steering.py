@@ -267,10 +267,11 @@ class _CoderSteeringSession:
         registered in ``self.branches`` by a deterministic ``branch_id``
         derived from ``(parent_branch_id, fork_at, directive)``.
 
-        R0-fold I3: ``fork_at`` is read from agent-side wall-clock at THIS
-        entry point (transition to substrate ``:sys/now`` W3-rescoped to
-        2.4b, joining the existing ``:sys/now`` bundle from 2.3b). Recorded
-        in ``:repl/request`` for byte-identity replay (T6).
+        ``fork_at`` defaults to ``substrate.effect.perform(":sys/now", {})``
+        (the substrate-time op landed in Phase 2.4b LD-1+LD-2), so branch
+        replay under :func:`make_replay_clock_handler` or
+        :func:`make_fixed_clock_handler` is deterministic. Recorded in
+        ``:repl/request`` for byte-identity replay (T6).
 
         Args:
             directive: dict payload describing what the operator wants the
@@ -294,16 +295,15 @@ class _CoderSteeringSession:
         if _fork_at_override is not None:
             fork_at = _fork_at_override
         else:
-            # R0-fold I3: source from agent-side wall-clock until :sys/now lands
-            # (W3 rescope to 2.4b, joining the :sys/now bundle in 2.4b's spine).
-            fork_at = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — :sys/now W3 rescope to 2.4b
+            # Phase 2.4b LD-2: source fork_at from the substrate-time op.
+            fork_at = self.coder.substrate.effect.perform(":sys/now", {})
 
         branch_id = self._derive_branch_id(directive, fork_at)
 
         # T9.1-fold B3: emit :repl/request FIRST so the audit stream reads
-        # request → action (db.branch + :coder/branch) → response. R0-fold I3:
+        # request → action (db.branch + :coder/branch) → response.
         # :repl/request payload records fork_at explicitly for byte-identity
-        # replay (full byte-identity W3-rescoped to 2.4b per :sys/now).
+        # replay.
         self._emit_repl_request(
             "branch",
             {"directive": directive, "fork_at": fork_at.isoformat()},

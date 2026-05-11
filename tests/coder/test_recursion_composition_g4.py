@@ -96,6 +96,7 @@ from persistence.effect.handlers.callable import make_callable_llm_handler
 from persistence.effect.handlers.clock import make_fixed_clock_handler
 from persistence.effect.handlers.fs import make_fs_handler
 from persistence.effect.handlers.skill import _PromotionRecordStub
+from persistence.effect.handlers.sys_now import make_sys_now_handler
 from persistence.plan import parse, unparse
 from persistence.plan._mcts import (
     ComposeWithSkillAction,
@@ -179,6 +180,13 @@ def _build_pinned_e2e_substrate(
 
     raw = _make_canonical_raw_terminator()
     clock = make_fixed_clock_handler(ts=fixed_ts)
+    # Phase 2.4b LD-1: sys_now view handler over :clock/now; installed
+    # between clock and audit per the canonical stack ordering. Coder
+    # provenance sites (_session.py:_decide, _planner.py:_escalate_plan_body,
+    # _searcher.py:_emit_search_failure_act_result) now read valid_from
+    # from :sys/now per LD-4 — without this handler those sites raise
+    # Unhandled on this audit=False custom stack.
+    sys_now = make_sys_now_handler()
     fs = make_fs_handler(project_root=project_root, scratch_dir=scratch_dir)
     call_fn = _scripted_call_fn(decisions, on_call=on_call)
     llm = make_callable_llm_handler(call_fn=call_fn)
@@ -188,6 +196,7 @@ def _build_pinned_e2e_substrate(
     # Innermost first; dispatcher outermost (above audit middleware).
     s.effect.install_handler(raw, position="bottom")
     s.effect.install_handler(clock, position="bottom")
+    s.effect.install_handler(sys_now, position="bottom")
     s.effect.install_handler(fs, position="bottom")
     s.effect.install_handler(llm, position="bottom")
     s.effect.install_handler(audit, position="top")

@@ -43,6 +43,7 @@ from persistence.effect._audit_stack import (
 )
 from persistence.effect.handlers.callable import make_callable_llm_handler
 from persistence.effect.handlers.fs import make_fs_handler
+from persistence.effect.handlers.sys_now import make_sys_now_handler
 from persistence.sdk import Substrate
 
 # Fixed timestamp — pinned so recorded_at / latency_ms are deterministic.
@@ -134,12 +135,19 @@ def _install_pinned_audit_stack(
     """
     raw = _make_canonical_raw_terminator()
     clock = make_fixed_clock_handler(ts=fixed_ts)
+    # Phase 2.4b LD-1+LD-4: sys_now view handler over :clock/now —
+    # required for the migrated coder/ provenance sites (LD-4 sites 3-5
+    # in _session.py / _planner.py / _searcher.py) which now read
+    # valid_from from :sys/now. Replay determinism is preserved because
+    # sys_now delegates to :clock/now (the pinned fixed clock above).
+    sys_now = make_sys_now_handler()
     fs = make_fs_handler(project_root=project_root, scratch_dir=scratch_dir)
     llm = make_callable_llm_handler(call_fn=_scripted_decisions(decisions))
     audit = make_audit_handler(entries, wraps=set(CANONICAL_AUDIT_WRAPPED_OPS))
     # Install innermost first; audit goes outermost (top).
     s.effect.install_handler(raw, position="bottom")
     s.effect.install_handler(clock, position="bottom")
+    s.effect.install_handler(sys_now, position="bottom")
     s.effect.install_handler(fs, position="bottom")
     s.effect.install_handler(llm, position="bottom")
     s.effect.install_handler(audit, position="top")

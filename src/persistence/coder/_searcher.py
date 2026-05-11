@@ -536,8 +536,10 @@ def _escalate_branch_body(coder: "Coder", decision: LLMDecision) -> None:
         2. Resolve MCTSConfig: bridge default with optional payload override.
         3. Construct LLMExpander + LLMJudgeEvaluator (providers route through
            :llm/call per LD3).
-        4. Synthesize started_at_ms (FD1: time.time_ns()//1e6 — queued for
-           2.4a :sys/now).
+        4. Synthesize started_at_ms (FD1: time.time_ns()//1e6 — W3-rescoped
+           to a follow-up phase as LD-4 site 6; int-ms representation
+           requires its own conversion contract — see Phase 2.4b design
+           §LD-4 / G5 xfail-strict marker).
         5. Run s.plan.mcts_search with db=substrate._db (LD5 audit chain
            lands on the substrate's fact-store directly).
         6. T7 will wrap with try/except for LD4 path-1 (bubble-out exceptions)
@@ -582,9 +584,11 @@ def _escalate_branch_body(coder: "Coder", decision: LLMDecision) -> None:
     evaluator = _make_branch_evaluator(coder, skill_library=skill_library)
 
     # FD1: mcts_search.started_at_ms must be a positive int (NOT bool, NOT
-    # float; enforced at _mcts.py:870-877). 2.4a will route this through
-    # :sys/now; for now use raw time module.
-    started_at_ms = time.time_ns() // 1_000_000  # noqa: wall-clock — FD1 + queued for 2.4a
+    # float; enforced at _mcts.py:870-877). 2.4b W3-rescoped this to a
+    # follow-up phase as LD-4 site 6 — int-ms representation requires
+    # its own conversion contract (G5 xfail-strict marker pending). For
+    # now use raw time module.
+    started_at_ms = time.time_ns() // 1_000_000  # noqa: wall-clock — FD1 + W3-rescoped per 2.4b LD-4 site 6
 
     # Stage 6: run search. db=coder.substrate._db lands :mcts/* provenance
     # datoms directly on the substrate's fact-store (LD5).
@@ -668,10 +672,11 @@ def _emit_search_failure_act_result(
     see a uniform shape regardless of which path failed.
 
     `latency_ms=0` is a deliberate FD — per-leaf wall-clock latency
-    tracking is queued for 2.4a along with the rest of the latency
-    metrics work (`:sys/now` substrate op).
+    tracking is W3-rescoped to a follow-up phase along with the rest
+    of the latency metrics work (gated by the `started_at_ms` int-ms
+    contract that drove site 6 deferral; see Phase 2.4b design §LD-4).
     """
-    now = dt.datetime.now(dt.timezone.utc)  # noqa: wall-clock — provenance ts
+    now = coder.substrate.effect.perform(":sys/now", {})
     coder.substrate.fact.transact([{
         "e": uuid.uuid4().hex,  # noqa: wall-clock — entity-id (mirrors _session.py:213 _act._record precedent)
         "a": ":act/result",

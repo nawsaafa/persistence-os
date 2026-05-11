@@ -58,6 +58,7 @@ from persistence.effect.handlers.raw import (
     make_scripted_tool_handler,
 )
 from persistence.effect.handlers.retry import make_retry_handler
+from persistence.effect.handlers.sys_now import make_sys_now_handler
 from persistence.effect.policy_eval import PolicyError, evaluate as evaluate_policy
 from persistence.effect.runtime import (
     Effect,
@@ -129,6 +130,7 @@ __all__ = [
     "make_replay_clock_handler",
     "make_retry_handler",
     "make_scripted_tool_handler",
+    "make_sys_now_handler",
     "make_system_clock_handler",
     # raw helpers
     "TransientError",

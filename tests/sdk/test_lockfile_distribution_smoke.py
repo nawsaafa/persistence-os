@@ -22,10 +22,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="Phase 2.4c LD-1: built wheel install + coder CLI smoke not yet wired",
-)
 @pytest.mark.slow  # 30-60s subprocess test
 def test_built_wheel_installs_and_runs_coder_cli(tmp_path: Path) -> None:
     """G1 — uv lock --check + uv build + fresh-venv install of built

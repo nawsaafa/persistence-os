@@ -1,11 +1,7 @@
 (:chain
   :name "pause-resume-sysnow-demo"
-  :description "G5 cap-4 + cap-5 falsifier — pause/resume audit ordering + :sys/now read."
+  :description "G5 cap-4+cap-5 base — :llm/call exercises cap-1+cap-3; pause/resume + :sys/now exercised by G5 harness directly"
   :steps [(:step :id 1
-                :op :sys/now
-                :args {}
-                :capability (:Capability :op "coder" :qualifier "read"))
-          (:step :id 2
-                :op :claim/emit
-                :args {:subject "input.md" :predicate "read"}
+                :op :llm/call
+                :args {:model "echo" :messages [{:role "user" :content "warmup"}]}
                 :capability (:Capability :op "coder" :qualifier "read"))])

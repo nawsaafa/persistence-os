@@ -57,6 +57,35 @@ def _is_yaml_shaped(src: str) -> bool:
     return False
 
 
+def _normalize_value(value: Any) -> Any:
+    """Recursively normalize an EDN-parsed value to plain Python.
+
+    ImmutableDict → dict (with EDN keyword keys stripped of leading ':' to
+    bare strings), ImmutableList / list / tuple → list, Keyword → ':'-prefixed
+    string (so chain ops survive normalisation), other scalars pass through.
+
+    Used to canonicalise ``:args`` so ``canonical_hash(args)`` (json.dumps)
+    succeeds — EDN's ImmutableList / ImmutableDict / Keyword are not
+    JSON-serialisable on their own.
+    """
+    if isinstance(value, (dict, edn_format.ImmutableDict)):
+        out: dict[str, Any] = {}
+        for k, v in value.items():
+            if isinstance(k, edn_format.Keyword):
+                k_str = str(k)
+                key_str = k_str[1:] if k_str.startswith(":") else k_str
+            else:
+                key_str = str(k)
+            out[key_str] = _normalize_value(v)
+        return out
+    if isinstance(value, (list, tuple, edn_format.ImmutableList)):
+        return [_normalize_value(v) for v in value]
+    if isinstance(value, edn_format.Keyword):
+        k_str = str(value)
+        return k_str if k_str.startswith(":") else ":" + k_str
+    return value
+
+
 def _normalize_tagged_list(parsed: Any, expected_tag: str) -> dict[Any, Any]:
     """Normalize a tagged-list EDN form `(:tag :key1 v1 :key2 v2 ...)` into a dict.
 
@@ -183,22 +212,20 @@ def _parse_step(raw: Any) -> Step:
     else:
         raise ChainSchemaError(f":op must be a keyword or string; got {type(op_raw).__name__}")
 
-    # Normalize args (EDN keyword keys → BARE string keys, no leading colon).
-    # T1 follow-up: existing s.effect.perform handlers (`:fs/read`, `:llm/call`,
-    # `:claim/emit`) consume args dicts with bare-string keys (e.g.
-    # `{"model": ..., "messages": ...}` in test_audit_signer_env.py:131 +
-    # `{"e": ..., "a": ..., "v": ...}` in test_audit_replay_byte_identity.py).
-    # The op is `:`-prefixed but the args keys are NOT. Schema convention
-    # must match perform convention so the emitted orchestrate.py works.
+    # Normalize args (EDN keyword keys → BARE string keys, no leading colon)
+    # and recursively normalize nested ImmutableDict / ImmutableList values
+    # to plain dict / list / str / int / float / bool / None. T1 follow-up:
+    # existing ``s.effect.perform`` handlers (``:fs/read``, ``:llm/call``,
+    # ``:claim/emit``) consume args dicts with bare-string keys and JSON-
+    # serialisable values; ``canonical_hash(args)`` calls ``json.dumps``,
+    # which rejects ImmutableList / ImmutableDict / Keyword values. R1-fold
+    # B2 step: recursive normalisation lets EDN-authored nested message
+    # arrays round-trip through the audit middleware without surprise.
     args: dict[str, Any] = {}
     if args_kw in src:
-        for k, v in src[args_kw].items():
-            if isinstance(k, edn_format.Keyword):
-                k_str = str(k)
-                key_str = k_str[1:] if k_str.startswith(":") else k_str
-            else:
-                key_str = str(k)
-            args[key_str] = v
+        args = _normalize_value(src[args_kw])
+        if not isinstance(args, dict):
+            raise ChainSchemaError(":args must be a map")
 
     capability: StepCapability | None = None
     if cap_kw in src:
@@ -239,15 +266,7 @@ def _serialize_step(step: Step) -> str:
     parts = [f"(:step :id {step.id}", f":op {step.op}"]
 
     if step.args:
-        args_parts = []
-        for k in sorted(step.args.keys()):  # sorted for determinism
-            v = step.args[k]
-            # args dict has bare-string keys; emit EDN keyword form `:key`
-            if isinstance(v, str):
-                args_parts.append(f':{k} "{_escape(v)}"')
-            else:
-                args_parts.append(f":{k} {v}")
-        parts.append("  :args {" + " ".join(args_parts) + "}")
+        parts.append("  :args " + _serialize_value(step.args))
 
     if step.capability is not None:
         parts.append(
@@ -256,6 +275,28 @@ def _serialize_step(step: Step) -> str:
         )
 
     return " ".join(parts) + ")"
+
+
+def _serialize_value(value: Any) -> str:
+    """Recursively serialize a normalized Python value back to EDN.
+
+    Dicts → ``{:key val ...}`` with sorted keys; lists → ``[v1 v2 ...]``;
+    strings → ``"escaped"``; everything else → ``repr``. Deterministic.
+    """
+    if isinstance(value, dict):
+        parts = []
+        for k in sorted(value.keys()):
+            parts.append(f":{k} {_serialize_value(value[k])}")
+        return "{" + " ".join(parts) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + " ".join(_serialize_value(v) for v in value) + "]"
+    if isinstance(value, str):
+        return f'"{_escape(value)}"'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return "nil"
+    return str(value)
 
 
 def _escape(s: str) -> str:

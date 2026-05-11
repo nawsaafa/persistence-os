@@ -46,15 +46,21 @@ chain step-by-step under the persistence-os substrate.
 
 ## Canned demo chains
 
-Two example chains ship with this skill, exercising all 5 capabilities
-from v0.9.0a1 positioning:
+Two example chains ship with this skill. Together with the G5 test
+harness's direct substrate calls they exercise all 5 capabilities from
+v0.9.0a1 positioning:
 
-- `examples/capability-denial-chain.edn` — step 2's capability is not
-  granted; halts before side effect. Exercises Ed25519 signing +
-  Capability lattice + audit replay.
-- `examples/pause-resume-sysnow-chain.edn` — step 1 reads `:sys/now`
-  via substrate time; harness pauses+resumes to emit `:repl/request`
-  + `:repl/response`. Exercises kill switch + substrate time + signing.
+- `examples/capability-denial-chain.edn` — two `:llm/call` steps; step
+  2's capability is not granted so the runner emits a signed
+  `:capability/denied` audit entry instead of running step 2.
+  Exercises Ed25519 signing + Capability lattice + audit replay (cap
+  1 + 2 + 3).
+- `examples/pause-resume-sysnow-chain.edn` — single `:llm/call`
+  warm-up step. Caps 4 (`:repl/request` + `:repl/response` from
+  `_CoderSteeringSession.pause/resume`) and 5 (`:sys/now` substrate
+  time) are exercised by direct substrate calls in the G5 test harness
+  — NOT via chain ops, because `:sys/now` is a substrate view handler
+  and emits no audit entry by default.
 
 ## What this skill is NOT
 

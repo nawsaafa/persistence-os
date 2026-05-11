@@ -30,12 +30,21 @@ Semantics:
       2. ``clock`` — :func:`make_system_clock_handler` so the audit
          middleware can read ``:clock/now`` for ``recorded_at`` /
          ``latency_ms``.
-      3. ``audit`` — :func:`make_audit_handler` middleware wrapping every
+      3. ``sys_now`` — Phase 2.4b LD-1 view handler answering
+         ``:sys/now`` by nested-performing ``:clock/now`` and returning
+         a bare UTC-aware :class:`datetime.datetime`. Positioned BETWEEN
+         clock and audit so audit middleware retains the option to read
+         ``:sys/now`` without recursion concerns
+         (``mask(audit_name)`` handles audit self-reentry; sys_now's
+         ``name="sys_now"`` is orthogonal). NOT added to
+         ``CANONICAL_AUDIT_WRAPPED_OPS`` — mirrors ``:clock/now``'s
+         exclusion to avoid recursion when audit-tier code reads time.
+      4. ``audit`` — :func:`make_audit_handler` middleware wrapping every
          canonical-audit op; appends :class:`AuditEntry` records into
          ``entries`` (the same list bound to ``Substrate._audit_entries``
          under the M2 wiring, so ``s.audit.entries()`` and
          ``s.audit.verify_chain()`` see the post-commit Merkle chain).
-      4. ``coder-dispatcher`` — Phase 2.3c.2 LD1+LD2 dispatcher middleware
+      5. ``coder-dispatcher`` — Phase 2.3c.2 LD1+LD2 dispatcher middleware
          wrapping ``:llm/call`` only. Reads the
          :class:`persistence.coder._recursion.DispatcherContext` ContextVar
          and, when bound: enforces 4-layer token budget, depth + request
@@ -80,6 +89,7 @@ from typing import TYPE_CHECKING, Any
 
 from persistence.effect.handlers.audit import AuditEntry, make_audit_handler
 from persistence.effect.handlers.clock import make_system_clock_handler
+from persistence.effect.handlers.sys_now import make_sys_now_handler
 from persistence.effect.runtime import Handler, Runtime
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -418,22 +428,30 @@ def canonical_audit_stack(
         is the substrate's path — its lifetime matches the substrate's,
         not a single ``with`` block).
 
+    Phase 2.4b LD-1: a NEW ``sys_now`` view handler is inserted BETWEEN
+    ``clock`` and ``audit``. It answers ``:sys/now`` by nested-performing
+    ``:clock/now`` (the single primitive wall-clock op) and returning a
+    bare UTC-aware :class:`datetime.datetime`. Under
+    :func:`make_replay_clock_handler` substitution, ``:sys/now`` replays
+    deterministically without needing a parallel replay family.
+
     See module docstring for the design rationale; the handler order
-    (raw terminator → clock → audit middleware → coder-dispatcher) is
-    innermost-first per the :class:`Runtime` constructor's documented
+    (raw terminator → clock → sys_now → audit middleware → coder-dispatcher)
+    is innermost-first per the :class:`Runtime` constructor's documented
     stack convention. The dispatcher sits OUTSIDE the audit middleware
     so budget rejections raise BEFORE an AuditEntry would be emitted —
     an over-budget call produces zero entries.
     """
     raw = _make_canonical_raw_terminator()
     clock = make_system_clock_handler()
+    sys_now = make_sys_now_handler()
     audit = make_audit_handler(
         entries,
         wraps=set(CANONICAL_AUDIT_WRAPPED_OPS),
         signer=signer,
     )
     dispatcher = _make_dispatcher_handler()
-    return Runtime(handlers=[raw, clock, audit, dispatcher])
+    return Runtime(handlers=[raw, clock, sys_now, audit, dispatcher])
 
 
 __all__ = [

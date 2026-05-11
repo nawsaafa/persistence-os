@@ -17,9 +17,10 @@
 | LD-2 codex consensus | LOCKED via DISAGREE-STRONG → D-3 Mixed | Pure SKILL.md UX + minimal deterministic Python emitter/validator (regression = test failure, not support ticket) |
 | LD-3 codex consensus | LOCKED via DISAGREE-WEAK → EDN canonical | Chain schema is EDN AST (homoiconicity); SKILL.md frontmatter stays YAML (Anthropic convention) |
 | LD-4 codex consensus (2 passes) | LOCKED via DISAGREE-STRONG → second pass NEW-OPTION-X (D-honest-refined) | Emitted SKILL.md has explicit prereqs section matching positioning.md:98-108 verbatim; no vendoring; UNSET (not empty) for unsigned dev |
-| Design R0 (codex high) | PENDING | This document is R0-ready as written |
-| Design R0-fold (controller) | PENDING | After R0 |
-| Design R0.1 lite | PENDING | After R0-fold |
+| Design R0 (codex high) | **FAIL 7.6/7.1** | 3B + 2I + 1N; see R0-fold receipt below. Mean 7.6 below 8.0; min 7.1 below 7.5. All findings receipts-anchored. |
+| Design R0-fold (controller) | **DONE inline** | All 3 BLOCKING + 2 IMPORTANT + 1 NICE folded. No architectural change required; documentation/citation/test-shape fixes only. |
+| Design R0.1 lite (post-fold) | **PASS-WITH-FIXES 7.9/7.2** | 4 CLOSED + 1 REGRESSED (I1 — kill-switch 3-op vs 2-op ordering conflation) + 1 PASS-WITH-FIXES (N1 orphan instance). Both fixes folded inline; final ordering verified against `test_pause_emits_repl_request_then_response_in_order` + positioning.md:78-80. |
+| Design R0.2 (re-confirm) | **PASS 8.3/8.1** | I1 + N1 closures verified. Soft-mode bar (8.0/7.5) cleared. **DESIGN FROZEN.** |
 | Codex Impl R1 | PENDING | After T9.1, before TaskUpdate completed |
 
 **Methodology note:** 5-for-5 codex consensus flips this phase (LD-1 + LD-2 + LD-3 + LD-4 first pass + LD-4 second pass). Pattern continues from 2.4b (2/2), 2.4b.1 (2/2), 2.4c (3/3). The substrate-phase consensus discipline applies here even though Phase 7 is downstream (it touches `src/persistence/orchestrate/` and ships a marketplace artifact whose contract is binding once published).
@@ -28,6 +29,25 @@
 - LD-1: I missed `CLAUDE.md:65-66` ("invocation surface for orchestrator-driven agents") — would have shipped a runtime orchestrator that pre-empted Mimir Phase D.
 - LD-4 first pass: framing "dependency-free emitted SKILL.md" was wordplay (positioning.md:98 itself requires clone + uv sync).
 - LD-4 second pass: my prereqs draft said `pip install git+...` (conflicts with `CLAUDE.md:32` "NOT pip-installable") + `PERSISTENCE_AUDIT_KEY=` empty (undocumented behavior, prefer UNSET).
+- ARIS R0 B1: I cited `positioning.md:98-108` as "verbatim prereqs source" — but those lines contain the `uv run pytest` verify-locally block, not prereqs. Only line :98 is the install sentence; mintkey/unset is NEW extension text. Drift would have failed G4.
+- ARIS R0 B2: LD-3 contradicted FD/W3-5 on YAML sugar — would have created scope ambiguity going into impl.
+- ARIS R0 B3: G3 used subprocess + parsed stdout JSON without a stable CLI contract — would have shipped a flaky gate coupled to provider env.
+- ARIS R0 I1: Risk register overclaimed "thread coordination" not actually in the cited template — would have under-budgeted T5.
+
+---
+
+## R0-fold receipt (controller, 2026-05-11)
+
+| Finding | Severity | Resolution |
+|---|---|---|
+| **B1** LD-4 cites `positioning.md:98-108` as "verbatim prereqs source" but those lines are the verify-locally `uv run pytest` block | BLOCKING | **FOLDED** — LD-4 rationale rewrites the verbatim-source attribution: clone+`uv sync` clause is verbatim from `positioning.md:98`; mintkey + UNSET clause is NEW extension text grounded in `CLAUDE.md:32` + `positioning.md:21-23`. G4 enforces marker-delimited region equality + cross-check that the install sentence equals positioning.md:98 verbatim (positioning-doc drift fails G4). |
+| **B2** LD-3 says "YAML allowed as optional sugar"; FD-EDN-VS-YAML-SUGAR + W3-5 say YAML deferred | BLOCKING | **FOLDED** — struck YAML-sugar from LD-3. v0 is EDN-only authoring. YAML stays only in SKILL.md frontmatter (Anthropic convention; non-load-bearing). G2 adds negative-control: YAML-shaped input must raise `ChainSchemaError("v0 is EDN-only; YAML authoring is W3-5")`. |
+| **B3** G3 uses subprocess + parses stdout JSON (no stable CLI contract) + replay step elided as `...` | BLOCKING | **FOLDED** — G3 redesigned to in-process pattern matching `tests/coder/test_steering_replay.py` + `test_loop_replay.py::test_coder_loop_audit_replay_byte_identity`. Uses `Substrate.open("memory", audit_signer=...)` + Python API + `s._audit_entries` inspection + in-process `canonical_hash` replay. No subprocess, no stdout coupling, no provider env. New `Coder.run_chain_from_edn(...)` + `Coder.replay_audit_entries(...)` thin wrappers noted as FD-CODER-RUN-CHAIN-API (T0 receipts verify, T1 ships). |
+| **I1** Risk register overclaims "threaded pause after step 1" — 2.3d test only does pause+resume in-sequence | IMPORTANT | **FOLDED (R0 + R0.1 correction)** — initial fold reworded to "audit-chain ordering with intact Merkle linkage" but cited the 3-op `[:repl/request, :coder/branch, :repl/response]` pattern. R0.1 lite caught this regression: the 3-op pattern is for `branch()` invocations (test_branch_emits_...), while pure pause/resume emits only `[:repl/request, :repl/response]` (test_pause_emits_..., matching positioning.md:78-80). Final fold corrects all 3 sites (risk register + G5 prose + G5 test code) to use the 2-op pause/resume ordering. |
+| **I2** G4 "marker-delimited string equality" claim doesn't match test code (substring `in md` only) | IMPORTANT | **FOLDED** — G4 redesigned: emitter wraps prereqs region in `<!-- prereqs-begin -->` / `<!-- prereqs-end -->`; test asserts markers appear exactly once each, extracts region via regex, asserts exact string equality against `EXPECTED_PREREQS_REGION` constant, cross-checks the clone+uv-sync clause against `positioning.md` content (loaded by test, not hardcoded). Negative-control assertions retained (`pip install git+`, empty-string env). |
+| **N1** "stdlib-only" sloppy given `edn_format` runtime dep | NICE-TO-HAVE | **FOLDED (R0 + R0.1 second-pass cleanup)** — initial fold corrected the Tech Stack bullet but left a second misleading instance in the Architecture section ("stdlib-only Python codegen"). R0.1 lite caught the orphan. Final fold rephrases the architecture sentence: "Python codegen (stdlib for emit string-building + the existing `edn_format` parser dep for chain reading; no new dependencies)." |
+
+**Procedural note:** codex invoked the web tool 4 times during this R0 review despite the prompt's NO WEB SEARCH instruction; codex explicitly stated it didn't use web results. All substantive findings are receipts-anchored with file:line citations and stand on their own merit. Logged in case the pattern recurs (3rd phase-design where codex hit web tool against instruction: 2.4c R0, 2.4c R0-fold, Phase 7 R0).
 
 ---
 
@@ -78,13 +98,13 @@ Ship `persistence-orchestrate` as an Anthropic-Skill-shaped marketplace artifact
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The emitter is **not** runtime orchestration code — it is a stdlib-only Python codegen that converts a chain.edn into a downstream Anthropic Skill directory. The substrate (`persistence.coder` CLI shipped 2.4a) does all runtime work when the emitted skill is invoked.
+The emitter is **not** runtime orchestration code — it is a Python codegen (stdlib for emit string-building + the existing `edn_format` parser dep for chain reading; no new dependencies) that converts a chain.edn into a downstream Anthropic Skill directory. The substrate (`persistence.coder` CLI shipped 2.4a) does all runtime work when the emitted skill is invoked.
 
 **Tech Stack:**
-- Python 3.10+ stdlib only (no new dependencies — `edn_format` already in base deps for chain parsing per `src/persistence/plan/_coerce.py:29`)
+- Python 3.10+; **no new dependencies** — stdlib for emit string-building + existing `edn_format` dep for chain parsing (already in base deps per `src/persistence/plan/_coerce.py:29`) (R0-fold N1)
 - EDN as canonical chain schema (homoiconicity)
 - Anthropic Skills marketplace = primary distribution channel
-- Curated SDK facade (`persistence.sdk.Substrate`) called via `persistence.coder` CLI at downstream-skill invocation time
+- Curated SDK facade (`persistence.sdk.Substrate`) called via `persistence.coder` Python API at downstream-skill invocation time (G3 redesign post-R0-fold uses in-process invocation, not subprocess)
 
 ---
 
@@ -126,9 +146,9 @@ The emitter is **not** runtime orchestration code — it is a stdlib-only Python
 
 ---
 
-### LD-3 — Chain description schema is **EDN canonical** (codex consensus DISAGREE-WEAK)
+### LD-3 — Chain description schema is **EDN canonical** (codex consensus DISAGREE-WEAK; R0-fold B2 strikes YAML sugar from v0)
 
-**Decision:** Chain schemas are authored in EDN (canonical persistence-os form). Example:
+**Decision:** Chain schemas are authored in EDN (canonical persistence-os form). v0 is **EDN-only authoring** — YAML input was struck in R0-fold B2 for budget + scope clarity. SKILL.md frontmatter stays YAML (Anthropic convention; non-load-bearing). YAML chain authoring is W3-5 (future). Example:
 
 ```edn
 (:chain
@@ -145,8 +165,6 @@ The emitter is **not** runtime orchestration code — it is a stdlib-only Python
            :capability (:Capability :op "coder" :qualifier "write"))])
 ```
 
-YAML is allowed as **optional sugar** (a hand-authoring convenience) that gets compiled into the canonical EDN form during emit-time. SKILL.md frontmatter stays YAML (Anthropic convention; non-load-bearing).
-
 **Rationale (anchored to receipts):**
 - `CLAUDE.md:22`: "Every plan is an EDN AST. Every skill is a content-addressed AST subtree." YAML-as-canonical would contradict homoiconic positioning in the marketplace artifact.
 - `mimir-orchestrator/SKILL.md:144` uses YAML for scope DECLARATIONS (config), but never as PLAN form. Phase 7 must not blur this distinction.
@@ -154,16 +172,22 @@ YAML is allowed as **optional sugar** (a hand-authoring convenience) that gets c
 
 **Rejected competitors:**
 - **YAML canonical** — undermines homoiconicity story.
+- **YAML as v0 sugar** — struck in R0-fold B2 (was contradicting FD/W3); deferred to W3-5.
 - **Plain language → LLM parsing** — forces LLM-driven emit (conflicts with LD-2 D-3 Mixed determinism).
 
 **Falsifiable acceptance signal (G2):**
-`tests/orchestrate/test_chain_schema.py::test_chain_parses_to_edn_ast_and_roundtrips` — parse a known chain.edn, assert the AST shape matches expected `frozenset`/`Symbol` form, then serialize back to EDN and assert byte-identical to input.
+`tests/orchestrate/test_chain_schema.py::test_chain_parses_to_edn_ast_and_roundtrips` — parse a known chain.edn, assert the AST shape matches expected `frozenset`/`Symbol` form, then serialize back to EDN and assert byte-identical to input. **Negative-control test in same module:** YAML-shaped input must raise `ChainSchemaError("v0 is EDN-only; YAML authoring is W3-5")` — so any accidental YAML-acceptance regresses to FAIL.
 
 ---
 
-### LD-4 — Install path is **D-honest-refined** (codex consensus 2 passes; DISAGREE-STRONG then NEW-OPTION-X)
+### LD-4 — Install path is **D-honest-refined** (codex consensus 2 passes; DISAGREE-STRONG then NEW-OPTION-X; R0-fold B1 corrects verbatim-source claim)
 
-**Decision:** Both the meta-skill (`skills/persistence-orchestrate/SKILL.md`) and the emitted downstream orchestrator skills carry **explicit prerequisites sections** that match `positioning.md:98-108` verbatim:
+**Decision:** Both the meta-skill (`skills/persistence-orchestrate/SKILL.md`) and the emitted downstream orchestrator skills carry **explicit prerequisites sections**. R0-fold B1 clarification: the prereqs region is composed of two parts with different verbatim sources:
+
+- **Clone + uv sync clause:** verbatim from `positioning.md:98` ("Clone `persistence-os`, run `uv sync`")
+- **Mintkey + UNSET clause:** NEW extension text in this design, grounded in `CLAUDE.md:32` ("NOT pip-installable yet") + `positioning.md:21-23` (signer fails closed on unknown URI / missing key)
+
+Concretely, the emitted SKILL.md contains:
 
 ```markdown
 ## Prerequisites
@@ -188,9 +212,10 @@ The skill invokes `uv run python -m persistence.coder` directly.
 
 No vendoring. No alternate distribution channels. Marketplace artifact carries no Python; emitted skill carries no Python. Both depend on the user having persistence-os installed via clone + uv sync (matching the alpha install contract).
 
-**Rationale (anchored to receipts):**
+**Rationale (anchored to receipts; R0-fold B1 corrects citations):**
 - `CLAUDE.md:32`: "NOT pip-installable / open-source-ready yet. No PyPI release." Vendoring would create a third distribution channel (marketplace) for a substrate that's explicitly "local-only" at this phase.
-- `positioning.md:98-108` (shipped TODAY): the alpha install contract is "Clone persistence-os, run uv sync." Phase 7 SKILL.md inherits this contract verbatim — no separate marketplace install path.
+- `positioning.md:98` (shipped TODAY): the alpha install contract sentence is "Clone `persistence-os`, run `uv sync`". This is the verbatim source for the **clone + uv sync clause** of the prereqs region. (R0-fold B1: earlier draft cited `positioning.md:98-108` which is the broader "Verify locally" block including `uv run pytest`; the prereqs region inherits only the install sentence at :98, not the pytest invocation block.)
+- `positioning.md:21-23`: signer fails closed on unknown URI / missing key. This is the verbatim source for the **mintkey + UNSET clause** — the mintkey instruction is NEW extension text (no canonical source) describing how to satisfy the closed-fail contract.
 - `mimir-os/.serena/memories/ship_plan_14_weeks.md:11`: PyPI release is Phase E (Jul 20 – Aug 2). Phase 7 GA is at v0.9.0a1 (early June). ~50 days between Phase 7 and Phase E — the audience is alpha evaluators, not casual marketplace browsers. They accept clone + uv sync.
 - Codex's two specific corrections folded inline: (1) use clone + uv sync, NOT `pip install git+...`; (2) UNSET env var for unsigned dev, NOT empty string (undocumented behavior).
 
@@ -199,7 +224,7 @@ No vendoring. No alternate distribution channels. Marketplace artifact carries n
 - **Assume PyPI** — Phase 7 GA pre-dates Phase E PyPI release by ~50 days.
 
 **Falsifiable acceptance signal (G4):**
-`tests/orchestrate/test_skill_md_prereqs_section.py::test_emitted_skill_md_contains_verbatim_install_block` — emit any chain, assert the emitted SKILL.md contains the verbatim `git clone https://github.com/nawsaafa/persistence-os.git`+`uv sync`+`PERSISTENCE_AUDIT_KEY=file:///` install block (string equality on a defined prereqs region delimited by `<!-- prereqs-begin -->` / `<!-- prereqs-end -->` HTML comment markers in the template).
+`tests/orchestrate/test_skill_md_prereqs_section.py::test_emitted_skill_md_contains_verbatim_install_block` — emit any chain; the emitter wraps the prereqs region in HTML comment markers `<!-- prereqs-begin -->` / `<!-- prereqs-end -->`. The test (i) asserts each marker appears **exactly once** in the emitted SKILL.md, (ii) extracts the substring between them, and (iii) asserts **exact string equality** against a canonical constant `EXPECTED_PREREQS_REGION` defined in the test file. The clone+uv sync clause within `EXPECTED_PREREQS_REGION` is asserted to **also equal** the literal sentence "Clone `persistence-os`, run `uv sync`" found at `docs/release-notes/v0.9.0a1-positioning.md:98` (loaded by the test, not hardcoded — so positioning-doc drift fails G4). (R0-fold I2: prior G4 sketch used substring `in md` checks; corrected to marker-extraction + exact-equality.)
 
 ---
 
@@ -296,90 +321,104 @@ def test_chain_parses_to_edn_ast_and_roundtrips() -> None:
 
 **Falsifies if:** EDN parser drops fields, normalizes `frozenset`/`Symbol` lossy, or roundtrip introduces drift.
 
-### G3 — Emit smoke (LD-1 falsifier)
+### G3 — Emit smoke (LD-1 falsifier) — REDESIGNED in-process (R0-fold B3)
 
 **File:** `tests/sdk/test_persistence_orchestrate_emit_smoke.py::test_emits_orchestrator_that_runs_signed_replayable_trace`
 
+R0-fold B3 redesign rationale: prior sketch used subprocess + parsed stdout JSON, but `persistence.coder` has no documented stable stdout JSON contract — subprocess coupling adds flake risk + couples G3 to provider env (`--provider echo`). In-process pattern matches `tests/coder/test_steering_replay.py` and `tests/coder/test_loop_replay.py::test_coder_loop_audit_replay_byte_identity` (the positioning doc § 3 falsifier).
+
 ```python
-import json
-import subprocess
 from pathlib import Path
+from persistence.orchestrate import emit_orchestrator_skill, parse_chain_edn
+from persistence.sdk import Substrate
+from persistence.effect._signing import generate_keypair
+from persistence.effect.canonical import canonical_hash
+from persistence.coder import Coder
+from persistence.effect.handlers import make_callable_llm_handler
 
-def test_emits_orchestrator_that_runs_signed_replayable_trace(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # Use the canned capability-denial chain.
-    chain_path = (Path(__file__).parent.parent.parent
-                  / "src/persistence/orchestrate/examples"
-                  / "capability-denial-chain.edn")
 
+def test_emits_orchestrator_that_runs_signed_replayable_trace(tmp_path) -> None:
+    # Step 1: emit (in-process, no subprocess)
+    chain_src = (Path(__file__).parent.parent.parent
+                 / "src/persistence/orchestrate/examples"
+                 / "capability-denial-chain.edn").read_text()
+    chain = parse_chain_edn(chain_src)
     out_dir = tmp_path / "emitted-skill"
+    emit_orchestrator_skill(chain, out_dir)
 
-    # Step 1: emit
-    subprocess.run(
-        ["uv", "run", "python", "-m", "persistence.orchestrate", "emit",
-         "--chain", str(chain_path), "--out", str(out_dir)],
-        check=True,
-    )
+    # (i) Emitted directory shape
+    assert (out_dir / "SKILL.md").is_file()
+    assert (out_dir / "chain.edn").is_file()
+    assert (out_dir / "preflight.toml").is_file()
 
-    # Assert emitted directory shape
-    assert (out_dir / "SKILL.md").exists()
-    assert (out_dir / "chain.edn").exists()
-    assert (out_dir / "preflight.toml").exists()
+    # Step 2: run the emitted chain in-process under canonical audit stack
+    priv, _pub = generate_keypair()
+    signer = ("test-key-001", priv)
 
-    # Step 2: run the emitted orchestrator via persistence.coder
-    # The emitted SKILL.md instructs Claude Code to invoke the
-    # coder CLI with the emitted chain.edn. Here we invoke it
-    # directly (the SKILL.md is for marketplace UX, not for the test).
-    db_path = tmp_path / "substrate.db"
-    key_path = tmp_path / "agent.pem"
-    # Generate key (test-only; would normally use mintkey CLI)
-    from persistence.effect._signing import generate_keypair
-    priv, _ = generate_keypair()
-    key_path.write_bytes(priv)
+    with Substrate.open("memory", audit_signer=signer) as s:
+        # The emitted chain executes step-by-step under Coder; step 2's
+        # capability is not granted, so Capability lattice (2.3d) denies
+        # it before side effect. Granted capabilities derived from
+        # chain.edn step 1's :capability field only.
+        coder = Coder(substrate=s, granted_capabilities=_first_step_caps(chain))
+        coder.run_chain_from_edn(out_dir / "chain.edn",
+                                  llm_handler=make_callable_llm_handler(_done_call_fn()))
 
-    monkeypatch.setenv("PERSISTENCE_AUDIT_KEY", f"file://{key_path}")
-    result = subprocess.run(
-        ["uv", "run", "python", "-m", "persistence.coder",
-         "--task", str(out_dir / "chain.edn"),
-         "--db-path", f"sqlite:///{db_path}",
-         "--provider", "echo"],
-        capture_output=True, text=True,
-    )
+        audit_entries = list(s._audit_entries)
 
-    # (iii) Trace contains signed denial datom for step 2
-    trace = json.loads(result.stdout)
-    denials = [e for e in trace if e["op"] == ":capability/denied"]
-    assert len(denials) == 1
-    assert denials[0]["step_id"] == 2
-    assert denials[0].get("signature") is not None
+    # (ii) Trace contains signed denial datom for step 2
+    denials = [e for e in audit_entries if e.op == ":capability/denied"]
+    assert len(denials) == 1, f"expected 1 denial, got {len(denials)}"
+    assert denials[0].args.get("step_id") == 2
+    assert denials[0].signature is not None  # signing is mandatory under signer
 
-    # (i)+(ii) Step 2 side effect never occurred (no :fs/write entry)
-    writes = [e for e in trace if e["op"] == ":fs/write"]
-    assert len(writes) == 0
+    # (iii) Step 2 side effect never occurred
+    writes = [e for e in audit_entries if e.op == ":fs/write"]
+    assert len(writes) == 0, "step 2 :fs/write must NOT execute when capability denied"
 
-    # (iv) Replay byte-identity
-    # ... (uses persistence.replay.canonical replay; same shape as
-    # test_coder_loop_audit_replay_byte_identity from positioning doc § 3)
+    # (iv) Replay byte-identity — canonical replay produces equal canonical hash
+    original_hash = canonical_hash(audit_entries)
+    with Substrate.open("memory", audit_signer=signer) as s_replay:
+        replayer = Coder(substrate=s_replay,
+                          granted_capabilities=_first_step_caps(chain))
+        replayer.replay_audit_entries(audit_entries)
+        replayed = list(s_replay._audit_entries)
+    assert canonical_hash(replayed) == original_hash, "replay byte-identity broken"
 ```
 
-**Falsifies if:** any of the LD-1 invariants break — emitted skill misses files, side effect occurs despite denial, trace unsigned, replay drifts.
+**Falsifies if:** any of the LD-1 invariants break — emitted skill misses files, side effect occurs despite denial, denial entry unsigned, replay produces a different canonical hash. **No subprocess coupling, no stdout JSON contract, no provider env dependency.**
 
-### G4 — SKILL.md prereqs verbatim (LD-4 falsifier)
+**Note (FD-CODER-RUN-CHAIN-API):** `Coder.run_chain_from_edn(...)` and `Coder.replay_audit_entries(...)` are new methods on `persistence.coder.Coder` that this design assumes. Verify in T0 receipts; if absent, T1 adds them as thin wrappers around `Coder.run()` + the existing canonical-replay path. The methods are pure Python (no new deps).
+
+### G4 — SKILL.md prereqs verbatim (LD-4 falsifier) — REDESIGNED marker-extraction (R0-fold I2)
 
 **File:** `tests/orchestrate/test_skill_md_prereqs_section.py::test_emitted_skill_md_contains_verbatim_install_block`
 
+R0-fold I2 redesign rationale: prior sketch used substring `in md` checks, which couldn't distinguish (a) the prereqs region containing the install clause from (b) the install clause appearing anywhere else in SKILL.md (negative-control vulnerability). New design uses HTML comment markers + region extraction + exact equality.
+
 ```python
+import re
+from pathlib import Path
 from persistence.orchestrate import emit_orchestrator_skill, parse_chain_edn
 
-EXPECTED_PREREQS_BLOCK = """  git clone https://github.com/nawsaafa/persistence-os.git
-  cd persistence-os
-  uv sync"""
+# Canonical extension text (NEW in this design; not from positioning.md)
+EXPECTED_PREREQS_REGION = """## Prerequisites
 
-EXPECTED_KEY_BLOCK = """  python -m persistence.tools.mintkey --out ~/.persistence/keys/agent.pem
-  export PERSISTENCE_AUDIT_KEY=file:///$HOME/.persistence/keys/agent.pem"""
+This skill requires persistence-os installed locally:
 
-EXPECTED_UNSET_BLOCK = """  unset PERSISTENCE_AUDIT_KEY"""
+Clone `persistence-os`, run `uv sync`
+
+For signed audit chains (production posture), generate an Ed25519 key:
+
+  python -m persistence.tools.mintkey --out ~/.persistence/keys/agent.pem
+  export PERSISTENCE_AUDIT_KEY=file:///$HOME/.persistence/keys/agent.pem
+
+For dev mode (unsigned), UNSET the env var:
+
+  unset PERSISTENCE_AUDIT_KEY
+
+The skill invokes `python -m persistence.coder` directly."""
+
 
 def test_emitted_skill_md_contains_verbatim_install_block(tmp_path) -> None:
     src = (Path(__file__).parent.parent.parent
@@ -389,43 +428,92 @@ def test_emitted_skill_md_contains_verbatim_install_block(tmp_path) -> None:
     emit_orchestrator_skill(chain, tmp_path)
 
     md = (tmp_path / "SKILL.md").read_text()
-    assert EXPECTED_PREREQS_BLOCK in md
-    assert EXPECTED_KEY_BLOCK in md
-    assert EXPECTED_UNSET_BLOCK in md
-    # Verbatim — no paraphrasing allowed (LD-4 corrected from codex pass 2)
-    assert "pip install git+" not in md  # Negative — pre-Phase-E posture
-    assert "PERSISTENCE_AUDIT_KEY=" + chr(10) not in md  # Negative — empty-string is undocumented
+
+    # Markers appear exactly once each (anti-duplication invariant)
+    assert md.count("<!-- prereqs-begin -->") == 1
+    assert md.count("<!-- prereqs-end -->") == 1
+
+    # Extract region and assert exact equality
+    match = re.search(
+        r"<!-- prereqs-begin -->\n(.*?)\n<!-- prereqs-end -->",
+        md, re.DOTALL,
+    )
+    assert match is not None
+    extracted_region = match.group(1)
+    assert extracted_region == EXPECTED_PREREQS_REGION, (
+        f"prereqs region drift detected:\n--- expected ---\n{EXPECTED_PREREQS_REGION}\n"
+        f"--- got ---\n{extracted_region}"
+    )
+
+    # Cross-check: the clone+uv-sync clause within EXPECTED_PREREQS_REGION
+    # equals the verbatim positioning.md install sentence (positioning-doc
+    # drift fails G4 even if the template doesn't change)
+    positioning_md = (Path(__file__).parent.parent.parent
+                      / "docs/release-notes/v0.9.0a1-positioning.md").read_text()
+    assert "Clone `persistence-os`, run `uv sync`" in positioning_md
+    assert "Clone `persistence-os`, run `uv sync`" in EXPECTED_PREREQS_REGION
+
+    # Negative controls (LD-4 codex-fold pass 2)
+    assert "pip install git+" not in md, "regression: pre-Phase-E posture violated"
+    assert "PERSISTENCE_AUDIT_KEY=\n" not in md, "regression: empty-string env undocumented"
+    assert "PERSISTENCE_AUDIT_KEY=$" not in md  # nor "= " with trailing space
 ```
 
-**Falsifies if:** emitted SKILL.md drifts from positioning.md install contract, regresses to `pip install git+...`, or uses empty-string env-unset shorthand.
+**Falsifies if:** emitted SKILL.md drifts from canonical region (template change or positioning-doc drift), markers missing/duplicated, regresses to `pip install git+...`, or uses empty-string env-unset shorthand.
 
 ### G5 — 5-capability showcase (positioning doc fidelity)
 
 **File:** `tests/orchestrate/test_demo_chains_showcase_five_capabilities.py::test_two_canned_chains_exercise_all_five_capabilities`
 
+R0-fold I1 + R0.1 fold clarification: G5 inherits the 2.3d narrower contract — for the kill switch capability, it asserts the AUDIT-CHAIN ORDERING `[:repl/request, :repl/response]` with intact Merkle linkage (matching `positioning.md:78-80` and `test_pause_emits_repl_request_then_response_in_order`), NOT live thread coordination, and NOT the 3-op branch pattern (which only fires when `branch()` is invoked). The pause-resume-sysnow-chain test harness invokes `session.pause()` + `session.resume()` in sequence before running the chain's body — that's sufficient to emit the audit pair the positioning contract names.
+
 The two example chains together must produce audit traces that exercise all 5 capabilities named in `docs/release-notes/v0.9.0a1-positioning.md` (lines 13, 31, 48, 67, 82).
 
 ```python
-def test_two_canned_chains_exercise_all_five_capabilities(tmp_path) -> None:
-    traces = _run_both_canned_chains(tmp_path)  # helper
+from persistence.effect.canonical import canonical_hash
+from persistence.coder._steering import _CoderSteeringSession
 
+def test_two_canned_chains_exercise_all_five_capabilities(tmp_path) -> None:
+    # Run chain (a) capability-denial-chain (in-process, same pattern as G3)
+    trace_a = _run_chain_in_process(
+        "capability-denial-chain.edn", tmp_path,
+        steering_actions=[],  # no pause/resume; just denial path
+    )
+
+    # Run chain (b) pause-resume-sysnow-chain — harness calls pause+resume
+    # before run; chain body reads :sys/now mid-loop
+    trace_b = _run_chain_in_process(
+        "pause-resume-sysnow-chain.edn", tmp_path,
+        steering_actions=["pause_then_resume_at_start"],
+    )
+
+    traces = [trace_a, trace_b]
     capabilities_exercised = set()
     for trace in traces:
         for entry in trace:
-            if entry.get("signature"):
+            if entry.signature is not None:
                 capabilities_exercised.add("agent-vs-human-identity")  # cap 1
-            if entry["op"] == ":capability/denied":
+            if entry.op == ":capability/denied":
                 capabilities_exercised.add("governed-action")  # cap 2
-            if entry["op"] in (":repl/request", ":repl/response"):
+            if entry.op in (":repl/request", ":repl/response"):
                 capabilities_exercised.add("kill-switch")  # cap 4
-            if entry["op"] == ":sys/now":
+            if entry.op == ":sys/now":
                 capabilities_exercised.add("substrate-time")  # cap 5
 
-    # Audit replay byte-identity (cap 3) exercised in G3 already;
-    # here we just confirm both chains replay byte-identical.
+    # cap 4 stronger assertion: pause/resume audit-ordering matches
+    # positioning.md:78-80 + 2.3d test_pause_emits_repl_request_then_response_in_order
+    # Pure pause+resume emits only [:repl/request, :repl/response]; the
+    # 3-op [:repl/request, :coder/branch, :repl/response] pattern is for
+    # branch() invocations (test_branch_emits_...), not for kill-switch.
+    repl_ops = [e.op for e in trace_b if e.op.startswith(":repl/")]
+    assert repl_ops == [":repl/request", ":repl/response"], \
+        f"kill-switch pause/resume audit-ordering contract violated: {repl_ops}"
+
+    # cap 3: in-process canonical replay yields byte-equal hash
     for trace_idx, trace in enumerate(traces):
-        replayed = _replay_canonical(trace)
-        assert replayed == trace, f"chain {trace_idx} replay drift"
+        replayed_hash = _replay_and_hash(trace)
+        original_hash = canonical_hash(trace)
+        assert replayed_hash == original_hash, f"chain {trace_idx} replay drift"
     capabilities_exercised.add("audit-replay")  # cap 3
 
     assert capabilities_exercised == {
@@ -437,7 +525,7 @@ def test_two_canned_chains_exercise_all_five_capabilities(tmp_path) -> None:
     }
 ```
 
-**Falsifies if:** the canned chains underutilize the positioning doc's claims (e.g., kill switch idle, sys/now idle).
+**Falsifies if:** the canned chains underutilize the positioning doc's claims (kill switch ordering violated, sys/now idle, signing missing, replay drifts).
 
 ---
 
@@ -491,7 +579,7 @@ def test_two_canned_chains_exercise_all_five_capabilities(tmp_path) -> None:
 |---|---|---|
 | FD-MINTKEY-CLI doesn't exist; T0 needs scope addition or W3-rescope | Medium | T0 first action: `find src -name "mintkey*"` and `grep -r "mintkey" src/`. If missing: prefer 30-min inline ship in T1 over W3-rescope (the LD-4 prereqs text is binding). |
 | Emitter inadvertently introduces wall-clock or random — fails G1 | Low | Pure stdlib + no `time.time()` / `os.urandom` in emit functions. G1 directly falsifies. |
-| The 2 canned chains can't actually exercise all 5 capabilities in a single coder run | Low (verified) | Pause/resume is exposed as **Python API** on `_CoderSteeringSession` (`src/persistence/coder/_steering.py:61, 73`), NOT WS-only. The 2.3d test `tests/coder/test_steering_replay.py::test_pause_emits_repl_request_then_response_in_order` is the harness template — G5 reuses this pattern: start coder in a thread, call `session.pause()` after step 1, assert `:repl/request`, call `session.resume()`, assert `:repl/response`. WS REPL not required. |
+| The 2 canned chains can't actually exercise all 5 capabilities in a single coder run | Low (verified, R0-fold I1 + R0.1 fold reworded) | Pause/resume is exposed as **Python API** on `_CoderSteeringSession` (`src/persistence/coder/_steering.py:61, 73`), NOT WS-only. The 2.3d test `tests/coder/test_steering_replay.py::test_pause_emits_repl_request_then_response_in_order` proves a narrow contract: pause+resume emit `:repl/request` followed immediately by `:repl/response` on the audit chain with intact Merkle linkage. **G5 inherits exactly this 2-op contract** — it does NOT claim live thread coordination (loop-blocked-while-paused) and does NOT claim the 3-op `[:repl/request, :coder/branch, :repl/response]` pattern (which only fires when `branch()` is invoked per 2.3d's `test_branch_emits_repl_request_then_coder_branch_then_response`). Positioning doc § 4 (`positioning.md:78-80`) makes the same pause/resume claim. Real threaded pause-while-running is W3-rescoped if ever needed (substrate-level concern, not Phase 7's). |
 | Anthropic Skills marketplace publish process unknown / blocked at GA | Medium | Per skill-systems plan.md:128, manual publish in Phase 7. W3-1 (publishing tooling) is post-GA. Phase 7 just SHIPS the artifact + docs; marketplace push is downstream. |
 | Cross-track conductor STATUS append discipline | Low | Phase 7 belongs to `skill-systems-integration_20260430` track. Append-only at `~/Projects/conductor/tracks/skill-systems-integration_20260430/STATUS.md` post-ship. persistence-os-product STATUS gets a cross-reference only. |
 
@@ -510,4 +598,4 @@ def test_two_canned_chains_exercise_all_five_capabilities(tmp_path) -> None:
 
 ---
 
-*Design FROZEN pending ARIS R0 → R0-fold → R0.1 lite. 5/5 codex consensus flips on LDs (continued substrate-phase methodology). Estimated 5h actual on 4–6h budget. Phase 7 GA at v0.9.0a1 GA tag (target 2026-06-14).*
+*Design **FROZEN** at R0.2 PASS 8.3/8.1 (trajectory: R0 FAIL 7.6/7.1 → R0.1 PASS-WITH-FIXES 7.9/7.2 → R0.2 PASS 8.3/8.1). 5/5 codex consensus flips on LDs + 2 R0 design folds (kill-switch ordering + stdlib-only orphan) caught by ARIS iteration. Estimated 5h actual on 4–6h budget. Phase 7 GA at v0.9.0a1 GA tag (target 2026-06-14).*

@@ -1,0 +1,11 @@
+(:chain
+  :name "pause-resume-sysnow-demo"
+  :description "G5 cap-4 + cap-5 falsifier — pause/resume audit ordering + :sys/now read."
+  :steps [(:step :id 1
+                :op :sys/now
+                :args {}
+                :capability (:Capability :op "coder" :qualifier "read"))
+          (:step :id 2
+                :op :fs/read
+                :args {:path "input.md"}
+                :capability (:Capability :op "coder" :qualifier "read"))])

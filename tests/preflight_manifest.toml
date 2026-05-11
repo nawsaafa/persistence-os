@@ -1,0 +1,87 @@
+# tests/preflight_manifest.toml — v0.9.0a1 agent allowed-entrypoints contract
+#
+# This file is the SOURCE OF TRUTH for which curated SDK methods the
+# persistence-coder agent (and Phase 7 skill consumers) are allowed to
+# call. It is NOT auto-generated. Adding/removing/renaming an entry
+# requires an explicit edit + reviewer sign-off.
+#
+# Phase 2.4c LD-2 (codex consensus REJECT-FOR-NEW-OPTION-Z, 2026-05-11):
+# "Allowed entrypoints is policy, not reflection."
+
+# escape_callsites: paths in the agent loop that legitimately reach into
+# s.escape.*. v0.9.0a1 contract: MUST be empty. Any non-empty list is a
+# v0.9.x rescope, not a 2.4c addition. Declared as a top-level key
+# (TOML requires it BEFORE any [table] header).
+escape_callsites = []
+
+[meta]
+version = "0.9.0a1"
+authored = "2026-05-11"
+phase = "2.4c"
+
+# [allowed] — closed allowlist of curated SDK methods the agent calls.
+# Format: namespace.method = { note = "..." }
+#
+# Per R0-fold I1: stability tier fields REMOVED from this schema.
+# Cross-checking stability decorations against @stable/@experimental
+# decorators is a v0.9.x SDK5 spec-doc generator concern — not in 2.4c
+# scope. The G2 test verifies SUBSET-resolution only (each entry
+# exists + is callable + no escape.* entries).
+
+[allowed.fact]
+transact         = { note = "thin pass-through to DB.transact" }
+transact_batch   = { note = "thin pass-through to DB.transact_batch" }
+as_of            = {}
+as_of_valid      = {}
+history          = {}
+since            = {}
+
+[allowed.effect]
+perform          = {}
+is_well_formed   = {}
+install_handler  = { note = "Phase 2.1b — coder/__main__.py wires :llm/call handler here" }
+
+[allowed.txn]
+dosync           = {}
+new_ref          = {}
+ref              = {}
+fold             = {}
+fold_into        = {}
+fork             = {}
+
+[allowed.plan]
+parse            = {}
+unparse          = {}
+walk             = {}
+execute          = { note = "Phase 2.3a terminal mode-switch" }
+new_dispatcher   = {}
+edit_step        = {}
+insert_step_after = {}
+insert_step_before = {}
+delete_step      = { note = "downstream-execution check from Phase 2.0e #175" }
+optimize         = {}
+promote          = {}
+mcts_search      = { note = "Phase 2.3b terminal mode-switch" }
+judge            = { note = "Phase 2.0f curated Evaluator pass-through" }
+mcts_promote     = {}
+apply_action     = {}
+skill_library    = { note = "Phase 2.3c skill library accessor" }
+# Gate methods (gate_g1_*, gate_g2_*, gate_g3_*, gate_g4_*) are NOT in
+# the agent's allowed-set — verification surfaces, not action surfaces.
+# Omitted intentionally.
+# register_metric / unregister_metric / lookup_metric / register_coercion /
+# unregister_coercion / lookup_coercion are SDK extension hooks, not
+# agent surfaces. Omitted intentionally.
+
+[allowed.audit]
+verify_chain     = { note = "agent reads audit chain for post-hoc verification" }
+entries          = {}
+
+[allowed.replay]
+record           = {}
+replay           = {}
+compare          = {}
+
+# [allowed.repl] — REPL operator surface, NOT agent surface. Omitted.
+# [allowed.escape] — escape hatch, NOT agent surface. Omitted; escape_callsites = [] enforces this above.
+# [allowed.claim] — claim kinds module, NOT agent surface in v0.9.0a1. Omitted.

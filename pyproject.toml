@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "persistence"
-version = "0.8.5a1"
+version = "0.9.0a1"
 description = "Bitemporal, effect-typed, homoiconic cognitive runtime for accountable neurosymbolic agents."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,17 @@ dependencies = [
     # optional ``signer=`` parameter on make_audit_handler. Backwards
     # compatible: chains without signers continue to work unchanged.
     "cryptography>=42.0",
+    # Phase 2.4c F2 (codex consensus ACCEPT, 2026-05-11) — pydantic is
+    # used at module import time by persistence.claim._validate to
+    # define BaseModel schemas (_ToolExecAttrs, _BlobPutAttrs, etc.)
+    # and an import-time drift-guard assert. persistence.claim is a
+    # BASE substrate surface (reachable via persistence.sdk._facade._ClaimNamespace),
+    # so pydantic is not actually optional. G1 distribution smoke
+    # (tests/sdk/test_lockfile_distribution_smoke.py) surfaced the
+    # v0.8.5a1 packaging defect: bare wheel install crashed on
+    # `from pydantic import ...` at coder import time. Removed from
+    # [http] extras below to avoid duplicate spec.
+    "pydantic>=2.9,<3.0",
 ]
 
 [project.optional-dependencies]
@@ -48,7 +59,9 @@ dev = [
 http = [
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.32,<1.0",
-    "pydantic>=2.9,<3.0",
+    # NOTE: pydantic was promoted to BASE dependencies in Phase 2.4c
+    # (codex consensus F2 ACCEPT, 2026-05-11). Removed from here to
+    # avoid duplicate spec. fastapi imports pydantic transitively.
 ]
 
 [tool.setuptools.packages.find]

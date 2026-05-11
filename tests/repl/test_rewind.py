@@ -52,7 +52,7 @@ def _fixed_clock(t: datetime):
     return clock
 
 
-_DEFAULT_T = _dt(2026, 5, 9, 12, 0, 0)
+_DEFAULT_T = _dt(2099, 1, 1, 12, 0, 0)
 
 
 @pytest.fixture
@@ -435,7 +435,7 @@ class TestRewindCrossSessionIsolation:
             server, clock_fixed, token_id="token-id-aaaa1234"
         )
         # session_b uses a different clock so its session_id differs.
-        clock_b = _fixed_clock(_dt(2026, 5, 9, 13, 0, 0))
+        clock_b = _fixed_clock(_dt(2099, 1, 1, 13, 0, 0))
         session_b = _make_rewind_session(
             server, clock_b, token_id="token-id-bbbb5678"
         )
@@ -458,7 +458,7 @@ class TestRewindCrossSessionIsolation:
         session_a = _make_rewind_session(
             server, clock_fixed, token_id="token-id-aaaa1234"
         )
-        clock_b = _fixed_clock(_dt(2026, 5, 9, 13, 0, 0))
+        clock_b = _fixed_clock(_dt(2099, 1, 1, 13, 0, 0))
         session_b = _make_rewind_session(
             server, clock_b, token_id="token-id-bbbb5678"
         )

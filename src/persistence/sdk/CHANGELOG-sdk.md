@@ -1,5 +1,46 @@
 # persistence.sdk CHANGELOG
 
+## v0.9.0a1 (unreleased) — Phase 2.4c lockfile snapshot + preflight manifest
+
+Phase 2.4c freezes the v0.9.0a1 distribution surface. The curated
+SDK surface is now pinned by an explicit **policy artifact** —
+`tests/preflight_manifest.toml` — independent of the `_facade.py`
+namespace introspection. Adding/removing/renaming a curated method
+requires explicit manifest edit + reviewer sign-off; auto-generation
+would invert "lockfile" semantics into "snapshot of whatever currently
+exists."
+
+### Added
+
+- **`tests/preflight_manifest.toml`** — v0.9.0a1 agent allowed-entrypoints
+  contract. Closed allowlist of curated SDK methods the persistence-coder
+  agent (and Phase 7 skill consumers) are allowed to call. Schema:
+  `[meta]` (version + authored + phase) + top-level `escape_callsites = []`
+  + per-namespace `[allowed.fact]`, `[allowed.effect]`, `[allowed.txn]`,
+  `[allowed.plan]`, `[allowed.audit]`, `[allowed.replay]` tables with
+  `method = { note = "..." }` entries. `escape_callsites = []` is the
+  v0.9.0a1 contract: any non-empty list is a v0.9.x rescope, not a 2.4c
+  addition. Per LD-2 codex consensus (REJECT-FOR-NEW-OPTION-Z, 2026-05-11):
+  *"Allowed entrypoints is policy, not reflection."*
+
+- **`tests/sdk/test_preflight_manifest.py`** — G2 subset-resolution test
+  + escape-callsites empty assertion + anti-regression test that scans
+  the primary test body via `inspect.getsource` for snapshot-equality
+  patterns (R1-fold I1). 3 tests, all PASS.
+
+- **`tests/sdk/test_lockfile_distribution_smoke.py`** — G1 wheel-build
+  + fresh-venv install + coder CLI smoke (LD-1 codex consensus
+  NEW-OPTION-Z). Validates BOTH dev-env reproducibility (`uv lock --check`)
+  AND consumer-side install (`pip install dist/*.whl` in fresh venv).
+
+### Stability gates
+
+- The 24 curated `s.plan.*` methods (incl. `s.plan.judge` from 2.0f),
+  6 `s.fact.*`, 3 `s.effect.*`, 6 `s.txn.*` (incl. `fork` + `fold_into`),
+  2 `s.audit.*`, 3 `s.replay.*` are enumerated in the manifest. Future
+  v0.9.x SDK5 spec-doc generator will cross-check tier metadata against
+  `__sdk_stability__` decorations (FD-LD2-stability-coverage).
+
 ## v0.9.0a1 (unreleased) — Phase 2.0f `s.plan.judge` curated SDK method
 
 Phase 2.0f adds a curated invocation surface for the existing

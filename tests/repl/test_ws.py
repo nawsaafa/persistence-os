@@ -62,7 +62,7 @@ def _fixed_clock(t: datetime):
     return clock
 
 
-_DEFAULT_T = _dt(2026, 5, 9, 12, 0, 0)
+_DEFAULT_T = _dt(2099, 1, 1, 12, 0, 0)
 
 
 @pytest.fixture
@@ -282,8 +282,8 @@ class TestAuthHandshake:
         # Two auths on the same WS → second replaces first in the
         # active-sessions registry. Use distinct clocks so the two
         # sessions have distinct ids.
-        t0 = _dt(2026, 5, 9, 12, 0, 0)
-        t1 = _dt(2026, 5, 9, 13, 0, 0)
+        t0 = _dt(2099, 1, 1, 12, 0, 0)
+        t1 = _dt(2099, 1, 1, 13, 0, 0)
         clock_state = {"t": t0}
 
         def stepping_clock() -> datetime:

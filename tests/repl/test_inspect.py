@@ -49,7 +49,7 @@ def _fixed_clock(t: datetime):
     return clock
 
 
-_DEFAULT_T = _dt(2026, 5, 9, 12, 0, 0)
+_DEFAULT_T = _dt(2099, 1, 1, 12, 0, 0)
 
 
 @pytest.fixture
@@ -108,8 +108,8 @@ class TestInspectEntity:
         self, db, session_with_inspect
     ):
         # Seed at T0, snapshot the cursor at T1 (after T0) — entity present.
-        t0 = _dt(2026, 5, 9, 10, 0, 0)
-        t1 = _dt(2026, 5, 9, 11, 0, 0)
+        t0 = _dt(2099, 1, 1, 10, 0, 0)
+        t1 = _dt(2099, 1, 1, 11, 0, 0)
         db = _seed_entity(db, "e1", {"a": 1}, t0)
         result = await inspect_op(
             session_with_inspect,
@@ -171,9 +171,9 @@ class TestInspectEntity:
         self, db, session_with_inspect
     ):
         # Asserts at T0 + T2; cursor at T1 sees only T0.
-        t0 = _dt(2026, 5, 9, 10, 0, 0)
-        t1 = _dt(2026, 5, 9, 11, 0, 0)
-        t2 = _dt(2026, 5, 9, 12, 0, 0)
+        t0 = _dt(2099, 1, 1, 10, 0, 0)
+        t1 = _dt(2099, 1, 1, 11, 0, 0)
+        t2 = _dt(2099, 1, 1, 12, 0, 0)
         db = db.transact([{"e": "e1", "a": "a", "v": 1, "valid_from": t0}])
         # advance internal tx_time via a second transaction (DB clock
         # uses substrate's _clock, but tx_time is the "now" at transact
@@ -556,14 +556,14 @@ class TestCapabilityAndProtocol:
         # Session has a cursor at T_session; sub passes a different
         # cursor T_sub; resolved cursor MUST be T_sub (sub > session).
         cs = CapabilitySet(caps=frozenset({Capability("inspect", "read")}))
-        t_session = _dt(2026, 5, 9, 6, 0, 0)
+        t_session = _dt(2099, 1, 1, 6, 0, 0)
         sess = make_session("token-id-cccccccc", cs, runtime_clock=clock_fixed)
         import dataclasses
 
         sess = dataclasses.replace(
             sess, view_cursor_tx_time_iso=t_session.isoformat()
         )
-        t_sub = _dt(2026, 5, 9, 9, 0, 0)
+        t_sub = _dt(2099, 1, 1, 9, 0, 0)
         result = await inspect_op(
             sess,
             db,
@@ -580,7 +580,7 @@ class TestCapabilityAndProtocol:
         self, db, clock_fixed
     ):
         cs = CapabilitySet(caps=frozenset({Capability("inspect", "read")}))
-        t_session = _dt(2026, 5, 9, 6, 0, 0)
+        t_session = _dt(2099, 1, 1, 6, 0, 0)
         sess = make_session("token-id-dddddddd", cs, runtime_clock=clock_fixed)
         import dataclasses
 

@@ -55,7 +55,7 @@ def _fixed_clock(t: datetime):
     return clock
 
 
-_DEFAULT_T = _dt(2026, 5, 9, 12, 0, 0)
+_DEFAULT_T = _dt(2099, 1, 1, 12, 0, 0)
 
 
 @pytest.fixture

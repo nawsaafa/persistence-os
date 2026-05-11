@@ -63,8 +63,15 @@ def db() -> DB:
 
 @pytest.fixture
 def clock_fixed():
-    """Default fixed clock at 2026-05-09 12:00:00 UTC."""
-    return _fixed_clock(_dt(2026, 5, 9, 12, 0, 0))
+    """Default fixed clock at 2099-01-01 12:00:00 UTC.
+
+    Bumped from 2026-05-09 in Phase 2.4c T-probe-fix (LD-3 calendar
+    drift fix) — `db.transact` records `tx_time` from wall clock, so
+    the test fixture clock must stay ahead of wall clock to avoid
+    `db.as_of(test_clock)` filtering out fresh datoms. 2099 buys
+    73 years of runway; W3 rescope: substrate-level DB clock injection.
+    """
+    return _fixed_clock(_dt(2099, 1, 1, 12, 0, 0))
 
 
 # All capabilities for set-construction in tests.
@@ -244,7 +251,7 @@ class TestStoreAndValidate:
     def test_validate_after_store_returns_cap_set(self, db, clock_fixed):
         t = mint_token(
             caps=frozenset({Capability("inspect", "read")}),
-            expires_at=_dt(2027, 1, 1),
+            expires_at=_dt(2100, 1, 1),
             label="ops",
         )
         store_token(db, t, runtime_clock=clock_fixed)
@@ -252,7 +259,7 @@ class TestStoreAndValidate:
         assert cs is not None
         assert cs.has("inspect", "read")
         assert cs.label == "ops"
-        assert cs.expires_at == _dt(2027, 1, 1)
+        assert cs.expires_at == _dt(2100, 1, 1)
 
     def test_validate_unknown_token_returns_none(self, db, clock_fixed):
         cs = validate_token(
@@ -331,7 +338,7 @@ class TestStoreAndValidate:
         # Second revoke at a later clock (cardinality-one auto-retract
         # path through DB.transact would fail for retroactive corrections;
         # advancing the clock keeps valid_from monotonic).
-        later_clock = _fixed_clock(_dt(2026, 5, 9, 13, 0, 0))
+        later_clock = _fixed_clock(_dt(2099, 1, 1, 13, 0, 0))
         revoke_token(db, t.token_id, runtime_clock=later_clock)
         # And validate still rejects.
         cs = validate_token(db, t.token_str, runtime_clock=later_clock)
@@ -355,7 +362,7 @@ class TestSession:
         cs = CapabilitySet(
             caps=frozenset({Capability("inspect", "read")}),
         )
-        clock = _fixed_clock(_dt(2026, 5, 9, 12, 0, 0))
+        clock = _fixed_clock(_dt(2099, 1, 1, 12, 0, 0))
         s1 = make_session("token-id-xx-1234", cs, runtime_clock=clock)
         s2 = make_session("token-id-xx-1234", cs, runtime_clock=clock)
         assert s1.session_id == s2.session_id
@@ -363,7 +370,7 @@ class TestSession:
 
     def test_session_clock_returns_datetime(self):
         cs = CapabilitySet(caps=frozenset())
-        t = _dt(2026, 5, 9, 12, 0, 0)
+        t = _dt(2099, 1, 1, 12, 0, 0)
         clock = _fixed_clock(t)
         s = make_session("token-id-xx-5678", cs, runtime_clock=clock)
         assert callable(s.clock)
@@ -372,13 +379,13 @@ class TestSession:
 
     def test_session_parent_chain_depth_defaults_zero(self):
         cs = CapabilitySet(caps=frozenset())
-        clock = _fixed_clock(_dt(2026, 5, 9, 12, 0, 0))
+        clock = _fixed_clock(_dt(2099, 1, 1, 12, 0, 0))
         s = make_session("token-id-xx-aaaa", cs, runtime_clock=clock)
         assert s.parent_chain_depth == 0
 
     def test_session_view_cursors_default_none(self):
         cs = CapabilitySet(caps=frozenset())
-        clock = _fixed_clock(_dt(2026, 5, 9, 12, 0, 0))
+        clock = _fixed_clock(_dt(2099, 1, 1, 12, 0, 0))
         s = make_session("token-id-xx-bbbb", cs, runtime_clock=clock)
         assert s.view_cursor_tx_time_iso is None
         assert s.view_cursor_vt_iso is None
@@ -395,7 +402,7 @@ class TestListTokens:
     def test_single_token_visible_after_store(self, db, clock_fixed):
         t = mint_token(
             caps=frozenset({Capability("inspect", "read")}),
-            expires_at=_dt(2027, 1, 1),
+            expires_at=_dt(2100, 1, 1),
             label="ops",
         )
         store_token(db, t, runtime_clock=clock_fixed)
@@ -404,7 +411,7 @@ class TestListTokens:
         row = rows[0]
         assert row["token_id"] == t.token_id
         assert row["label"] == "ops"
-        assert row["expires_at_iso"] == _dt(2027, 1, 1).isoformat()
+        assert row["expires_at_iso"] == _dt(2100, 1, 1).isoformat()
         assert "inspect:read" in row["caps_summary"]
 
     def test_revoked_token_not_in_list_output(self, db, clock_fixed):

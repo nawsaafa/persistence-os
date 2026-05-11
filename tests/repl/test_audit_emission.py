@@ -60,7 +60,7 @@ def _dt(y: int, mo: int, d: int, h: int = 0, mi: int = 0, s: int = 0) -> datetim
     return datetime(y, mo, d, h, mi, s, tzinfo=timezone.utc)
 
 
-_DEFAULT_T = _dt(2026, 5, 9, 12, 0, 0)
+_DEFAULT_T = _dt(2099, 1, 1, 12, 0, 0)
 
 
 def _fixed_clock(t: datetime):

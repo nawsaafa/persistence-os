@@ -40,7 +40,18 @@ def _run(argv, env_extra: dict | None = None):
 
 
 def test_main_auto_no_providers_prints_echo_warning_and_exits_one():
-    """No ANTHROPIC_API_KEY, no claude-agent-sdk → echo floor + warning + exit 1."""
+    """No ANTHROPIC_API_KEY, no claude-agent-sdk → echo floor + warning +
+    LD-1 banner-mask + exit 1 (no raw traceback).
+
+    Phase 2.4b.1 LD-1 (codex consensus Option C): the echo handler can't
+    drive a real agent loop. Post-2.3b, the no-provider path eventually
+    raises ValueError from inside ``Coder.run()`` because echo's
+    deterministic ``{"text": "echo:..."}`` response falls through
+    ``_session._decide`` to a tier-3 fallback with no ``op`` field, and
+    ``_act()`` raises. ``__main__.main()`` narrow-masks this case
+    (guarded by ``provider_name == "echo"``) so the user sees a single-
+    line stderr banner instead of a raw Python traceback.
+    """
     # Skip if claude-agent-sdk is installed — auto would pick claude-code, not echo.
     # The subprocess inherits the venv's site-packages because sys.executable is
     # the venv's python; `claude_agent_sdk` is therefore importable in the child.
@@ -51,11 +62,23 @@ def test_main_auto_no_providers_prints_echo_warning_and_exits_one():
         pass
     result = _run(["--task", "t"])
     assert result.returncode == 1
+    # Pre-loop warnings from _build_substrate_and_handlers (__main__.py:166-170).
     assert "no LLM provider available" in result.stderr
     assert "echo handler" in result.stderr
-    # Phase 2.2a T4: _observe no longer stubs; _decide runs with echo handler;
-    # first stub hit is _should_escalate_branch → CLI banner-masks → exits 1.
-    assert "Phase 2.3b" in result.stderr
+    # Phase 2.4b.1 LD-1 narrow-mask banner — exact substrings per R0-fold I4
+    # (no "or similar" wording). If the banner message drifts, this fails.
+    assert (
+        "persistence-coder: echo handler can't drive a real agent loop"
+        in result.stderr
+    )
+    assert (
+        "Set ANTHROPIC_API_KEY or sign in to Claude Code, then re-run."
+        in result.stderr
+    )
+    # Narrow-mask guarantee — if the LD-1 ``except ValueError`` block is
+    # forgotten, this would re-leak the raw Python traceback that
+    # users saw pre-2.4b.1.
+    assert "Traceback (most recent call last):" not in result.stderr
 
 
 def test_main_explicit_anthropic_no_key_exits_with_error():

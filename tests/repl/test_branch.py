@@ -61,7 +61,7 @@ def _fixed_clock(t: datetime):
     return clock
 
 
-_DEFAULT_T = _dt(2026, 5, 9, 12, 0, 0)
+_DEFAULT_T = _dt(2099, 1, 1, 12, 0, 0)
 
 
 @pytest.fixture
@@ -490,7 +490,7 @@ class TestBranchDeterminism:
         session_a = _make_branch_session(
             server, clock_fixed, token_id="token-id-aaaaaaaa1"
         )
-        clock_b = _fixed_clock(_dt(2026, 5, 9, 13, 0, 0))
+        clock_b = _fixed_clock(_dt(2099, 1, 1, 13, 0, 0))
         session_b = _make_branch_session(
             server, clock_b, token_id="token-id-bbbbbbbb1"
         )
@@ -518,7 +518,7 @@ class TestBranchCrossSessionIsolation:
         session_a = _make_branch_session(
             server, clock_fixed, token_id="token-id-aaaaaaaa2"
         )
-        clock_b = _fixed_clock(_dt(2026, 5, 9, 13, 0, 0))
+        clock_b = _fixed_clock(_dt(2099, 1, 1, 13, 0, 0))
         session_b = _make_branch_session(
             server, clock_b, token_id="token-id-bbbbbbbb2"
         )
@@ -540,7 +540,7 @@ class TestBranchCrossSessionIsolation:
         session_a = _make_branch_session(
             server, clock_fixed, token_id="token-id-aaaaaaaa3"
         )
-        clock_b = _fixed_clock(_dt(2026, 5, 9, 13, 0, 0))
+        clock_b = _fixed_clock(_dt(2099, 1, 1, 13, 0, 0))
         session_b = _make_branch_session(
             server, clock_b, token_id="token-id-bbbbbbbb3"
         )

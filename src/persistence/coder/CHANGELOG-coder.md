@@ -1,5 +1,108 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.4b.1 — 2026-05-11 (CLI smoke-UX cleanup + test-harness alignment)
+
+Small bridge phase between 2.4b and 2.4c lockfile. Closes 4 pre-existing test-harness failures surfaced during 2.4b verification so the test suite is trustworthy before lockfile freezes the MVP for `v0.9.0a1` distribution. The public alpha now exits cleanly (single-line stderr message + non-zero return code) when invoked without a real LLM provider — no raw Python traceback.
+
+**Why these 4 specific failures:** all confirmed pre-existing on `daf1170` (2.4a merge) AND `d50739f` (2.3d merge). Two phases of codex Impl R1 reviews missed them because narrower verification scopes were used during impl. Per `auto-memory/feedback_search_blindspot_action_dirs.md`'s precedent, broader sweep added to the 2.4c verification checklist.
+
+### Changed
+
+- **`_build_substrate_and_handlers(args)`** at `__main__.py:124-199` signature changed from `-> Substrate` to `-> tuple[Substrate, str]`. Now returns `(substrate, provider_name)` so `main()` can guard the LD-1 banner-mask on `provider_name == "echo"` (R0-fold B2 plumbing). 5 test callsites in scope updated:
+  - `tests/coder/test_cli_wiring.py` × 2
+  - `tests/effect/test_audit_signer_env.py` × 3
+
+  Each updated to `substrate, _ = _build_substrate_and_handlers(args)` (tests don't care about provider_name in their assertion paths).
+
+- **`main()`** at `__main__.py:202-249` rewritten with valid nested Python try-blocks (R0-fold B1) + pre-bound `provider_name: str | None = None` (R0-fold I1) + narrow `except ValueError` block guarded by `if provider_name == "echo"`. Structure:
+  ```python
+  provider_name: str | None = None
+  try:
+      substrate, provider_name = _build_substrate_and_handlers(args)
+      try:
+          Coder(...).run()
+      finally:
+          substrate.close()
+  except CoderStubNotImplemented as exc:
+      print(f"persistence-coder skeleton: {exc}", file=sys.stderr)
+      return 1
+  except ValueError as exc:
+      if provider_name == "echo":
+          print(
+              "persistence-coder: echo handler can't drive a real "
+              "agent loop. Set ANTHROPIC_API_KEY or sign in to Claude "
+              "Code, then re-run.",
+              file=sys.stderr,
+          )
+          return 1
+      raise
+  return 0
+  ```
+
+  Codex Impl R1 verdict on the mask: "structurally correct: ValueErrors from substrate construction remain unmasked because unpacking never completes (`provider_name` stays `None`)." Edge: ValueErrors raised during `substrate.close()` in echo mode would still be banner-masked — documented as FD-LD1-mask-region-scope known limit; transitively closed by v0.9.x message-match tightening.
+
+### Tests changed
+
+- **`tests/coder/test_cli_smoke.py::test_cli_runs_skeleton_and_emits_banner_on_first_stub`** rewritten. Drops stale `"persistence-coder skeleton"`, `"Phase 2.3b"`, `"s.plan.mcts_search"` assertions. Adds exact-substring banner check (`"persistence-coder: echo handler can't drive a real agent loop"`) + no-traceback check (`"Traceback (most recent call last):" not in stderr`). R0-fold I4: no "or similar" wording.
+
+- **`tests/coder/test_main_provider_install.py::test_main_auto_no_providers_prints_echo_warning_and_exits_one`** parallel rewrite — same shape as test_cli_smoke. Drops stale `"Phase 2.3b"` assertion. Asserts the new LD-1 banner + no-traceback.
+
+- **`tests/coder/test_main_provider_install.py::test_non_echo_value_error_propagates_raw_traceback`** (NEW G2 regression guard). In-process unit test (NOT subprocess) using `unittest.mock`-style monkey-patching: replaces `detect_or_explicit` with `_fake_non_echo_detect` returning a callable handler labeled `"anthropic"`, replaces `Coder` with `_ValueErrorCoderStub` whose `.run()` raises ValueError. Asserts `pytest.raises(ValueError)` (the mask does NOT swallow non-echo ValueErrors).
+
+  T1 manual probe: widen the mask (remove the `if provider_name == "echo":` guard, keep print + return 1). G2 FAILS with `DID NOT RAISE <class 'ValueError'>` + captured stderr shows echo banner inappropriately firing under `"using anthropic provider"` line. Restore → SHA-256 byte-identity verified. Proves the guard IS narrow.
+
+- **`tests/http/test_main_smoke.py::test_main_hermetic_subprocess`** gained explicit `PYTHONPATH = str(repo_root / "src")` in subprocess env (LD-2.b alignment with established pattern from `test_cli_smoke.py:20-22` + `test_main_provider_install.py:16-22`). Falsifiability probe: revert → `ModuleNotFoundError: No module named 'persistence'` reappears → restore → SHA-256 verified.
+
+- **`tests/coder/test_main_provider_install.py:106-108`** stale comment cleaned (Codex Impl R1 I1 fold). Replaced "Coder.run() will raise CoderStubNotImplemented on _observe before any real call" (post-2.3b stale framing) with accurate description of the fake API key + provider note path.
+
+### Test gates G1-G4
+
+- **G1** narrow banner-mask + exit-non-zero (LD-1): both smoke tests PASS. T1 + T4 manual probes confirm falsifiability: delete except-block → traceback re-leaks → assertion fails; SHA-256 restoration verified.
+- **G2** non-echo ValueError must NOT be banner-masked (LD-1 regression guard, NEW): in-process unit test PASSES. T1 manual probe confirms the guard IS load-bearing: widen mask → DID NOT RAISE → test fails.
+- **G3** shell allowlist version bump (LD-2.a): 2 previously-failing shell tests PASS. T2 manual probe → revert python3.X stems → `ShellAllowlistDenied(stem='python3.14')` → restore → SHA-256 verified.
+- **G4** PYTHONPATH alignment (LD-2.b): test_main_hermetic_subprocess PASSES. T3 manual probe → revert PYTHONPATH → `ModuleNotFoundError` → restore → SHA-256 verified.
+
+### Test counts (broad sweep, NO deselects)
+
+| Stage | PASS | xfailed | Failed |
+|---|---:|---:|---:|
+| Baseline (2.4b merge `0d32cb9`, with 4 known pre-existing failures) | ~860 | 2 | 4 |
+| T1 (G1 smoke + G2 NEW + helper plumbing) | 797 | 2 | 3 |
+| T2 (allowlist python3.X) | 799 | 2 | 1 |
+| T3 (PYTHONPATH alignment) | 864 | 3 | 1 |
+| T4 (smoke assertion cleanup) | **865** | **3** | **0** |
+
+865 / 6 skipped / 0 deselected / 3 xfailed (the 3 xfailed are: 2.4b's G5 site-6 W3 marker + 2.4b's G2 regression guard slot + 1 pre-existing `tests/http/test_auth.py` xfail).
+
+Full tree sweep at T4 ship: 2697 passed / 22 failed (all in `tests/plan/` + `tests/repl/` queued families, pre-existing) / 10 xfailed.
+
+### ARIS journey
+
+| Stage | Verdict | Mean / Min |
+|---|---|---|
+| Design R0 (codex) | FAIL | 8.11 / 7.4 |
+| R0-fold (controller, inline) | 2B+4I+2N closed/queued | — |
+| Design R0.1 lite | PASS | **8.29 / 7.8** |
+| Codex Impl R1 | PASS-WITH-FIXES | **8.29 / 7.7** |
+| T9.1 fold (controller, inline) | 2I closed | — |
+
+### Subagent pattern (11th use, hybrid)
+
+Persistent `impl-2.4b.1` for T1-T4 via SendMessage + controller-direct T0 + T9.1. Clean across all 4 hand-offs. Subagent surfaced 2 critical catches:
+
+1. **Cascade plumbing**: helper signature change rippled to 5 test callsites that subagent updated preemptively (test_cli_wiring × 2, test_audit_signer_env × 3). Receipts step had identified these directly but the LD-1 sketch didn't enumerate them — subagent's `grep -rn _build_substrate_and_handlers` caught the cascade.
+2. **G2 shape choice**: in-process unit test (direct `main()` call) rather than subprocess. Subagent's reasoning: G2 targets the except-clause logic, not subprocess behavior. The `_fake_non_echo_detect` returns a non-None callable handler labeled `"anthropic"` (NOT `(None, "anthropic")`) — `(None, ...)` would route to echo via `make_echo_llm_handler` in the helper, defeating G2's non-echo invariant.
+
+### W3 rescopes queued (3)
+
+- **2.4c verification checklist** — broader `tests/` sweep to surface `tests/plan/` (dspy-dep subprocess: 5 failures) + `tests/repl/` (token-validation/inspect-entity/ws-auth handshake/ws-audit-window: 17 failures) families. Investigate as part of 2.4c pre-lockfile audit. Also: the transient `test_coder_loop_audit_replay_byte_identity` flake observed once at T4 (passed on 2 reruns + standalone) — test-ordering nondeterminism worth root-causing before lockfile.
+- **v0.9.x principled Python-version-allowlist policy** — see CHANGELOG-effect.md for shape options.
+- **v0.9.x — tighten echo-mode ValueError mask to message-match** (`"malformed act payload" in str(exc)`). Closes both the FD-LD1-mask-message-narrowness and FD-LD1-mask-region-scope acknowledged limits. Acceptance signal: a test that raises a non-"malformed act payload" ValueError in echo mode and asserts the traceback DOES propagate.
+
+### Calendar
+
+~3.5h actual vs 3.5h budgeted. 1-phase-per-day cadence preserved (sub-1 calendar day, mid-session bridge phase between 2.4b ship and 2.4c kickoff).
+
 ## Phase 2.4b — 2026-05-11 (`:sys/now` wiring + provenance-site migration)
 
 Phase 2.4b lands `:sys/now` (substrate-time op — see

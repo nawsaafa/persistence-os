@@ -103,8 +103,10 @@ def test_main_provider_stderr_note_for_anthropic_when_key_present():
         ["--task", "t", "--provider", "anthropic"],
         env_extra={"ANTHROPIC_API_KEY": "sk-ant-fake-no-real-call"},
     )
-    # Coder.run() will raise CoderStubNotImplemented on _observe before any
-    # real call, so we just check the stderr provider note was printed.
+    # The fake API key triggers a downstream error in the anthropic provider
+    # before any real network call; the test only checks the stderr provider
+    # note printed at __main__.py:173 (path taken when provider_name != "echo").
+    # Codex Impl R1 I1 fold: prior comment was post-2.3b stale framing.
     assert "using anthropic provider" in result.stderr
 
 

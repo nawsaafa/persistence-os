@@ -135,7 +135,250 @@ for future readers.
 - `828aed1` T-probe-fix: calendar drift (18 REPL failures closed)
 - `53c3701` T9.1 R1-fold (3I closed inline)
 
-### Added — `persistence.coder` (Phase 2.1a)
+### Phase 2.4b.1 — CLI smoke-UX cleanup + test-harness alignment (2026-05-11)
+
+Small bridge phase between 2.4b and 2.4c. Closes 4 pre-existing test-harness
+failures surfaced during 2.4b verification so the test suite is trustworthy
+before lockfile freezes the MVP for `v0.9.0a1` distribution. Public alpha now
+exits cleanly (single-line stderr message + non-zero return code) when invoked
+without a real LLM provider — no raw Python traceback.
+
+- **LD-1 (codex consensus NEW-OPTION):** narrow banner-mask scoped to
+  `provider_name == "echo"` — non-echo `ValueError`s still propagate with full
+  traceback (G2 regression guard test in `tests/coder/test_main_provider_install.py`).
+- **LD-2 (codex consensus NEW-OPTION, 3 sub-decisions):** (a) shell allowlist
+  version bump for python3.X stems via `_PY_VERSION_STEMS` tuple in
+  `src/persistence/effect/handlers/shell.py`; (b) explicit `PYTHONPATH` env
+  alignment in `tests/http/test_main_smoke.py` subprocess invocation; (c)
+  smoke test assertion cleanup — drop stale `"Phase 2.3b"` / `"s.plan.mcts_search"`
+  strings.
+
+ARIS: Design R0 FAIL 8.11/7.4 → R0-fold (2B+4I+2N) → R0.1 lite PASS 8.29/7.8
+→ Codex Impl R1 PASS-WITH-FIXES 8.29/7.7. Calendar ~3.5h actual vs 3.5h budget.
+
+Merge `2269ad2`. Per-module receipts: `src/persistence/coder/CHANGELOG-coder.md`
++ `src/persistence/effect/CHANGELOG-effect.md`.
+
+### Phase 2.4b — `:sys/now` substrate-time op + 5-site provenance migration (2026-05-11)
+
+Adds `:sys/now` as a thin view over `:clock/now` — the substrate-level
+canonical-time op all `dosync`-frozen contexts route through. Migrates 5
+wall-clock provenance sites in `src/persistence/coder/_steering.py` to source
+time through `:sys/now`, removing 5 `# noqa: wall-clock — routes through
+:sys/now in 2.4a` exemption promises overdue by one phase. Closes the
+2.4a LD-3 W3 rescope.
+
+- **LD-1 (codex consensus FLIPPED to NEW-OPTION):** view-op handler (NOT
+  wrapped-op) — `:sys/now` is a `position="bottom"` view installed in
+  `canonical_audit_stack`. No audit entry per call (it's a view, not a
+  side-effecting op).
+- **LD-2 / LD-3 / LD-4:** wiring sites + replay-clock symmetry test + 5
+  provenance migrations with AST-level grep ban on raw `datetime.now()` in
+  steering body (`tests/effect/test_no_raw_datetime_now.py`).
+
+ARIS: Design R0 PASS-WITH-FIXES → R0.1 lite PASS → Codex Impl R1
+PASS-WITH-FIXES 8.12/7.6. Both LDs codex-consensus FLIPPED (1st phase in
+a row of "codex names a better option than the controller").
+
+Merge `0d32cb9`. Per-module receipts: `src/persistence/effect/CHANGELOG-effect.md`
+(handler) + `src/persistence/coder/CHANGELOG-coder.md` (wiring).
+
+### Phase 2.4a — Production CLI wiring + env-keyed Ed25519 signer plumbing (2026-05-09/10)
+
+FIRST harden-track phase of Phase 2. Closes 4 queued rescopes (2.3c.1 +
+2.3c.2 + 2.3d + vertical-data-corpus LD-9). Wires the skill handler at CLI
+bootstrap; plumbs env-keyed Ed25519 signers (Phase B contribution) through
+`Substrate.open(audit_signer=...)` to the audit middleware.
+
+- **LD-1:** skill handler installed BEFORE provider in `_build_substrate_and_handlers`
+  per `install_handler` idempotent-on-name contract (`sdk/_facade.py:143-166`).
+- **LD-2 (FD-collapsed):** recursion budget assertion test; no runtime change
+  (already wired in 2.3c.2's `canonical_audit_stack` + `Coder.run`
+  dispatcher_context binding).
+- **LD-3 (W3-rescoped to 2.4b):** `Transaction.now()` → `:sys/now` migration —
+  xfail-strict marker with explicit "DECORATOR MUST BE REMOVED in 2.4b" reason.
+- **LD-4:** env-keyed Ed25519 signer two-layer kwarg passthrough.
+  `PERSISTENCE_AUDIT_KEY=file:///path/to/key.pem` RFC 8089 three-slash URI;
+  `signer_id = "ed25519:" + sha256(pem)[:16]`; unknown URI scheme → `SystemExit`.
+
+ARIS: Design R0 PASS-WITH-FIXES 7.19/6.0 → R0-fold (5B+3I+1N) → R0.1 lite
+PASS 8.46/7.8 — matches 2.3a quality (DESIGN FROZEN). Codex Impl R1 PASS
+**8.48/7.6** ("Merge-ready"). 4 test gates G1-G4; 8 FDs; 7 W3 rescopes queued.
+Calendar ~5.0h actual vs 5.25h budget; sub-1 day.
+
+Merge `daf1170`. Per-module receipts: `src/persistence/sdk/CHANGELOG-sdk.md`
++ `src/persistence/coder/CHANGELOG-coder.md` + `src/persistence/effect/CHANGELOG-effect.md`.
+
+### Phase 2.3d — REPL Steering Integration: `_CoderSteeringSession` 7-op live debugger (2026-05-09)
+
+Live-steering interface to a running `Coder` via the REPL. Seven ops on
+`_CoderSteeringSession`: pause / resume / snapshot / branch / commit / fold
+/ status. `:repl/request` + `:repl/response` ops added to the canonical
+audit chain so steering interactions are signed and replayable.
+
+- **LD-1 (codex consensus-locked):** branch via `db.branch()` (NOT a new
+  `:steering/branch` op). The branch IS the audit anchor — `branch_id` from
+  `db.branch()` flows into snapshot pointer swaps.
+- **LD-2 through LD-7:** snapshot + context_at with `branch_id` kwarg;
+  `fold(probe)` parent inclusion; commit(branch_id) pointer swap; capability
+  gating via `Capability(op="coder", qualifier=...)`.
+
+ARIS: Design R0 → R0-fold → R1 → R1.1 lite. 7 test gates G1-G6 + capability
+denial. Audit chain has 2 new ops on the canonical audit-wrapped set.
+
+Merge `d50739f`. Per-module receipts: `src/persistence/coder/CHANGELOG-coder.md`
+(session) + `src/persistence/effect/CHANGELOG-effect.md` (audit ops).
+
+### Phase 2.3c.2 — `:llm/call` recursion + `ComposeWithSkillAction` proposal acceptance (2026-05-08)
+
+Adds canonical recursion through `:llm/call` so a skill-compose proposal
+can itself trigger further LLM calls within the same audit chain. `AuditEntry`
+gains `parent_audit_entry_id` field for chain-hash drift tracking.
+
+Merge `54dca57`. Per-module receipts: `src/persistence/effect/CHANGELOG-effect.md`
+Phase 2.3c.2 T2 entry (lines 99+).
+
+### Phase 2.3c.1 — Skill library coder integration: `:skill/define` + `:skill/lookup` audit-anchored ops (2026-05-07)
+
+Lands skill-library substrate ops. `:skill/define` content-addresses an
+AST subtree and emits a signed audit entry; `:skill/lookup` retrieves by
+hash. Both ops audit-anchored so skill provenance is replay-recoverable.
+
+Merge `0fbbecd`. Per-module receipts: `src/persistence/coder/CHANGELOG-coder.md`
++ `src/persistence/effect/CHANGELOG-effect.md`.
+
+### Phase 2.3b — MCTS branch escalation: `_escalate_branch` wired to `_searcher._escalate_branch_body` (2026-05-07)
+
+Wires the coder's `_escalate_branch` decision path to the MCTS searcher
+(from v0.6.5 Module 3.X). 7 LDs locked + 7 test gates. The coder can now
+trigger MCTS exploration when single-path planning hits a low-confidence
+boundary.
+
+Merge `d0dd51c`. Per-module receipts: `src/persistence/coder/CHANGELOG-coder.md`
+Phase 2.3b (lines 1756+).
+
+### Phase 2.3a — Plan AST escalation: `_escalate_plan` wired to `_planner._escalate_plan_body` (2026-05-06)
+
+Wires the coder's `_escalate_plan` decision path to the planner. 7 LDs
+locked + 6 test gates. Companion to 2.3b — 2.3a handles plan-level
+escalation (re-plan from scratch); 2.3b handles branch-level escalation
+(MCTS search within current plan).
+
+Merge `98a9df5`. Per-module receipts: `src/persistence/coder/CHANGELOG-coder.md`
+Phase 2.3a (lines 1998+).
+
+### Phase 2.2b — `:code/run` + `:git/*` thin-wrapper-over-`:shell/exec` quartet + LD3 `build_messages` widening (2026-05-06)
+
+Adds `:code/run` (new op name, NOT shared with legacy `:code/exec`) for
+the coder's code-execution path with substantive-return wrapper handler.
+Adds `:git/*` ops as thin wrappers over `:shell/exec` (NOT a parallel
+git handler — codex Q2 verdict). LD3: `build_messages` (`_prompt.py`)
+widened with explicit "Latest action output" section so the LLM sees
+non-truncated `:code/run` + `:git/*` results.
+
+- **LD-1 (codex Q1, 2 passes):** new op `:code/run`, legacy `:code/exec`
+  untouched. Replay byte-identity holds within ONE path, not across paths.
+- **LD-2 (codex Q2):** thin wrapper over `:shell/exec`. Defense-in-depth
+  in the wrapper, NOT a parallel handler.
+- **LD-3 (codex Q3, after receipts):** `build_messages` widening with
+  "Latest action output" section + list-shape collapsing for `:fs/glob`-style
+  results.
+
+3 codex consensus rounds (all converged in 1-2 passes). Validates the
+consensus-driven-architecture-decision skill on substrate-level work.
+
+Merge `d005bbd`. Per-module receipts: `src/persistence/effect/CHANGELOG-effect.md`
+Phase 2.2b (lines 200+) + `src/persistence/coder/CHANGELOG-coder.md` Phase 2.2b
+(lines 2190+).
+
+### Phase 2.2a — `:fs/*` + `:shell/exec` handler factories + canonical audit op extension (2026-05-05)
+
+`_observe` + `_act` substrate I/O paths land. Adds `make_fs_handler` and
+`make_shell_handler` to `persistence.effect.handlers`; extends
+`CANONICAL_AUDIT_WRAPPED_OPS` to include the new ops. `_observe` reads
+substrate state via `:fs/glob` + `:fs/read`; `_act` writes via
+`:fs/write` and shells out via `:shell/exec`.
+
+First use of `subagent-driven-development` for substrate-level work.
+
+Merge `4e8eeaf`. Per-module receipts: `src/persistence/effect/CHANGELOG-effect.md`
+Phase 2.2a (lines 338+) + `src/persistence/coder/CHANGELOG-coder.md` Phase 2.2a
+(lines 2314+).
+
+### Phase 2.1c.6 — Audit chain wiring for claim emits + blob puts (2026-05-05)
+
+Wires `:claim/emit` + `:blob/put` into the canonical audit chain. Closes
+the last gap in audit coverage before Phase 2.2 effect handlers land —
+every claim emission and every blob CAS write now produces a signed,
+replayable audit entry.
+
+Merge `557c5f6`. Per-module receipts: `src/persistence/effect/CHANGELOG-effect.md`
+Phase 2.1c.6 (lines 422+).
+
+### Phase 2.1c — Context substrate endpoints: HTTP `:claim/*` + `:blob/*` surface (2026-05-04)
+
+Lands `persistence.claim` module (10th module under `persistence.*`).
+`:claim/emit` HTTP route at `src/persistence/http/routes/claim.py:94-193`
+(281 LOC) — 4-phase handler shape: size gate → parse → fact-write →
+audit-perform. `:blob/put` + `:blob/get` HTTP routes for content-addressed
+blob storage. `CLAIM_KINDS` registry + `validate_attrs` dispatch for
+extensible claim validation.
+
+Merge `d8431f3`. Per-module receipts: `src/persistence/claim/CHANGELOG-claim.md`
++ `src/persistence/http/CHANGELOG-http.md`.
+
+### Phase 2.1b — `_decide` body + first `:llm/*` datoms (2026-05-03)
+
+Fills the `_decide` method of `Coder` (which raised `CoderStubNotImplemented`
+in 2.1a). Adds `:llm/messages` and `:llm/decision` datoms — the FIRST
+substrate-level datoms emitted by the coder during a run. `LLMDecision`
+value-shape lands its fields.
+
+Merge `dac29ed`. Per-module receipts: `src/persistence/coder/CHANGELOG-coder.md`
+Phase 2.1b (lines 2468+).
+
+### Phase 2.0f — `s.plan.judge` curated SDK method (Bhatt principle 5)
+
+Substrate-completion mini-phase landing the `s.plan.judge` curated SDK
+method per Bhatt principle 5 (separation of generation and evaluation).
+Adds top-level `judge()` function in `persistence.plan` + `_PlanNamespace.judge`
+in the curated facade.
+
+Commits `9b181f1` + `29b1da6` + `0c54e25`. Per-module receipts:
+`src/persistence/sdk/CHANGELOG-sdk.md` Phase 2.0f (lines 59+) +
+`src/persistence/plan/CHANGELOG-plan.md`.
+
+### Phase 2.0e — `Transaction.completed_step_ids` + `delete_step` downstream-check (#175)
+
+Substrate-completion mini-phase adding `Transaction.completed_step_ids`
+field and `delete_step` downstream-execution check. Closes substrate-backlog
+issue #175 — necessary substrate-side prereq before Phase 2.4c lockfile
+snapshot.
+
+Commits `a3267c2` + `35a730f` + `22ae403`. Per-module receipts:
+`CHANGELOG-txn.md` + `src/persistence/plan/CHANGELOG-plan.md`.
+
+### Phase B — Ed25519 signing on the audit chain (Mimir Phase B → persistence-os)
+
+Adds Ed25519 signing of `AuditEntry` records — substrate-level support for
+agent-vs-human identity per the v0.9.0a1 positioning § 1. Velocity-memory:
+8-10h estimate → 2.5h actual.
+
+`make_audit_handler(signer: tuple[str, bytes] | None = None)` accepts a
+signer tuple `(signer_id, ed25519_private_key_pem_bytes)`; if `None`, audit
+entries remain unsigned (dev mode, `unset PERSISTENCE_AUDIT_KEY`). Audit
+entries gain `signer_id` + `signature` fields. `verify_chain` validates
+both the prev_hash chain AND each entry's signature against the recorded
+`signer_id`.
+
+Phase B-demo screencast (`docs/examples/audit-tamper.md`) demonstrates
+tamper detection: flip one byte in an audit entry; `verify_chain` returns
+`SIGNATURE_INVALID` at the exact entry index.
+
+Commits `0455294` (signing) + `91d8518` / `1df1248` (readme) + `f809aa2`
+(demo). Per-module receipts: `src/persistence/effect/CHANGELOG-effect.md`.
+
+### Phase 2.1a — `persistence.coder` skeleton (2026-05-03)
 
 - **`persistence.coder` package** (`src/persistence/coder/`). 9th
   module under `persistence.*`; FIRST consumer-side module (imports

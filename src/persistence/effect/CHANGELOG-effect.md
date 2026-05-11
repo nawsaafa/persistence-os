@@ -2,6 +2,18 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## Phase 2.4c — 2026-05-11 (lockfile snapshot for v0.9.0a1 distribution)
+
+Final harden-track phase before `v0.9.0a1` GA tag. **No `:effect/*` op
+changes.** The v0.9.0a1 lockfile snapshot freezes the effect-handler
+surface; the `canonical_audit_stack` composition `[raw, clock, sys_now,
+audit, dispatcher]` from Phase 2.4b is the v0.9.0a1 contract shape.
+
+The new `tests/preflight_manifest.toml` (LD-2) enumerates the agent's
+allowed `[allowed.effect]` surface: `perform`, `is_well_formed`,
+`install_handler`. All three remain on the curated `s.effect.*`
+namespace at `_facade.py:116-167`.
+
 ## Phase 2.4b.1 — 2026-05-11 (Shell allowlist version bump for python3.X stems)
 
 Small bridge phase between 2.4b and 2.4c lockfile. LD-2.a (codex consensus Scope B) bumps the shell allowlist to support Python 3.X interpreters whose `sys.executable` basename includes the minor-version suffix.

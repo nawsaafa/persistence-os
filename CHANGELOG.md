@@ -8,6 +8,112 @@ All notable changes to Persistence OS are tracked here. Versions follow
 Phase 2 of the persistence-coder product roadmap. First agents
 built ON the v0.8.5a1 substrate.
 
+### Phase 2.4c — Lockfile snapshot for v0.9.0a1 distribution (2026-05-11)
+
+Final harden-track phase before the `v0.9.0a1` GA tag. Three locked
+decisions, all codex-consensus REJECT-FOR-NEW-OPTION (3/3 controller
+proposals flipped):
+
+- **LD-1 (codex consensus NEW-OPTION-Z): Wheel-build + fresh-venv install + coder CLI smoke.**
+  `pyproject.toml` version bumped `0.8.5a1 → 0.9.0a1`. `uv.lock` regenerated
+  with FD-version-bump-side-effects audit (no top-level dep drift on
+  `edn_format`, `pyrsistent`, `cryptography`). New `tests/sdk/test_lockfile_distribution_smoke.py`
+  G1 test exercises `uv lock --check` (dev-env reproducibility) + `uv build`
+  + fresh-venv `pip install dist/*.whl` (consumer-side install — two
+  separate contracts) + `python -m persistence.coder --task hello` with
+  banner-mask + no-traceback invariants. R0-fold B3b: HTTP smoke is NOT
+  in base G1 — `persistence.http` requires `[http]` extras; sister
+  test G1[http] is a W3 rescope. G1 is POSIX-only (`bin/python`,
+  `bin/pip`); Windows is out of scope per internal-alpha posture (codex
+  R1 I4 noted, intentional).
+
+- **LD-2 (codex consensus NEW-OPTION-Z): Hand-authored preflight manifest.**
+  `tests/preflight_manifest.toml` introduces the v0.9.0a1 agent
+  allowed-entrypoints contract — a closed allowlist of curated SDK
+  methods the persistence-coder agent (and Phase 7 skill consumers)
+  are allowed to call. Per LD-2 codex decider: *"Allowed entrypoints
+  is policy, not reflection."* The manifest is hand-authored
+  source-of-truth (NOT auto-generated from `_facade.py` introspection).
+  Adding/removing/renaming a curated method requires explicit manifest
+  edit + reviewer sign-off. G2 test `tests/sdk/test_preflight_manifest.py`
+  verifies subset-resolution against `Substrate.open(...)` namespace
+  surface (3 tests: subset-resolution + escape-callsites-empty +
+  anti-snapshot-regression). R0-fold I1: stability tier fields removed
+  from manifest schema entirely (cross-check is future SDK5 generator
+  concern). R1-fold I1: anti-regression test now a REAL runtime check
+  via `inspect.getsource` scan for snapshot-equality patterns
+  (replacing original no-op `pass`).
+
+- **LD-3 (codex consensus NEW-OPTION-D → SINGLE-ROOT calendar drift):**
+  T-probe found that 18 `tests/repl/` failures were NOT a 2.3d
+  Capability-extension regression. Single root cause: test fixture
+  calendar drift. `_DEFAULT_T = _dt(2026, 5, 9, 12, 0, 0)` had become
+  past relative to wall clock (2026-05-11+), and `db.transact` records
+  `tx_time` from wall clock while `db.as_of(test_clock)` filters by
+  `tx_time <= query_time` → fresh datoms filtered out. Fix shifted
+  fixture timeline `_dt(2026, 5, 9, ...) → _dt(2099, 1, 1, ...)`
+  across 8 REPL test files; 2 expires_at sites in `test_caps.py`
+  bumped `2027 → 2100`. The 4 `tests/plan/` failures in the original
+  baseline were a Python-3.14-env-specific artifact (dspy isolation
+  harness drift in 3.14 only); in the proper uv-managed Python 3.12
+  venv, `tests/plan/` has 0 failures.
+
+#### Unplanned fixes surfaced by G1 distribution smoke
+
+- **F1**: `uv.lock` had been gitignored in commit `b4a3afc` (leftover
+  dev-hygiene oversight). Removed from `.gitignore`; lockfile is now
+  tracked. Phase 2.4c is literally the lockfile-snapshot phase — the
+  gitignore contradicted the phase intent.
+- **F2 (codex consensus ACCEPT)**: `pydantic>=2.9,<3.0` was only in
+  `[project.optional-dependencies] http`, but `persistence.claim._validate`
+  imports pydantic at module init to define `BaseModel` schemas and
+  `persistence.claim` is on the base import path of `_facade._ClaimNamespace`.
+  G1's fresh-venv test surfaced a v0.8.5a1 distribution defect:
+  `python -m persistence.coder --task hello` crashed with
+  `ModuleNotFoundError: No module named 'pydantic'`. Local dev hid it
+  via `[dev]` extras pulling pydantic transitively. Pydantic promoted
+  to base `[project] dependencies`; removed from `[http]` (fastapi
+  pulls it transitively anyway).
+
+#### ARIS journey
+
+- Design R0 (codex high): **FAIL 7.29/7.0** → R0-fold (3B + 3I + 2N closed)
+- Design R0.1 lite (codex high): **PASS-WITH-FIXES 8.1/7.6** → DESIGN FROZEN
+- Codex Impl R1: **PASS-WITH-FIXES 8.4/7.5** → R1-fold (3I closed inline; I4 + N1 + N2 documentation-only)
+
+#### Downstream tracks unblocked
+
+- Phase 7 `persistence-orchestrate` Anthropic Skill (ADR-004 in
+  `skill-systems-integration_20260430`).
+- `persistence-os-decision-ops_20260511` (v0.10.x, blocked by both
+  2.4c lockfile AND v0.9.0a1 GA tag — 2.4c side now unblocked).
+- `mimir-debate-skill_20260511` (second-order via decision-ops).
+- `agent-stack-first-class_20260512` (partial — full unblock requires
+  v0.9.0a1 PyPI publish, a separate v0.9.x post-tag track).
+
+#### N1 impl-log addendum
+
+Design doc § LD-1 references test name `test_built_wheel_installs_and_runs_dual_cli`,
+but the actual impl uses `test_built_wheel_installs_and_runs_coder_cli` after
+R0-fold B3b dropped HTTP smoke from base G1. The design doc is FROZEN
+(no edits post-R0.1); this addendum records the impl name divergence
+for future readers.
+
+#### Commits
+
+- `a5bb2da` T0 design doc
+- `f4992c7` R0-fold (3B+3I+2N)
+- `ffc1f91` R0.1 lite PASS — DESIGN FROZEN
+- `00859dd` Impl plan
+- `27617d5` T1A G1 wheel-build smoke scaffold
+- `5a4b232` T0.5 F1: un-gitignore uv.lock
+- `683d7e3` T0.6 F2: pydantic → base deps (codex consensus ACCEPT)
+- `c16a8a5` T1B G1 PASS: version bump 0.8.5a1→0.9.0a1
+- `d1a26d3` T2 LD-2 manifest + G2
+- `6be1d4f` T2.1 doc-fix (TOML escape_callsites order)
+- `828aed1` T-probe-fix: calendar drift (18 REPL failures closed)
+- `53c3701` T9.1 R1-fold (3I closed inline)
+
 ### Added — `persistence.coder` (Phase 2.1a)
 
 - **`persistence.coder` package** (`src/persistence/coder/`). 9th

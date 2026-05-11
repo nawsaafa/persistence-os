@@ -1,5 +1,26 @@
 # persistence.coder CHANGELOG
 
+## Phase 2.4c — 2026-05-11 (lockfile snapshot for v0.9.0a1 distribution)
+
+Final harden-track phase before `v0.9.0a1` GA tag. **No `Coder` loop
+changes.** The `python -m persistence.coder --task hello` entry-point
+is now exercised against a built-wheel fresh-venv install per G1
+(`tests/sdk/test_lockfile_distribution_smoke.py`), validating:
+
+1. `uv lock --check` (dev-env reproducibility).
+2. `uv build` produces `persistence-0.9.0a1-py3-none-any.whl`.
+3. Fresh venv `pip install dist/*.whl` (consumer-side install).
+4. `python -m persistence.coder --task hello` exits 1 with the
+   2.4b.1 echo-mode banner-mask + no traceback.
+
+**Unplanned fix surfaced by G1** (codex consensus F2 ACCEPT):
+`pydantic>=2.9,<3.0` was missing from base `[project] dependencies`.
+The `coder → sdk._facade → claim._validate → pydantic` import chain
+crashes on fresh-venv install. Pydantic promoted to base; the
+v0.8.5a1 wheel was also broken — local dev hid it via `[dev]` extras.
+Listing in this changelog because the import chain originates in
+`persistence.coder` consumers.
+
 ## Phase 2.4b.1 — 2026-05-11 (CLI smoke-UX cleanup + test-harness alignment)
 
 Small bridge phase between 2.4b and 2.4c lockfile. Closes 4 pre-existing test-harness failures surfaced during 2.4b verification so the test suite is trustworthy before lockfile freezes the MVP for `v0.9.0a1` distribution. The public alpha now exits cleanly (single-line stderr message + non-zero return code) when invoked without a real LLM provider — no raw Python traceback.

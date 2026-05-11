@@ -32,7 +32,10 @@ def test_chain_parses_to_edn_ast_and_roundtrips() -> None:
     assert len(chain.steps) == 1
     assert chain.steps[0].id == 1
     assert chain.steps[0].op == ":fs/read"
-    assert chain.steps[0].args == {":path": "input.md"}
+    # args dict keys are BARE strings (no leading colon) to match the
+    # codebase's s.effect.perform convention (e.g. {"model": ..., "messages": ...}
+    # in test_audit_signer_env.py:131).
+    assert chain.steps[0].args == {"path": "input.md"}
     assert chain.steps[0].capability == StepCapability(op="coder", qualifier="read")
 
     # Roundtrip: serialize → parse equals original

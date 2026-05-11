@@ -183,13 +183,19 @@ def _parse_step(raw: Any) -> Step:
     else:
         raise ChainSchemaError(f":op must be a keyword or string; got {type(op_raw).__name__}")
 
-    # Normalize args (dict with keyword keys → dict with string keys ":path")
+    # Normalize args (EDN keyword keys → BARE string keys, no leading colon).
+    # T1 follow-up: existing s.effect.perform handlers (`:fs/read`, `:llm/call`,
+    # `:claim/emit`) consume args dicts with bare-string keys (e.g.
+    # `{"model": ..., "messages": ...}` in test_audit_signer_env.py:131 +
+    # `{"e": ..., "a": ..., "v": ...}` in test_audit_replay_byte_identity.py).
+    # The op is `:`-prefixed but the args keys are NOT. Schema convention
+    # must match perform convention so the emitted orchestrate.py works.
     args: dict[str, Any] = {}
     if args_kw in src:
         for k, v in src[args_kw].items():
             if isinstance(k, edn_format.Keyword):
                 k_str = str(k)
-                key_str = k_str if k_str.startswith(":") else ":" + k_str
+                key_str = k_str[1:] if k_str.startswith(":") else k_str
             else:
                 key_str = str(k)
             args[key_str] = v
@@ -236,10 +242,11 @@ def _serialize_step(step: Step) -> str:
         args_parts = []
         for k in sorted(step.args.keys()):  # sorted for determinism
             v = step.args[k]
+            # args dict has bare-string keys; emit EDN keyword form `:key`
             if isinstance(v, str):
-                args_parts.append(f'{k} "{_escape(v)}"')
+                args_parts.append(f':{k} "{_escape(v)}"')
             else:
-                args_parts.append(f"{k} {v}")
+                args_parts.append(f":{k} {v}")
         parts.append("  :args {" + " ".join(args_parts) + "}")
 
     if step.capability is not None:

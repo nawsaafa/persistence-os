@@ -1,5 +1,20 @@
 # persistence.sdk CHANGELOG
 
+## v0.9.0a1 (unreleased) — Phase 7 Capability re-export (2026-05-11)
+
+Phase 7 (`persistence-orchestrate` Anthropic Skill) adds `Capability` and
+`CapabilitySet` to the curated SDK surface as re-exports from
+`persistence.repl._caps` (the v0.7.0a1 closed-set ADT). Closes codex Impl R1
+I1 finding — Phase 7's emitted orchestrator skills now import via the stable
+`from persistence.sdk import Capability` rather than a private module path.
+
+The re-export forced a substrate-side companion fix: `persistence.repl` now
+lazy-imports `WSServer` via PEP 562 `__getattr__` so the package is
+importable in fresh wheel installs without aiohttp (preserves the 2.4c G1
+`test_built_wheel_installs_and_runs_coder_cli` smoke). See
+`src/persistence/orchestrate/CHANGELOG-orchestrate.md` for the full Phase 7
+receipt.
+
 ## v0.9.0a1 (unreleased) — Phase 2.4c lockfile snapshot + preflight manifest
 
 Phase 2.4c freezes the v0.9.0a1 distribution surface. The curated

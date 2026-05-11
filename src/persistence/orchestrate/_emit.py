@@ -162,9 +162,9 @@ from persistence.sdk import Capability, Substrate
 
 
 def _install_orchestrate_handlers(substrate: Substrate) -> None:
-    """Install the two handlers the runner needs end-to-end.
+    """Install the three handlers the runner needs end-to-end.
 
-    Substrate-truth rewrite (R1-fold B2 + B3):
+    Substrate-truth rewrite (R1-fold B2 + B3; N1 docstring-count fix in R1.2):
 
     - ``raw-echo`` at ``position="bottom"`` → terminator for
       ``:llm/call``. ``Substrate.open`` does NOT install an LLM
@@ -173,12 +173,16 @@ def _install_orchestrate_handlers(substrate: Substrate) -> None:
       and raise. ``make_echo_llm_handler`` is the substrate-truth
       bottom handler used in tests and demos.
 
+    - ``orchestrate-term-capability-denied`` at ``position="bottom"`` →
+      no-op terminator scoped narrowly to ``:capability/denied`` (the
+      orchestrator's own signaling op). NOT a wildcard masking
+      terminator (R1-fold B3 explicit fix); arbitrary missing ops
+      still surface as raises through the canonical stack.
+
     - ``orchestrate-audit-capability-denied`` at ``position="top"`` →
-      audit middleware wrapping ``:capability/denied`` (the
-      orchestrator's own signaling op; NOT in
-      ``CANONICAL_AUDIT_WRAPPED_OPS``). Reuses the canonical audit
-      stack's signer so denial entries are signed identically to
-      substrate-native entries.
+      audit middleware wrapping ``:capability/denied``. Reuses the
+      canonical audit stack's signer so denial entries are signed
+      identically to substrate-native entries.
 
     Idempotent — ``install_handler`` replaces by ``name``.
     """

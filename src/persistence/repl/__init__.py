@@ -75,8 +75,34 @@ from ._protocol import (
     make_response,
     parse_request,
 )
+from typing import TYPE_CHECKING
+
 from ._session import Session, _derive_session_id, make_session
-from ._ws import WSServer
+
+if TYPE_CHECKING:
+    # Static-analyzer surface for the lazy WSServer attribute below.
+    from ._ws import WSServer as WSServer
+
+# Phase 7 (2026-05-11): WSServer is lazy-imported via PEP 562 __getattr__
+# below. Eager `from ._ws import WSServer` here pulled aiohttp at module-import
+# time, which broke the 2.4c wheel-distribution smoke (tests/sdk/
+# test_lockfile_distribution_smoke.py::test_built_wheel_installs_and_runs_coder_cli)
+# once Phase 7 made the Capability surface reachable via persistence.sdk:
+# any consumer of `persistence.sdk import Capability` triggered this package's
+# __init__.py, which required aiohttp in fresh-venv installs. Lazy import keeps
+# the existing `persistence.repl.WSServer` API working unchanged while making
+# the package importable without aiohttp.
+#
+# Verified: `python -c "from persistence.repl import Capability"` works without
+# aiohttp; `from persistence.repl import WSServer` still works when aiohttp is
+# present; AttributeError raised on unknown attributes.
+
+
+def __getattr__(name: str):
+    if name == "WSServer":
+        from ._ws import WSServer as _WSServer
+        return _WSServer
+    raise AttributeError(f"module 'persistence.repl' has no attribute {name!r}")
 
 __all__ = [
     "ALL_CAPS",

@@ -12,10 +12,15 @@ method an implicit allowlist expansion — the inverse of "lockfile."
 from __future__ import annotations
 
 import sys
-import tomllib
 from pathlib import Path
 
-import pytest
+# R1-fold I2: requires-python is >=3.10 but tomllib is stdlib 3.11+.
+# Fall back to the tomli backport on 3.10 so test collection doesn't
+# hard-crash on supported Python versions.
+if sys.version_info >= (3, 11):
+    import tomllib
+else:  # pragma: no cover — Python 3.10 fallback path
+    import tomli as tomllib  # type: ignore[import-not-found,no-redef]
 
 from persistence.sdk._facade import Substrate
 
@@ -75,25 +80,39 @@ def test_escape_callsites_remain_empty():
     )
 
 
-def test_no_byte_equality_upgrade_attempt():
-    """G2 anti-regression — assert the test SHAPE remains subset-check,
-    not byte-equality (codex consensus LD-2 decider: 'allowed entrypoints
-    is policy, not reflection'). If someone "fixes" this by adding a
-    byte-equality assertion that auto-generates from _facade, the new
-    assertion will fail because _FactNamespace methods are undecorated.
+def test_subset_check_shape_not_byte_equality():
+    """G2 anti-regression (R1-fold I1, was test_no_byte_equality_upgrade_attempt
+    which was a no-op `pass`) — scans the body of the primary G2 test
+    for byte-equality / set-equality auto-snapshot patterns, codifying
+    the LD-2 codex-consensus decider: 'allowed entrypoints is policy,
+    not reflection.' If someone 'fixes' G2 by auto-generating from
+    `_facade.py` and asserting `manifest == introspected`, this
+    assertion catches the source-level drift.
 
-    This test passes vacuously today; it documents the design intent.
-    The regression vector is a code-review check, not a runtime check.
+    Falsifier: replace the body of test_manifest_is_closed_allowlist_and_resolves
+    with `assert set(manifest['allowed'].keys()) == {n for n in dir(s) ...}` →
+    this test FAILS because the target test source now contains the
+    equality pattern.
     """
-    pass
-
-
-def test_tomllib_available():
-    """Sanity — tomllib is stdlib since Python 3.11. requires-python is
-    >=3.10 (pyproject.toml). Verify tomllib is importable at runtime;
-    if Python is 3.10, fall back to tomli (not currently in deps —
-    G2 effectively requires Python 3.11+ at test time).
-    """
-    if sys.version_info < (3, 11):
-        pytest.skip("tomllib requires Python 3.11+; install `tomli` for 3.10 support")
-    assert tomllib is not None
+    import inspect
+    target_source = inspect.getsource(test_manifest_is_closed_allowlist_and_resolves)
+    # Patterns that indicate a byte/set-equality snapshot of the [allowed]
+    # surface (the forbidden anti-pattern). Scalar comparisons on
+    # manifest["meta"]["..."] are NOT snapshot patterns and stay allowed.
+    eq = chr(61) + chr(61)  # "==" via char-codes to avoid self-reference
+    forbidden_patterns = [
+        "[\"allowed\"] " + eq,    # manifest["allowed"] ==
+        "['allowed'] " + eq,      # manifest['allowed'] ==
+        "set(manifest",           # set(manifest...) snapshot
+        "set(dir(",               # set(dir(s)) introspection-equality
+        "getattr_set",            # rename heuristic — auto-gen helper
+    ]
+    for line in target_source.splitlines():
+        for pattern in forbidden_patterns:
+            if pattern in line:
+                raise AssertionError(
+                    f"LD-2 anti-regression: snapshot-equality pattern "
+                    f"{pattern!r} found in target test body. Manifest is "
+                    f"POLICY not REFLECTION — use subset-check via getattr "
+                    f"instead. Offending line: {line.strip()!r}"
+                )

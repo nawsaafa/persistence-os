@@ -63,7 +63,14 @@ def db() -> DB:
 
 @pytest.fixture
 def clock_fixed():
-    """Default fixed clock at 2026-05-09 12:00:00 UTC."""
+    """Default fixed clock at 2099-01-01 12:00:00 UTC.
+
+    Bumped from 2026-05-09 in Phase 2.4c T-probe-fix (LD-3 calendar
+    drift fix) — `db.transact` records `tx_time` from wall clock, so
+    the test fixture clock must stay ahead of wall clock to avoid
+    `db.as_of(test_clock)` filtering out fresh datoms. 2099 buys
+    73 years of runway; W3 rescope: substrate-level DB clock injection.
+    """
     return _fixed_clock(_dt(2099, 1, 1, 12, 0, 0))
 
 

@@ -87,6 +87,7 @@ from persistence.plan import (
     SubstituteLeafAction,
     TrainingExample,
 )
+from persistence.repl._caps import Capability, CapabilitySet
 from persistence.sdk import mcp  # SDK3: first-party MCP server sub-package
 from persistence.sdk._facade import Substrate
 from persistence.sdk._fold_into import (
@@ -107,6 +108,8 @@ __all__ = [
     "Action",
     "AddStepAction",
     "BackendNotInstalled",
+    "Capability",
+    "CapabilitySet",
     "ComposeWithSkillAction",
     "Evaluator",
     "ExecutionResult",

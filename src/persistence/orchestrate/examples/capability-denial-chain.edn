@@ -1,0 +1,11 @@
+(:chain
+  :name "capability-denial-demo"
+  :description "G3 LD-1 falsifier — step 2 denied at capability gate"
+  :steps [(:step :id 1
+                :op :llm/call
+                :args {:model "echo" :messages [{:role "user" :content "step1"}]}
+                :capability (:Capability :op "coder" :qualifier "read"))
+          (:step :id 2
+                :op :llm/call
+                :args {:model "echo" :messages [{:role "user" :content "step2"}]}
+                :capability (:Capability :op "coder" :qualifier "write"))])

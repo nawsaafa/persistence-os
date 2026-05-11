@@ -1,0 +1,8 @@
+{
+  "name": "persistence-orchestrate",
+  "version": "0.9.0a1",
+  "description": "Emit installable Anthropic Skill orchestrators that run on the persistence-os substrate.",
+  "substrate": "persistence-os>=0.9.0a1",
+  "license": "AGPL-3.0-or-later",
+  "author": "Nawfal Saadi"
+}

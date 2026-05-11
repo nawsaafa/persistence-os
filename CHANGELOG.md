@@ -8,6 +8,27 @@ All notable changes to Persistence OS are tracked here. Versions follow
 Phase 2 of the persistence-coder product roadmap. First agents
 built ON the v0.8.5a1 substrate.
 
+### Phase 7 — `persistence-orchestrate` Anthropic Skill (2026-05-11)
+
+First release of the `persistence.orchestrate` meta-skill — the substrate's
+invocation surface for orchestrator-driven agents per `CLAUDE.md:65-66`.
+Given a chain description in EDN, emits a 4-file installable downstream
+orchestrator skill on top of the curated SDK facade.
+
+Full per-module receipt at `src/persistence/orchestrate/CHANGELOG-orchestrate.md`.
+
+4 LDs locked via codex consensus (5-for-5 flips this phase). ARIS trajectory:
+Design R0 FAIL 7.6/7.1 → R0.2 PASS 8.3/8.1 → Impl R1 FAIL 6.6/5.4
+(substrate-truth issues with non-canonical view-op handler + terminator
+masking + replay-test vacuity) → R1-fold substrate-truth rewrite → R1.2
+lite **PASS 8.3/7.8**. All 5 test gates G1-G5 pass.
+
+Substrate-side effects (downstream of I1 codex finding): `Capability` +
+`CapabilitySet` re-exported from `persistence.sdk`; `WSServer` lazy-imported
+via PEP 562 in `persistence.repl/__init__.py` to keep the 2.4c wheel-
+distribution smoke (`tests/sdk/test_lockfile_distribution_smoke.py::test_built_wheel_installs_and_runs_coder_cli`)
+passing without aiohttp.
+
 ### Phase 2.4c — Lockfile snapshot for v0.9.0a1 distribution (2026-05-11)
 
 Final harden-track phase before the `v0.9.0a1` GA tag. Three locked

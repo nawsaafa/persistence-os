@@ -60,7 +60,9 @@ bench/.datasets/
 # Authoritative records live in conductor STATUS + design docs + git log.
 review-stage/
 build/
-uv.lock
+# uv.lock is TRACKED — Phase 2.4c lockfile snapshot for v0.9.0a1
+# distribution requires the lockfile to be in source control so
+# downstream consumers + Phase 7 skill consumers can pin against it.
 *.egg-info/
 __pycache__/
 .pytest_cache/

@@ -13,7 +13,15 @@ from persistence.effect.runtime import Handler
 ALLOWLIST_V1: frozenset[str] = frozenset({
     "ls", "cat", "echo", "head", "tail", "wc",
     "grep", "find", "git",
-    "python", "python3", "uv", "pip", "pytest",
+    "python", "python3",
+    # Phase 2.4b.1 LD-2.a (codex consensus Scope B): explicit Python-version
+    # stems for current + recent CPython releases. macOS Homebrew and
+    # most CI envs expose sys.executable as `python3.<minor>` whose
+    # basename must hit the allowlist or :shell/exec denies it. The
+    # ALLOWLIST_VERSION bump is the documented observable signal per
+    # shell.py:73-77's stable-API contract.
+    "python3.10", "python3.11", "python3.12", "python3.13", "python3.14",
+    "uv", "pip", "pytest",
 })
 
 ENV_DEFAULT: frozenset[str] = frozenset({

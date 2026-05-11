@@ -121,7 +121,9 @@ def _load_audit_signer_from_env() -> tuple[str, bytes] | None:
     return (signer_id, raw_priv)
 
 
-def _build_substrate_and_handlers(args: argparse.Namespace) -> Substrate:
+def _build_substrate_and_handlers(
+    args: argparse.Namespace,
+) -> tuple[Substrate, str]:
     """Open the substrate and install effect handlers per the CLI args.
 
     Phase 2.4a T1 LD-1: extracts the substrate-build path from
@@ -196,19 +198,27 @@ def _build_substrate_and_handlers(args: argparse.Namespace) -> Substrate:
     else:
         substrate.effect.install_handler(handler, position="bottom")
 
-    return substrate
+    return substrate, provider_name
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    # Phase 2.4b.1 LD-1 (R0-fold I1): pre-bind so the except ValueError
+    # below can safely reference provider_name even if
+    # _build_substrate_and_handlers itself raises ValueError before the
+    # unpacking succeeds. In that case provider_name stays None → mask
+    # check is False → re-raise (substrate-construction ValueErrors are
+    # real programmer errors and must propagate).
+    provider_name: str | None = None
+
     # Provider detection happens BEFORE substrate open inside the helper
     # so explicit-provider errors short-circuit cleanly without opening
     # a DB. (Helper internalizes both the provider stderr banner and the
     # URI/in-memory stderr banner for parity with the pre-T1 inline path.)
     try:
-        substrate = _build_substrate_and_handlers(args)
+        substrate, provider_name = _build_substrate_and_handlers(args)
         try:
             Coder(
                 task=args.task,
@@ -221,6 +231,21 @@ def main(argv: list[str] | None = None) -> int:
     except CoderStubNotImplemented as exc:
         print(f"persistence-coder skeleton: {exc}", file=sys.stderr)
         return 1
+    except ValueError:
+        # Phase 2.4b.1 LD-1 (codex consensus Option C, R0-fold I1):
+        # narrow banner-mask. Only swallow ValueError when echo handler
+        # is in use (no real LLM provider). Other ValueErrors are real
+        # programmer errors and must propagate. Substrate-construction
+        # ValueErrors → provider_name stays None → falls through to raise.
+        if provider_name == "echo":
+            print(
+                "persistence-coder: echo handler can't drive a real "
+                "agent loop. Set ANTHROPIC_API_KEY or sign in to Claude "
+                "Code, then re-run.",
+                file=sys.stderr,
+            )
+            return 1
+        raise
     return 0
 
 

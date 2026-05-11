@@ -132,7 +132,7 @@ def test_main_installs_skill_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
     args = _make_args()
-    substrate = _build_substrate_and_handlers(args)
+    substrate, _ = _build_substrate_and_handlers(args)
     try:
         with pytest.raises(SkillNotFound):
             substrate.effect.perform(
@@ -204,7 +204,7 @@ def test_cli_run_enforces_recursion_budget(
     )
 
     args = _make_args()
-    substrate = _build_substrate_and_handlers(args)
+    substrate, _ = _build_substrate_and_handlers(args)
     try:
         # Sanity-check the bound MAX value the test was designed against.
         # If the default changes, the recursion target below must follow.

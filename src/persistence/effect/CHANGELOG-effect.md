@@ -2,6 +2,27 @@
 
 All notable changes to Module 2 (`persistence.effect`) are recorded here.
 
+## Phase 2.4b.1 — 2026-05-11 (Shell allowlist version bump for python3.X stems)
+
+Small bridge phase between 2.4b and 2.4c lockfile. LD-2.a (codex consensus Scope B) bumps the shell allowlist to support Python 3.X interpreters whose `sys.executable` basename includes the minor-version suffix.
+
+### Changed
+
+- **`ALLOWLIST_V1`** at `handlers/shell.py:13-24` extended with `python3.10`, `python3.11`, `python3.12`, `python3.13`, `python3.14`. `ALLOWLIST_VERSION` auto-recomputes from the sorted set via `_allowlist_version()` at `shell.py:30`. Hash transition: `49b438b72c9da104` → `22c861da4bc65902`.
+- The bump IS the explicit observable signal per `shell.py:73-77`'s stable-API contract (`env_allowlist_subset=[]` + `timeout_s=30.0` defaults treated as observable; allowlist-content changes are versioned). Callers that pin to `ALLOWLIST_VERSION` import it dynamically — no hard-coded-hash surface in the test suite. Grep-verified at T2 ship.
+
+### Acceptance signal
+
+- `tests/effect/handlers/test_shell_handler.py::test_shell_exec_env_passthrough_only_allowlisted` and `::test_shell_exec_timeout_kills_process` now PASS on dev boxes where `sys.executable` resolves to `python3.14`. Both tests use `argv[0] = sys.executable` and the basename match against `ALLOWLIST_V1`.
+
+### Falsifiability spot-check
+
+Revert python3.X additions → both tests FAIL with `ShellAllowlistDenied: stem='python3.14' not in allowlist (version 49b438b72c9da104)` → restore → SHA-256 byte-identity verified.
+
+### W3 rescope queued
+
+v0.9.x — principled Python-version-allowlist policy. Rather than enumerating versions explicitly, consider a stem-prefix match (`python3.\d+`) or runtime-derived stem (`os.path.basename(sys.executable)` at allowlist-build time). Out of scope for 2.4b.1 — explicit enumeration is the simplest fix today.
+
 ## Phase 2.4b — 2026-05-11 (`:sys/now` substrate-time op via thin view over `:clock/now`)
 
 Phase 2.4b lands the `:sys/now` substrate-time op — the W3 rescope from

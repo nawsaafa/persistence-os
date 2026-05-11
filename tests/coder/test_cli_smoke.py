@@ -1,10 +1,11 @@
-"""Phase 2.1a — subprocess-driven CLI smoke tests.
+"""Phase 2.1a / 2.4b.1 — subprocess-driven CLI smoke tests.
 
-Per design § 5.1. Verifies the externally observable invocation
-surface (`python -m persistence.coder`):
+Verifies the externally observable invocation surface
+(`python -m persistence.coder`):
 
-- Exit code 1 on first stub raise (CoderStubNotImplemented).
-- Stderr banner contains "persistence-coder skeleton: Phase 2.2a".
+- Phase 2.4b.1 LD-1 G1: no-provider invocation exits non-zero with a
+  single-line stderr banner and NO raw Python traceback. The banner
+  substring is exact-match (R0-fold I4 — no "or similar" wording).
 - `--db-path` omission emits in-memory warning to stderr.
 - `--task` is required by argparse.
 """
@@ -37,6 +38,19 @@ _SKIP_REASON = (
 
 @pytest.mark.skipif(_CLAUDE_CODE_AVAILABLE, reason=_SKIP_REASON)
 def test_cli_runs_skeleton_and_emits_banner_on_first_stub() -> None:
+    """Phase 2.4b.1 LD-1 G1 — narrow banner-mask in echo mode.
+
+    With no provider available, the auto-detect path falls through to the
+    echo handler. Echo's deterministic ``{"text": "echo:..."}`` response
+    cannot drive a real agent loop, so ``Coder.run()`` eventually raises
+    ``ValueError``. LD-1 narrows the banner-mask to ``provider_name ==
+    "echo"`` so this case exits 1 with a single-line stderr message
+    instead of a raw Python traceback (which is what users saw pre-2.4b.1).
+
+    Falsifier (manual probe): delete the ``except ValueError`` block in
+    ``__main__.py`` → the traceback re-appears → the
+    ``"Traceback ... not in stderr"`` assertion fails.
+    """
     result = subprocess.run(
         [sys.executable, "-m", "persistence.coder", "--task", "hello"],
         capture_output=True,
@@ -46,10 +60,21 @@ def test_cli_runs_skeleton_and_emits_banner_on_first_stub() -> None:
         cwd=str(REPO_ROOT),
     )
     assert result.returncode == 1
-    assert "persistence-coder skeleton" in result.stderr
-    # Phase 2.2a T6: _should_escalate_* filled; first stub hit is _escalate_branch.
-    assert "Phase 2.3b" in result.stderr
-    assert "s.plan.mcts_search" in result.stderr
+    # G1 core invariant: no raw Python traceback in stderr.
+    assert "Traceback (most recent call last):" not in result.stderr
+    # G1 exact banner substring (R0-fold I4 — no "or similar" wording).
+    assert (
+        "persistence-coder: echo handler can't drive a real agent loop"
+        in result.stderr
+    )
+    assert (
+        "Set ANTHROPIC_API_KEY or sign in to Claude Code, then re-run."
+        in result.stderr
+    )
+    # Pre-loop warnings from _build_substrate_and_handlers must still print.
+    assert "warning: no --db-path" in result.stderr
+    assert "warning: no LLM provider available" in result.stderr
+    assert "echo handler" in result.stderr
 
 
 @pytest.mark.skipif(_CLAUDE_CODE_AVAILABLE, reason=_SKIP_REASON)

@@ -12,6 +12,31 @@ license = { text = "AGPL-3.0-or-later" }
 authors = [
     { name = "Nawfal Saadi", email = "saadinawfal@gmail.com" }
 ]
+keywords = [
+    "substrate",
+    "agent",
+    "audit",
+    "persistence",
+    "bitemporal",
+    "homoiconic",
+    "neurosymbolic",
+    "ed25519",
+    "datom",
+    "replay",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "edn_format>=0.7.5",
     "pyrsistent>=0.20",
@@ -63,6 +88,12 @@ http = [
     # (codex consensus F2 ACCEPT, 2026-05-11). Removed from here to
     # avoid duplicate spec. fastapi imports pydantic transitively.
 ]
+
+[project.urls]
+Homepage = "https://github.com/nawsaafa/persistence-os"
+Repository = "https://github.com/nawsaafa/persistence-os"
+Issues = "https://github.com/nawsaafa/persistence-os/issues"
+Changelog = "https://github.com/nawsaafa/persistence-os/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["src"]

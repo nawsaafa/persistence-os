@@ -47,12 +47,20 @@ def test_main_module_invokes_uvicorn_with_proxy_headers_disabled(monkeypatch):
 
 def test_main_hermetic_subprocess(tmp_path):
     """Hermetic CLI smoke (F1 lesson from Phase 2.1a): pass env= and cwd=,
-    don't rely on inherited PYTHONPATH=src."""
+    don't rely on inherited PYTHONPATH=src.
+
+    Phase 2.4b.1 LD-2.b: cwd=tmp_path moves the child Python's cwd
+    OFF the repo root, so the implicit "cwd-in-sys.path" path is lost
+    and ``-m persistence.http`` cannot import. Set PYTHONPATH explicitly,
+    mirroring tests/coder/test_cli_smoke.py:20-22 + test_main_provider_install.py:16-22.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
     env = {
         **os.environ,
         "PERSISTENCE_API_KEY": "x",
         "PERSISTENCE_BLOB_ROOT": str(tmp_path / "blobs"),
         "PERSISTENCE_HTTP_PORT": "47999",  # avoid collision
+        "PYTHONPATH": str(repo_root / "src"),
     }
     # Quick sanity: --help should exit 0
     result = subprocess.run(
